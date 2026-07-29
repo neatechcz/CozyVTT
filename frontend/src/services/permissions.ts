@@ -2,7 +2,48 @@
  * Permission Utilities
  */
 
-import type { User, Character, CampaignMembership } from '../types';
+import { PlatformRole } from '../types';
+import type {
+  User,
+  Character,
+  Campaign,
+  CampaignMembership,
+} from '../types';
+
+export function isCampaignDm(campaign: Campaign, userId: string): boolean {
+  return (
+    campaign.memberships?.some(
+      (membership) =>
+        membership.userId === userId && membership.role === 'DM',
+    ) ?? false
+  );
+}
+
+export function canManageDmRoles(campaign: Campaign, user: User): boolean {
+  return (
+    user.platformRole === PlatformRole.ADMIN || campaign.ownerId === user.id
+  );
+}
+
+export function canDeleteCampaign(campaign: Campaign, user: User): boolean {
+  return canManageDmRoles(campaign, user);
+}
+
+export function canRemoveCampaignMember(
+  campaign: Campaign,
+  user: User,
+  membership: CampaignMembership,
+): boolean {
+  if (membership.userId === campaign.ownerId) {
+    return false;
+  }
+
+  if (membership.role === 'DM') {
+    return canManageDmRoles(campaign, user);
+  }
+
+  return canManageDmRoles(campaign, user) || isCampaignDm(campaign, user.id);
+}
 
 /**
  * Check if a user can edit a character

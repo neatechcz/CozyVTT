@@ -23,6 +23,7 @@ import { Asset, AssetType, AssetScope, PlatformRole, Campaign } from '../../type
 import { useAuth } from '../../contexts/AuthContext';
 import { api } from '../../services/api';
 import campaignService from '../../services/campaign.service';
+import { isCampaignDm } from '../../services/permissions';
 import Button from '@/components/ui/Button';
 
 interface AssetDetailPanelProps {
@@ -84,8 +85,9 @@ export default function AssetDetailPanel({ asset, onClose, onDelete, onUpdate }:
   // User can move if they own the asset or are admin
   const canMove = !isScopeFixed && (isOwner || isAdmin);
 
-  // Campaigns where the current user is DM (owns the campaign)
-  const dmCampaigns = userCampaigns.filter((c) => c.ownerId === user?.id);
+  const dmCampaigns = user
+    ? userCampaigns.filter((campaign) => isCampaignDm(campaign, user.id))
+    : [];
 
   // Available scopes to move to (exclude current)
   const availableMoveScopes: AssetScope[] = [];

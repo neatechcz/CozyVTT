@@ -12,6 +12,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useToast } from '@/contexts/ToastContext';
 import characterService from '@/services/character.service';
 import campaignService from '@/services/campaign.service';
+import { canEditCharacter } from '@/services/permissions';
 import { CharacterSheetRouter } from '@/components/character-sheets/CharacterSheetRouter';
 import type { Character, Campaign } from '@/types';
 import Button from '@/components/ui/Button';
@@ -102,9 +103,10 @@ export default function CharacterEditorPage() {
     if (char.campaignId) {
       try {
         const camp = await campaignService.getCampaign(char.campaignId);
-        if (camp.ownerId === user.id) {
-          return true;
-        }
+        const membership = camp.memberships?.find(
+          (candidate) => candidate.userId === user.id,
+        );
+        return canEditCharacter(user, char, membership);
       } catch (err) {
         console.error('Failed to check campaign permission:', err);
       }

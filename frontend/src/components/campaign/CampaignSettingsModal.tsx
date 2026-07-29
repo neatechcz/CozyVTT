@@ -26,9 +26,15 @@ import { useToast } from '@/contexts/ToastContext';
 import { useAuth } from '@/contexts/AuthContext';
 import api from '@/services/api';
 import campaignService from '@/services/campaign.service';
+import {
+  canDeleteCampaign,
+  canManageDmRoles,
+  canRemoveCampaignMember,
+  isCampaignDm,
+} from '@/services/permissions';
 import InvitePlayerModal from './InvitePlayerModal';
 import ConfirmDialog from '@/components/common/ConfirmDialog';
-import type { CampaignMembership } from '@/types';
+import { CampaignRole, type CampaignMembership } from '@/types';
 import Button from '@/components/ui/Button';
 
 interface CampaignSettingsModalProps {
@@ -66,6 +72,7 @@ export default function CampaignSettingsModal({
 
   // ── Members ──────────────────────────────────
   const [removingMemberId, setRemovingMemberId] = useState<string | null>(null);
+  const [changingMemberId, setChangingMemberId] = useState<string | null>(null);
   const [memberToRemove, setMemberToRemove] = useState<CampaignMembership | null>(null);
   const [showInviteModal, setShowInviteModal] = useState(false);
 
@@ -137,6 +144,22 @@ export default function CampaignSettingsModal({
     setMemberToRemove(membership);
   };
 
+  const handleMemberRoleChange = async (
+    membership: CampaignMembership,
+    role: CampaignRole,
+  ) => {
+    setChangingMemberId(membership.userId);
+    try {
+      await api.changeCampaignMemberRole(campaign.id, membership.userId, role);
+      await refreshCampaign();
+      showToast('Member role updated', 'success');
+    } catch (err: any) {
+      showToast(err.response?.data?.message ?? 'Failed to update member role', 'error');
+    } finally {
+      setChangingMemberId(null);
+    }
+  };
+
   const handleConfirmRemoveMember = async () => {
     if (!memberToRemove) return;
     setRemovingMemberId(memberToRemove.userId);
@@ -186,10 +209,18 @@ export default function CampaignSettingsModal({
     }
   };
 
-  const isDmSelf = (membership: CampaignMembership) =>
-    membership.userId === user?.id || membership.role === 'DM';
-
+  const actorIsDm = !!user && isCampaignDm(campaign, user.id);
+  const actorCanManageDmRoles = !!user && canManageDmRoles(campaign, user);
+  const actorCanDeleteCampaign = !!user && canDeleteCampaign(campaign, user);
   const deleteNameMatches = deleteConfirmName.trim() === campaign.name;
+  const settingsTabs: { id: SettingsTab; label: string }[] = [
+    { id: 'general', label: 'General' },
+    { id: 'chat', label: 'Chat' },
+    { id: 'members', label: 'Members' },
+    ...(actorCanDeleteCampaign
+      ? [{ id: 'danger' as const, label: 'Danger Zone' }]
+      : []),
+  ];
 
   // ── Render ───────────────────────────────────
 
@@ -233,14 +264,7 @@ export default function CampaignSettingsModal({
 
                 {/* ── Tabs ── */}
                 <div className="flex gap-1 mt-4">
-                  {(
-                    [
-                      { id: 'general', label: 'General' },
-                      { id: 'chat', label: 'Chat' },
-                      { id: 'members', label: 'Members' },
-                      { id: 'danger', label: 'Danger Zone' },
-                    ] as { id: SettingsTab; label: string }[]
-                  ).map((tab) => (
+                  {settingsTabs.map((tab) => (
                     <button
                       key={tab.id}
                       onClick={() => setActiveTab(tab.id)}
@@ -492,8 +516,18 @@ export default function CampaignSettingsModal({
                     <div className="space-y-2">
                       {memberships.map((membership) => {
                         const isSelf = membership.userId === user?.id;
+                        const isOwner = membership.userId === campaign.ownerId;
                         const isDm = membership.role === 'DM';
                         const isRemoving = removingMemberId === membership.userId;
+                        const isChanging = changingMemberId === membership.userId;
+                        const canChangeRole =
+                          !isOwner &&
+                          (isDm
+                            ? actorCanManageDmRoles
+                            : actorIsDm || actorCanManageDmRoles);
+                        const canRemove =
+                          !!user &&
+                          canRemoveCampaignMember(campaign, user, membership);
 
                         return (
                           <div
@@ -520,28 +554,52 @@ export default function CampaignSettingsModal({
                             </div>
 
                             <div className="flex items-center gap-2 flex-shrink-0">
-                              {/* Role badge */}
-                              <span
-                                className={`text-xs font-medium px-2 py-0.5 rounded-full border ${
-                                  isDm
-                                    ? 'bg-spirit-purple/10 text-spirit-purple border-spirit-purple/20'
-                                    : membership.role === 'SPECTATOR'
-                                    ? 'bg-stone-gray/10 text-stone-gray border-stone-gray/20'
-                                    : 'bg-moss-green/10 text-moss-green border-moss-green/20'
-                                }`}
-                              >
-                                {isDm ? (
-                                  <span className="flex items-center gap-1">
-                                    <ShieldCheck className="w-3 h-3" />
-                                    DM
-                                  </span>
-                                ) : (
-                                  membership.role
-                                )}
-                              </span>
+                              {canChangeRole ? (
+                                <select
+                                  aria-label={`Role for ${membership.user?.displayName ?? 'member'}`}
+                                  value={membership.role}
+                                  onChange={(event) =>
+                                    handleMemberRoleChange(
+                                      membership,
+                                      event.target.value as CampaignRole,
+                                    )
+                                  }
+                                  disabled={isChanging}
+                                  className="input-cozy py-1 text-xs"
+                                >
+                                  {actorCanManageDmRoles && (
+                                    <option value={CampaignRole.DM}>DM</option>
+                                  )}
+                                  <option value={CampaignRole.PLAYER}>PLAYER</option>
+                                  <option value={CampaignRole.SPECTATOR}>SPECTATOR</option>
+                                </select>
+                              ) : (
+                                <span
+                                  className={`text-xs font-medium px-2 py-0.5 rounded-full border ${
+                                    isDm
+                                      ? 'bg-spirit-purple/10 text-spirit-purple border-spirit-purple/20'
+                                      : membership.role === 'SPECTATOR'
+                                      ? 'bg-stone-gray/10 text-stone-gray border-stone-gray/20'
+                                      : 'bg-moss-green/10 text-moss-green border-moss-green/20'
+                                  }`}
+                                >
+                                  {isOwner ? (
+                                    <span className="flex items-center gap-1">
+                                      <ShieldCheck className="w-3 h-3" />
+                                      Owner
+                                    </span>
+                                  ) : isDm ? (
+                                    <span className="flex items-center gap-1">
+                                      <ShieldCheck className="w-3 h-3" />
+                                      DM
+                                    </span>
+                                  ) : (
+                                    membership.role
+                                  )}
+                                </span>
+                              )}
 
-                              {/* Remove button — DM and self cannot be removed */}
-                              {!isDmSelf(membership) && (
+                              {canRemove && (
                                 <button
                                   type="button"
                                   onClick={() => handleRemoveMemberClick(membership)}
@@ -565,7 +623,7 @@ export default function CampaignSettingsModal({
                 )}
 
                 {/* ════ DANGER ZONE TAB ════ */}
-                {activeTab === 'danger' && (
+                {actorCanDeleteCampaign && activeTab === 'danger' && (
                   <div className="space-y-4">
                     <div className="p-4 rounded-lg bg-red-50 border border-red-200">
                       <div className="flex items-start gap-3 mb-4">
@@ -643,17 +701,19 @@ export default function CampaignSettingsModal({
       />
 
       {/* Final delete confirm dialog */}
-      <ConfirmDialog
-        isOpen={showDeleteConfirm}
-        title="Delete Campaign"
-        message={`Are you absolutely sure you want to permanently delete "${campaign.name}"? This cannot be undone.`}
-        confirmLabel="Delete Forever"
-        cancelLabel="Cancel"
-        variant="danger"
-        isLoading={deletingCampaign}
-        onConfirm={handleDeleteCampaign}
-        onCancel={() => setShowDeleteConfirm(false)}
-      />
+      {actorCanDeleteCampaign && (
+        <ConfirmDialog
+          isOpen={showDeleteConfirm}
+          title="Delete Campaign"
+          message={`Are you absolutely sure you want to permanently delete "${campaign.name}"? This cannot be undone.`}
+          confirmLabel="Delete Forever"
+          cancelLabel="Cancel"
+          variant="danger"
+          isLoading={deletingCampaign}
+          onConfirm={handleDeleteCampaign}
+          onCancel={() => setShowDeleteConfirm(false)}
+        />
+      )}
 
       {/* Invite player modal */}
       {showInviteModal && (
