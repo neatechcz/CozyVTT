@@ -37,12 +37,14 @@ const DOOR_LOCKED_ID = randomUUID();
 
 let server: WsTestServer;
 let dmId: string;
+let coDmId: string;
 let player1Id: string;
 let player2Id: string;
 let outsiderId: string;
 let campaignId: string;
 let mapId: string;
 let dmCookie: string;
+let coDmCookie: string;
 let player1Cookie: string;
 let player2Cookie: string;
 let outsiderCookie: string;
@@ -91,8 +93,8 @@ async function resetGameState() {
 
 beforeAll(async () => {
   // Seed users
-  const [dm, player1, player2, outsider] = await Promise.all(
-    ['dm', 'player1', 'player2', 'outsider'].map((name) =>
+  const [dm, coDm, player1, player2, outsider] = await Promise.all(
+    ['dm', 'co-dm', 'player1', 'player2', 'outsider'].map((name) =>
       prisma.user.create({
         data: {
           email: email(name),
@@ -103,6 +105,7 @@ beforeAll(async () => {
     )
   );
   dmId = dm.id;
+  coDmId = coDm.id;
   player1Id = player1.id;
   player2Id = player2.id;
   outsiderId = outsider.id;
@@ -138,14 +141,16 @@ beforeAll(async () => {
   await prisma.campaignMembership.createMany({
     data: [
       { userId: dmId, campaignId, role: 'DM', characterIds: [] },
+      { userId: coDmId, campaignId, role: 'DM', characterIds: [] },
       { userId: player1Id, campaignId, role: 'PLAYER', characterIds: [] },
       { userId: player2Id, campaignId, role: 'PLAYER', characterIds: [] },
     ],
   });
 
   server = await createWsTestServer();
-  [dmCookie, player1Cookie, player2Cookie, outsiderCookie] = await Promise.all([
+  [dmCookie, coDmCookie, player1Cookie, player2Cookie, outsiderCookie] = await Promise.all([
     server.loginAs(dmId),
+    server.loginAs(coDmId),
     server.loginAs(player1Id),
     server.loginAs(player2Id),
     server.loginAs(outsiderId),
@@ -156,7 +161,9 @@ afterAll(async () => {
   await server?.close();
   // Campaign cascade removes memberships, maps, messages, dice rolls
   await prisma.campaign.deleteMany({ where: { id: campaignId } });
-  await prisma.user.deleteMany({ where: { id: { in: [dmId, player1Id, player2Id, outsiderId] } } });
+  await prisma.user.deleteMany({
+    where: { id: { in: [dmId, coDmId, player1Id, player2Id, outsiderId] } },
+  });
   await prisma.$disconnect();
 });
 
@@ -206,6 +213,17 @@ describe('connection & authentication', () => {
     expect(payload.campaignId).toBe(campaignId);
     expect(payload.role).toBe('PLAYER');
     client.disconnect();
+  });
+
+  it('authenticates both the owner and co-DM with DM role', async () => {
+    const owner = await server.connectAndAuth(dmCookie, campaignId);
+    const coDm = await server.connectAndAuth(coDmCookie, campaignId);
+
+    expect(owner.connected).toBe(true);
+    expect(coDm.connected).toBe(true);
+
+    owner.disconnect();
+    coDm.disconnect();
   });
 });
 
@@ -277,6 +295,36 @@ describe('walls & doors', () => {
     expect((map.wallSegments as any[]).some((s) => s.id === segment.id)).toBe(true);
 
     dm.disconnect();
+    player.disconnect();
+  });
+
+  it('co-DM can add a wall segment: broadcast + persisted', async () => {
+    const coDm = await server.connectAndAuth(coDmCookie, campaignId);
+    const player = await server.connectAndAuth(player1Cookie, campaignId);
+
+    const segment = {
+      id: randomUUID(),
+      x1: 2,
+      y1: 2,
+      x2: 3,
+      y2: 3,
+      type: 'wall',
+    };
+    const playerSees = waitForEvent<{ mapId: string; segment: any }>(
+      player,
+      'wall:added',
+    );
+    coDm.emit('wall:add', { mapId, segment });
+
+    expect((await playerSees).segment).toEqual(segment);
+
+    const map = await prisma.map.findUniqueOrThrow({
+      where: { id: mapId },
+      select: { wallSegments: true },
+    });
+    expect((map.wallSegments as any[]).some((s) => s.id === segment.id)).toBe(true);
+
+    coDm.disconnect();
     player.disconnect();
   });
 
@@ -520,6 +568,47 @@ describe('dice', () => {
     const denial = waitForEvent<{ message: string }>(player, 'error');
     player.emit('dice.roll', { expression: 'not-dice' });
     expect((await denial).message).toContain('Invalid dice expression');
+    player.disconnect();
+  });
+
+  it('delivers a player secret roll to every connected DM', async () => {
+    const owner = await server.connectAndAuth(dmCookie, campaignId);
+    const coDm = await server.connectAndAuth(coDmCookie, campaignId);
+    const player = await server.connectAndAuth(player1Cookie, campaignId);
+
+    const ownerAudit = waitForEvent<{ secret: boolean; originalRoller: string }>(
+      owner,
+      'dice.rolled.secret',
+    );
+    const coDmAudit = waitForEvent<{ secret: boolean; originalRoller: string }>(
+      coDm,
+      'dice.rolled.secret',
+    );
+    player.emit('dice.roll', { expression: '1d20', secret: true });
+
+    await expect(ownerAudit).resolves.toMatchObject({
+      secret: true,
+      originalRoller: player1Id,
+    });
+    await expect(coDmAudit).resolves.toMatchObject({
+      secret: true,
+      originalRoller: player1Id,
+    });
+
+    owner.disconnect();
+    coDm.disconnect();
+    player.disconnect();
+  });
+
+  it('lets a co-DM clear dice history', async () => {
+    const coDm = await server.connectAndAuth(coDmCookie, campaignId);
+    const player = await server.connectAndAuth(player1Cookie, campaignId);
+    const cleared = waitForEvent<void>(player, 'dice.historyCleared');
+
+    coDm.emit('dice.clearHistory');
+
+    await cleared;
+    coDm.disconnect();
     player.disconnect();
   });
 });

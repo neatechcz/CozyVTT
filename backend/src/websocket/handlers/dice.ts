@@ -154,14 +154,8 @@ export function registerDiceHandlers(io: Server, socket: AuthenticatedSocket): v
         return;
       }
 
-      // Verify user is DM
-      const campaign = await prisma.campaign.findUnique({
-        where: { id: socket.campaignId },
-        select: { ownerId: true },
-      });
-
-      if (!campaign || campaign.ownerId !== socket.userId) {
-        socket.emit('error', { message: 'Only the DM can clear roll history' });
+      if (socket.role !== 'DM') {
+        socket.emit('error', { message: 'Only a DM can clear roll history' });
         return;
       }
 
