@@ -148,6 +148,11 @@ export default function AssetLibraryPage() {
     }
   };
 
+  const handleUpdateAsset = (updatedAsset: Asset) => {
+    setSelectedAsset(updatedAsset);
+    void queryClient.invalidateQueries({ queryKey: ['assets'] });
+  };
+
   const toggleTag = (tag: string) => {
     setSelectedTags((prev) =>
       prev.includes(tag) ? prev.filter((t) => t !== tag) : [...prev, tag]
@@ -443,6 +448,7 @@ export default function AssetLibraryPage() {
           asset={selectedAsset}
           onClose={() => setSelectedAsset(null)}
           onDelete={handleDeleteAsset}
+          onUpdate={handleUpdateAsset}
         />
       )}
 
