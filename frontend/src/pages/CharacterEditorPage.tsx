@@ -32,7 +32,6 @@ export default function CharacterEditorPage() {
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [saving, setSaving] = useState(false);
   const [confirmLeave, setConfirmLeave] = useState(false);
-  const [lastSaved, setLastSaved] = useState<Date | null>(null);
   const [permissionError, setPermissionError] = useState<string | null>(null);
 
   // Auto-save timer ref
@@ -139,7 +138,6 @@ export default function CharacterEditorPage() {
         // Update local state
         setCharacter(updated);
         setHasUnsavedChanges(false);
-        setLastSaved(new Date());
         pendingSaveRef.current = null;
 
         if (doShowToast) {
@@ -347,21 +345,18 @@ export default function CharacterEditorPage() {
                 Saving...
               </span>
             )}
-            {lastSaved && !hasUnsavedChanges && (
-              <span className="text-sm text-stone-gray">
-                Saved {lastSaved.toLocaleTimeString()}
-              </span>
+            {/* Retry only a payload retained after a failed sheet save. Ordinary
+                edits are saved through the character sheet's own Save button. */}
+            {pendingSaveRef.current && (
+              <Button
+                onClick={handleManualSave}
+                disabled={saving}
+                className="flex items-center gap-2"
+              >
+                <Save className="w-4 h-4" />
+                Retry Save
+              </Button>
             )}
-
-            {/* Manual Save Button */}
-            <Button
-              onClick={handleManualSave}
-              disabled={!hasUnsavedChanges || saving}
-              className="flex items-center gap-2"
-            >
-              <Save className="w-4 h-4" />
-              Save
-            </Button>
 
             {/* Export Button */}
             <Button

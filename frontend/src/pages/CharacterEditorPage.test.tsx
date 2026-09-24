@@ -127,6 +127,7 @@ describe('CharacterEditorPage', () => {
     try {
       const detailInput = await screen.findByRole('textbox', { name: 'Character detail' });
       fireEvent.change(detailInput, { target: { value: 'x' } });
+      expect(screen.queryByRole('button', { name: /^Save$/ })).not.toBeInTheDocument();
       fireEvent.click(screen.getByRole('button', { name: 'Save sheet' }));
 
       const saveError = await screen.findByRole('alert');
@@ -136,12 +137,13 @@ describe('CharacterEditorPage', () => {
       expect(screen.queryByRole('heading', { name: 'Failed to Load Character' })).not.toBeInTheDocument();
       expect(screen.getByRole('textbox', { name: 'Character detail' })).toHaveValue('x');
       expect(screen.getByText('Unsaved changes')).toBeInTheDocument();
-      expect(screen.getByRole('button', { name: /^Save$/ })).toBeEnabled();
+      expect(screen.getByRole('button', { name: 'Retry Save' })).toBeEnabled();
 
-      fireEvent.click(screen.getByRole('button', { name: /^Save$/ }));
+      fireEvent.click(screen.getByRole('button', { name: 'Retry Save' }));
       await waitFor(() => expect(updateCharacterMock).toHaveBeenCalledTimes(2));
       expect(updateCharacterMock.mock.calls[1][1].data).toEqual({ details: 'x' });
       expect(screen.getByText('Unsaved changes')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Retry Save' })).toBeEnabled();
 
       fireEvent.change(screen.getByRole('textbox', { name: 'Character detail' }), {
         target: { value: 'Corrected detail' },
@@ -155,7 +157,7 @@ describe('CharacterEditorPage', () => {
       await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
       expect(screen.getByRole('heading', { name: 'Editing: Robin' })).toBeInTheDocument();
       expect(screen.queryByText('Unsaved changes')).not.toBeInTheDocument();
-      expect(screen.getByRole('button', { name: /^Save$/ })).toBeDisabled();
+      expect(screen.queryByRole('button', { name: 'Retry Save' })).not.toBeInTheDocument();
     } finally {
       unmount();
       consoleError.mockRestore();
@@ -182,11 +184,13 @@ describe('CharacterEditorPage', () => {
 
     try {
       await screen.findByRole('textbox', { name: 'Character detail' });
+      expect(screen.queryByRole('button', { name: /^Save$/ })).not.toBeInTheDocument();
       fireEvent.click(screen.getByRole('button', { name: action }));
       await screen.findByRole('alert');
 
       expect(updateCharacterMock.mock.calls[0][1].tokenImageUrl).toBe(tokenImageUrl);
-      fireEvent.click(screen.getByRole('button', { name: /^Save$/ }));
+      expect(screen.getByRole('button', { name: 'Retry Save' })).toBeEnabled();
+      fireEvent.click(screen.getByRole('button', { name: 'Retry Save' }));
 
       await waitFor(() => expect(updateCharacterMock).toHaveBeenCalledTimes(2));
       expect(updateCharacterMock.mock.calls[1][1]).toMatchObject({
@@ -195,6 +199,7 @@ describe('CharacterEditorPage', () => {
       });
       await waitFor(() => expect(screen.queryByRole('alert')).not.toBeInTheDocument());
       expect(screen.queryByText('Unsaved changes')).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Retry Save' })).not.toBeInTheDocument();
     } finally {
       unmount();
       consoleError.mockRestore();
