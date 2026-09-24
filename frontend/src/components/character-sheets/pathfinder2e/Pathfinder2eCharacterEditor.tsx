@@ -92,9 +92,12 @@ export const Pathfinder2eCharacterEditor: React.FC<Pathfinder2eCharacterEditorPr
   const [errors, setErrors] = useState<Record<string, string>>({});
 
   const data = character.data as any;
+  const { spellcasting, ...sheetData } = data;
 
+  // Keep omitted optional fields absent in the save payload. The API schema
+  // accepts an omitted spellcasting object, but rejects `spellcasting: null`.
   const [formData, setFormData] = useState<any>(() => ({
-    ...data,
+    ...sheetData,
     attributes: data.attributes || {
       strength: { score: 10, modifier: 0 },
       dexterity: { score: 10, modifier: 0 },
@@ -152,15 +155,17 @@ export const Pathfinder2eCharacterEditor: React.FC<Pathfinder2eCharacterEditorPr
       bonus: data.feats?.bonus || [],
     },
     classFeatures: data.classFeatures || [],
-    spellcasting: data.spellcasting ? {
-      ...data.spellcasting,
-      cantrips: data.spellcasting.cantrips || [],
-      slots: data.spellcasting.slots || {},
-      spells: data.spellcasting.spells || [],
-      focusSpells: data.spellcasting.focusSpells || { focusPoints: { total: 0, current: 0 }, spells: [] },
-      innateSpells: data.spellcasting.innateSpells || [],
-      rituals: data.spellcasting.rituals || [],
-    } : null,
+    ...(spellcasting ? {
+      spellcasting: {
+        ...spellcasting,
+        cantrips: spellcasting.cantrips || [],
+        slots: spellcasting.slots || {},
+        spells: spellcasting.spells || [],
+        focusSpells: spellcasting.focusSpells || { focusPoints: { total: 0, current: 0 }, spells: [] },
+        innateSpells: spellcasting.innateSpells || [],
+        rituals: spellcasting.rituals || [],
+      },
+    } : {}),
     appearance: data.appearance || {},
     personality: data.personality || {},
     backstory: data.backstory || '',
