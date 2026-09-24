@@ -96,6 +96,42 @@ describe('DnD5eCharacterEditor', () => {
     expect(savedData.proficienciesAndLanguages).not.toContain('Shields');
   });
 
+  it('preserves a legacy proficiencies array when editing one category', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const character = makeNonSpellcaster();
+    const { proficienciesAndLanguages: _ignored, ...legacyData } = character.data as any;
+    character.data = {
+      ...legacyData,
+      proficiencies: ['Light Armor', 'Simple Weapons', 'Common'],
+    };
+
+    render(
+      <DnD5eCharacterEditor
+        character={character}
+        onSave={onSave}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Features' }));
+    const armorField = screen.getByPlaceholderText('Light Armor, Medium Armor, Shields');
+    expect(armorField).toHaveValue('Light Armor');
+    fireEvent.change(armorField, { target: { value: 'Light Armor, Heavy Armor' } });
+    fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    const savedData = onSave.mock.calls[0][0];
+
+    const validation = dnd5eCharacterDataSchema.safeParse(savedData);
+    expect(validation.success, validation.success ? undefined : JSON.stringify(validation.error.issues)).toBe(true);
+    expect(savedData.proficienciesAndLanguages).toEqual(expect.arrayContaining([
+      'Light Armor',
+      'Heavy Armor',
+      'Simple Weapons',
+      'Common',
+    ]));
+  });
+
   it('saves a normal field edit for a non-spellcaster with valid data and existing proficiencies', async () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
     render(

@@ -127,10 +127,21 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
 
   // Type assertion for D&D 5e character data
   const data = character.data as any;
+  const { proficiencies: sourceProficiencies, ...characterData } = data;
+  const initialProficienciesAndLanguages = Array.isArray(data.proficienciesAndLanguages)
+    ? data.proficienciesAndLanguages
+    : Array.isArray(sourceProficiencies)
+      ? sourceProficiencies
+      : [];
+  const structuredProficiencies = sourceProficiencies
+    && typeof sourceProficiencies === 'object'
+    && !Array.isArray(sourceProficiencies)
+    ? { proficiencies: { armor: '', weapons: '', tools: '', languages: '', ...sourceProficiencies } }
+    : {};
 
   // Form state - initialize with character data
   const [formData, setFormData] = useState<any>(() => ({
-    ...data,
+    ...characterData,
     // Ensure nested objects exist
     stats: data.stats || {},
     savingThrows: data.savingThrows || {},
@@ -143,11 +154,8 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
     attacks: data.attacks || [],
     hitDice: data.hitDice || [],
     conditions: data.conditions || [],
-    proficienciesAndLanguages: data.proficienciesAndLanguages || [],
-    // Keep legacy flattened proficiencies untouched unless structured values exist or are edited.
-    ...(data.proficiencies && typeof data.proficiencies === 'object' && !Array.isArray(data.proficiencies)
-      ? { proficiencies: { armor: '', weapons: '', tools: '', languages: '', ...data.proficiencies } }
-      : {}),
+    proficienciesAndLanguages: initialProficienciesAndLanguages,
+    ...structuredProficiencies,
     featuresAndTraits: data.featuresAndTraits || [],
     appearance: data.appearance || {},
     personality: data.personality || {},
@@ -423,9 +431,10 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
         const weaponsArray = parseCommaSeparated(updatedData.proficiencies.weapons);
         const toolsArray = parseCommaSeparated(updatedData.proficiencies.tools);
         const languagesArray = parseCommaSeparated(updatedData.proficiencies.languages);
-        const originalCategories = categorizeProficiencies(data.proficienciesAndLanguages || []);
+        const originalProficiencies = formData.proficienciesAndLanguages || [];
+        const originalCategories = categorizeProficiencies(originalProficiencies);
         const categorizedOriginals = new Set(Object.values(originalCategories).flat());
-        const uncategorizedOriginals = (data.proficienciesAndLanguages || [])
+        const uncategorizedOriginals = originalProficiencies
           .filter((proficiency: string) => !categorizedOriginals.has(proficiency));
 
         // Flatten to backwards-compatible array
