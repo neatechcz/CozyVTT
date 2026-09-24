@@ -69,9 +69,11 @@ export function WebSocketProvider({ children }: WebSocketProviderProps) {
   const [error, setError] = useState<string | null>(null);
   const [reconnectCount, setReconnectCount] = useState(0);
   const heartbeatCleanupRef = useRef<(() => void) | null>(null);
+  const socketLifecycleCleanupRef = useRef<(() => void) | null>(null);
   const connectedCampaignRef = useRef<string | null>(null);
   const statusRef = useRef<ConnectionStatus>('disconnected');
   const isMountedRef = useRef(true);
+  const isAwaitingReconnectRef = useRef(false);
   /**
    * Tracks the campaignId of the most recent successful connection. Used to
    * detect "this connect() call is a reconnect, not a first-time connect" so
@@ -95,6 +97,11 @@ export function WebSocketProvider({ children }: WebSocketProviderProps) {
     return () => {
       isMountedRef.current = false;
     };
+  }, []);
+
+  const clearSocketLifecycleListeners = useCallback(() => {
+    socketLifecycleCleanupRef.current?.();
+    socketLifecycleCleanupRef.current = null;
   }, []);
 
   // Connect to WebSocket
@@ -133,38 +140,66 @@ export function WebSocketProvider({ children }: WebSocketProviderProps) {
       }
       previouslyConnectedCampaignRef.current = id;
 
-      // Wire up the full lifecycle on the raw socket so the status badge stays
-      // in sync across drops and auto-reconnects. Previously a single
-      // `.once('disconnect')` would leave the UI stuck after the first drop —
-      // even though socket.io was happily reconnecting underneath, the badge
-      // never flipped back to green.
+      // Track namespace and Manager lifecycle events so the badge follows
+      // transport retries and campaign authentication after every drop.
       const socket = socketClient.getSocket();
       if (socket) {
+        clearSocketLifecycleListeners();
+
         // Disconnect — flip to 'disconnected' on every drop, not just the first
-        socket.on('disconnect', () => {
+        const handleDisconnect = () => {
           if (!isMountedRef.current) return;
+          isAwaitingReconnectRef.current = true;
           setStatus('disconnected');
-        });
+        };
 
-        // Reconnect attempt (socket.io is actively retrying)
-        socket.on('reconnect_attempt', () => {
+        // Socket.IO reconnect events describe transport recovery. Campaign
+        // consumers must wait for `authenticated` before refreshing state.
+        const handleTransportReconnect = () => {
           if (!isMountedRef.current) return;
+          isAwaitingReconnectRef.current = true;
           setStatus('connecting');
-        });
+        };
 
-        // Successful reconnect — flip back to 'connected' and signal consumers
-        socket.on('reconnect', () => {
+        const handleAuthenticated = () => {
           if (!isMountedRef.current) return;
           setStatus('connected');
-          setReconnectCount((c) => c + 1);
-        });
+          setError(null);
 
-        // Final reconnect failure (socket.io gave up)
-        socket.on('reconnect_failed', () => {
+          if (isAwaitingReconnectRef.current) {
+            isAwaitingReconnectRef.current = false;
+            setReconnectCount((c) => c + 1);
+          }
+        };
+
+        const handleReconnectAttempt = () => {
           if (!isMountedRef.current) return;
+          isAwaitingReconnectRef.current = true;
+          setStatus('connecting');
+        };
+
+        const handleReconnectFailed = () => {
+          if (!isMountedRef.current) return;
+          isAwaitingReconnectRef.current = false;
           setStatus('error');
           setError('Connection lost. Click Retry to try again.');
-        });
+        };
+
+        socket.on('disconnect', handleDisconnect);
+        socket.on('connect', handleTransportReconnect);
+        socket.on('authenticated', handleAuthenticated);
+        socket.io.on('reconnect_attempt', handleReconnectAttempt);
+        socket.io.on('reconnect', handleTransportReconnect);
+        socket.io.on('reconnect_failed', handleReconnectFailed);
+
+        socketLifecycleCleanupRef.current = () => {
+          socket.off('disconnect', handleDisconnect);
+          socket.off('connect', handleTransportReconnect);
+          socket.off('authenticated', handleAuthenticated);
+          socket.io.off('reconnect_attempt', handleReconnectAttempt);
+          socket.io.off('reconnect', handleTransportReconnect);
+          socket.io.off('reconnect_failed', handleReconnectFailed);
+        };
       }
 
       const cleanup = socketClient.startHeartbeat(30000); // 30 second interval
@@ -177,10 +212,13 @@ export function WebSocketProvider({ children }: WebSocketProviderProps) {
         connectedCampaignRef.current = null;
       }
     }
-  }, []); // No dependencies - stable reference
+  }, [clearSocketLifecycleListeners]); // Stable reference
 
   // Disconnect from WebSocket
   const disconnect = useCallback(() => {
+    clearSocketLifecycleListeners();
+    isAwaitingReconnectRef.current = false;
+
     // Stop heartbeat
     if (heartbeatCleanupRef.current) {
       heartbeatCleanupRef.current();
@@ -191,7 +229,7 @@ export function WebSocketProvider({ children }: WebSocketProviderProps) {
     setStatus('disconnected');
     setError(null);
     connectedCampaignRef.current = null;
-  }, []); // No dependencies needed with ref
+  }, [clearSocketLifecycleListeners]);
 
   // Reconnect (disconnect then connect)
   const reconnect = useCallback(async () => {
@@ -220,6 +258,8 @@ export function WebSocketProvider({ children }: WebSocketProviderProps) {
         heartbeatCleanupRef.current = null;
       }
 
+      clearSocketLifecycleListeners();
+      isAwaitingReconnectRef.current = false;
       socketClient.disconnect();
       setStatus('disconnected'); // Reset status so reconnect can work
       setError(null);
@@ -228,7 +268,7 @@ export function WebSocketProvider({ children }: WebSocketProviderProps) {
       // trigger a false-positive resync when the new campaign first connects.
       previouslyConnectedCampaignRef.current = null;
     };
-  }, [campaignId]); // connect is stable - no need in deps (causes premature cleanup)
+  }, [campaignId, clearSocketLifecycleListeners]); // connect is stable - no need in deps (causes premature cleanup)
 
   // Browser network listeners — flip status immediately when the OS reports
   // the network has gone away, and actively trigger reconnection when it
