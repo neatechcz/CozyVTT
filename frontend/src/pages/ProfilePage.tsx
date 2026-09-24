@@ -3,7 +3,7 @@
 // Protected route - requires authentication
 // ============================================
 
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { useState, useRef, useCallback, useEffect, useId } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import { useTheme } from '@/contexts/ThemeContext';
@@ -26,6 +26,7 @@ import {
   Move,
 } from 'lucide-react';
 import Button from '@/components/ui/Button';
+import { useFocusTrap } from '@/hooks/useFocusTrap';
 
 // Legacy localStorage key — superseded by backend-persisted preferences.
 // We delete it on first authenticated load so it doesn't linger on devices.
@@ -44,9 +45,12 @@ interface AvatarCropModalProps {
   imageSrc: string;
   onConfirm: (croppedBlob: Blob) => void;
   onClose: () => void;
+  returnFocusRef: React.RefObject<HTMLElement>;
 }
 
-function AvatarCropModal({ imageSrc, onConfirm, onClose }: AvatarCropModalProps) {
+function AvatarCropModal({ imageSrc, onConfirm, onClose, returnFocusRef }: AvatarCropModalProps) {
+  const titleId = useId();
+  const modalRef = useFocusTrap(true, onClose, returnFocusRef);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const imageRef = useRef<HTMLImageElement | null>(null);
 
@@ -171,13 +175,17 @@ function AvatarCropModal({ imageSrc, onConfirm, onClose }: AvatarCropModalProps)
 
   return (
     <div
+      ref={modalRef}
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={titleId}
       className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
       <div className="bg-soft-cream border border-moss-green/30 rounded-xl shadow-2xl w-full max-w-sm">
         {/* Header */}
         <div className="flex items-center justify-between px-5 pt-5 pb-3 border-b border-moss-green/15">
-          <h3 className="text-base font-semibold text-moss-green">Crop Avatar</h3>
+          <h3 id={titleId} className="text-base font-semibold text-moss-green">Crop Avatar</h3>
           <p className="text-xs text-warm-gray flex items-center gap-1">
             <Move className="w-3 h-3" /> Drag to reposition
           </p>
@@ -284,6 +292,7 @@ export default function ProfilePage() {
   const { appearance: systemAppearance, applyUserPreferences } = useTheme();
   const navigate = useNavigate();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const avatarTriggerRef = useRef<HTMLButtonElement>(null);
 
   // ── Profile info edit ──
   const [editingProfile, setEditingProfile] = useState(false);
@@ -600,8 +609,11 @@ export default function ProfilePage() {
           <div className="flex items-start gap-6">
             {/* Avatar */}
             <div className="flex-shrink-0">
-              <div
-                className="relative group cursor-pointer"
+              <button
+                ref={avatarTriggerRef}
+                type="button"
+                aria-label="Change avatar"
+                className="relative group cursor-pointer border-0 bg-transparent p-0"
                 onClick={() => fileInputRef.current?.click()}
               >
                 {avatarDisplayUrl ? (
@@ -612,20 +624,21 @@ export default function ProfilePage() {
                   />
                 ) : (
                   <div className="w-20 h-20 rounded-full bg-moss-green/20 flex items-center justify-center border-2 border-moss-green/30">
-                    <User className="w-9 h-9 text-moss-green/60" />
+                    <User aria-hidden="true" className="w-9 h-9 text-moss-green/60" />
                   </div>
                 )}
                 <div className="absolute inset-0 rounded-full bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
                   {avatarUploading ? (
-                    <Loader2 className="w-6 h-6 text-white animate-spin" />
+                    <Loader2 aria-hidden="true" className="w-6 h-6 text-white animate-spin" />
                   ) : (
-                    <Upload className="w-6 h-6 text-white" />
+                    <Upload aria-hidden="true" className="w-6 h-6 text-white" />
                   )}
                 </div>
-              </div>
+              </button>
               <input
                 ref={fileInputRef}
                 type="file"
+                aria-label="Choose avatar image"
                 accept="image/jpeg,image/png,image/webp"
                 onChange={handleAvatarFileChange}
                 className="hidden"
@@ -965,6 +978,7 @@ export default function ProfilePage() {
           imageSrc={cropSrc}
           onConfirm={handleCropConfirm}
           onClose={() => setCropSrc(null)}
+          returnFocusRef={avatarTriggerRef}
         />
       )}
     </div>
