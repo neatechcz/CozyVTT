@@ -60,7 +60,7 @@ export default function CharactersPage() {
   const handleCharacterCreated = (newCharacter: Character) => {
     setCharactersData((prev) => [newCharacter, ...prev]);
     showSuccess('Character created successfully!');
-    // Note: For now we just close the modal.
+    navigate(`/characters/${newCharacter.id}/edit`);
   };
 
   const handleEdit = (character: Character) => {
