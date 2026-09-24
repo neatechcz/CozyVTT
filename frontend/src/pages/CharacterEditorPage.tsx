@@ -10,12 +10,27 @@ import CharacterSheetSkeleton from '@/components/skeletons/CharacterSheetSkeleto
 import ConfirmDialog from '@/components/common/ConfirmDialog';
 import { useAuth } from '@/contexts/AuthContext';
 import { useToast } from '@/contexts/ToastContext';
+import { api } from '@/services/api';
 import characterService from '@/services/character.service';
 import campaignService from '@/services/campaign.service';
 import { canEditCharacter } from '@/services/permissions';
 import { CharacterSheetRouter } from '@/components/character-sheets/CharacterSheetRouter';
 import type { Character, Campaign } from '@/types';
 import Button from '@/components/ui/Button';
+
+function getTokenAssetId(tokenImageUrl?: string | null): string | null {
+  if (!tokenImageUrl) return null;
+
+  let pathname = tokenImageUrl;
+  try {
+    pathname = new URL(tokenImageUrl, 'http://cozyvtt.local').pathname;
+  } catch {
+    return null;
+  }
+
+  const match = /^\/api\/assets\/tokens\/([^/]+)$/.exec(pathname);
+  return match?.[1] ? decodeURIComponent(match[1]) : null;
+}
 
 export default function CharacterEditorPage() {
   const { id } = useParams<{ id: string }>();
@@ -37,6 +52,24 @@ export default function CharacterEditorPage() {
   // Auto-save timer ref
   const autoSaveTimerRef = useRef<number | null>(null);
   const pendingSaveRef = useRef<{ data: any; tokenImageUrl?: string } | null>(null);
+  const unattachedTokenAssetIdRef = useRef<string | null>(null);
+  const attachedTokenAssetIdRef = useRef<string | null>(null);
+  const savingRef = useRef(false);
+  const mountedRef = useRef(true);
+
+  const deleteUnattachedTokenAsset = useCallback((assetId: string) => {
+    if (assetId === attachedTokenAssetIdRef.current) return;
+
+    void api.deleteAsset(assetId).catch((cleanupError) => {
+      console.warn('Failed to delete an unattached token asset:', cleanupError);
+    });
+  }, []);
+
+  const cleanupRetainedTokenAsset = useCallback(() => {
+    const assetId = unattachedTokenAssetIdRef.current;
+    unattachedTokenAssetIdRef.current = null;
+    if (assetId) deleteUnattachedTokenAsset(assetId);
+  }, [deleteUnattachedTokenAsset]);
 
   // ============================================
   // Fetch Character & Check Permissions
@@ -53,6 +86,7 @@ export default function CharacterEditorPage() {
 
         // Fetch character
         const fetchedCharacter = await characterService.getCharacter(id);
+        attachedTokenAssetIdRef.current = getTokenAssetId(fetchedCharacter.tokenImageUrl);
         setCharacter(fetchedCharacter);
 
         // Check permissions
@@ -86,6 +120,17 @@ export default function CharacterEditorPage() {
 
     fetchCharacter();
   }, [id, user]);
+
+  // A retained upload is safe to delete only after a definite save rejection.
+  // On route changes, release that known-unattached asset. If a save is still
+  // in flight, let its response decide whether the asset was attached first.
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (!savingRef.current) cleanupRetainedTokenAsset();
+    };
+  }, [cleanupRetainedTokenAsset]);
 
   // ============================================
   // Permission Check
@@ -122,8 +167,10 @@ export default function CharacterEditorPage() {
   const handleSave = useCallback(
     async (data: any, doShowToast = true, tokenImageUrl?: string): Promise<void> => {
       if (!character) return;
+      const uploadedTokenAssetId = getTokenAssetId(tokenImageUrl);
 
       try {
+        savingRef.current = true;
         setSaving(true);
         setSaveError(null);
 
@@ -136,6 +183,13 @@ export default function CharacterEditorPage() {
         });
 
         // Update local state
+        const savedTokenAssetId = getTokenAssetId(updated.tokenImageUrl);
+        const previouslyUnattachedAssetId = unattachedTokenAssetIdRef.current;
+        unattachedTokenAssetIdRef.current = null;
+        attachedTokenAssetIdRef.current = savedTokenAssetId;
+        if (previouslyUnattachedAssetId && previouslyUnattachedAssetId !== savedTokenAssetId) {
+          deleteUnattachedTokenAsset(previouslyUnattachedAssetId);
+        }
         setCharacter(updated);
         setHasUnsavedChanges(false);
         pendingSaveRef.current = null;
@@ -148,6 +202,21 @@ export default function CharacterEditorPage() {
         console.error('Error response:', err.response?.data);
         setHasUnsavedChanges(true);
         pendingSaveRef.current = { data, tokenImageUrl };
+
+        const status = err.response?.status;
+        const definitelyRejected = typeof status === 'number' && status >= 400 && status < 500;
+        const previouslyUnattachedAssetId = unattachedTokenAssetIdRef.current;
+        if (previouslyUnattachedAssetId && previouslyUnattachedAssetId !== uploadedTokenAssetId) {
+          unattachedTokenAssetIdRef.current = null;
+          deleteUnattachedTokenAsset(previouslyUnattachedAssetId);
+        }
+        if (definitelyRejected && uploadedTokenAssetId && uploadedTokenAssetId !== attachedTokenAssetIdRef.current) {
+          unattachedTokenAssetIdRef.current = uploadedTokenAssetId;
+        } else if (previouslyUnattachedAssetId === uploadedTokenAssetId) {
+          // A network or server error leaves it unclear whether this retry
+          // attached the asset, so don't auto-delete it later.
+          unattachedTokenAssetIdRef.current = null;
+        }
 
         // Show detailed validation errors if available
         if (err.response?.data?.validationErrors) {
@@ -162,10 +231,12 @@ export default function CharacterEditorPage() {
           setSaveError(`${message}\n\nPlease review your changes and try saving again.`);
         }
       } finally {
+        savingRef.current = false;
         setSaving(false);
+        if (!mountedRef.current) cleanupRetainedTokenAsset();
       }
     },
-    [character]
+    [character, cleanupRetainedTokenAsset, deleteUnattachedTokenAsset]
   );
 
   // ============================================
@@ -240,6 +311,11 @@ export default function CharacterEditorPage() {
     }
   };
 
+  const handleConfirmLeave = () => {
+    if (!savingRef.current) cleanupRetainedTokenAsset();
+    navigate('/characters');
+  };
+
   // ============================================
   // Render
   // ============================================
@@ -299,7 +375,7 @@ export default function CharacterEditorPage() {
       confirmLabel="Leave"
       cancelLabel="Stay"
       variant="warning"
-      onConfirm={() => navigate('/characters')}
+      onConfirm={handleConfirmLeave}
       onCancel={() => setConfirmLeave(false)}
     />
     <div className="min-h-screen bg-gradient-to-br from-soft-cream via-parchment to-warm-amber/20">
