@@ -493,6 +493,9 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
         newData.proficiencies = getProficienciesByCategory();
       }
       const keys = path.split('.');
+      const isSpellSlotField = keys[0] === 'spellcasting'
+        && keys[1] === 'slots'
+        && keys.length === 4;
       let current = newData;
       for (let i = 0; i < keys.length - 1; i++) {
         // CRITICAL: Preserve array types when cloning nested structures
@@ -501,7 +504,9 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
         } else if (typeof current[keys[i]] === 'object' && current[keys[i]] !== null) {
           current[keys[i]] = { ...current[keys[i]] };
         } else {
-          current[keys[i]] = {};
+          current[keys[i]] = isSpellSlotField && i === 2
+            ? { total: 0, expended: 0 }
+            : {};
         }
         current = current[keys[i]];
       }

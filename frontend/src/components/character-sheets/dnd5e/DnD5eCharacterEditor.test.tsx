@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { dnd5eCharacterDataSchema } from '../../../../../backend/src/validators/game-systems/dnd5e.schema';
 import { GameSystem, type Character } from '../../../types';
@@ -119,6 +119,36 @@ describe('DnD5eCharacterEditor', () => {
     expect(savedData.spellcasting).toBeUndefined();
     expect(savedData.playerName).toBe('Lukáš');
     expect(savedData.proficienciesAndLanguages).toEqual(originalProficiencies);
+  });
+
+  it('saves a partial spell slot edit for a non-spellcaster with a named spell', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(
+      <DnD5eCharacterEditor
+        character={makeNonSpellcaster()}
+        onSave={onSave}
+        onCancel={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Spells' }));
+    const levelOne = within(screen.getByText('Level 1').parentElement as HTMLElement);
+    fireEvent.change(levelOne.getAllByRole('spinbutton')[0], { target: { value: '1' } });
+    fireEvent.click(screen.getByRole('button', { name: '+ Add Spell' }));
+    fireEvent.change(screen.getByPlaceholderText('Spell Name'), {
+      target: { value: 'Magic Missile' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /save/i }));
+
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    const savedData = onSave.mock.calls[0][0];
+
+    expect(savedData.spellcasting.slots).toEqual({ '1': { total: 1, expended: 0 } });
+    expect(savedData.spellcasting.spells).toEqual([
+      { level: 1, name: 'Magic Missile', prepared: false, ritual: false, concentration: false },
+    ]);
+    const validation = dnd5eCharacterDataSchema.safeParse(savedData);
+    expect(validation.success, validation.success ? undefined : JSON.stringify(validation.error.issues)).toBe(true);
   });
 
   it('saves a token image for a non-spellcaster with schema-valid character data', async () => {
