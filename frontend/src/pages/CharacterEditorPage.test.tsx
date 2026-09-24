@@ -377,4 +377,73 @@ describe('CharacterEditorPage', () => {
       consoleLog.mockRestore();
     }
   });
+
+  it('invalidates a stale retry after sheet edits and keeps the leave warning until the edited draft saves', async () => {
+    updateCharacterMock
+      .mockRejectedValueOnce({
+        response: { status: 400, data: { message: 'Draft A is invalid' } },
+      })
+      .mockRejectedValueOnce({
+        response: { status: 400, data: { message: 'Draft B is still invalid' } },
+      })
+      .mockResolvedValueOnce({
+        ...originalCharacter,
+        data: { details: 'Draft B' } as unknown as Character['data'],
+        tokenImageUrl: '/api/assets/tokens/newer-photo',
+      });
+
+    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const { unmount } = renderEditor();
+
+    try {
+      const detailInput = await screen.findByRole('textbox', { name: 'Character detail' });
+      fireEvent.change(detailInput, { target: { value: 'Draft A' } });
+      fireEvent.click(screen.getByRole('button', { name: 'Save with photo' }));
+      await screen.findByRole('alert');
+      expect(screen.getByRole('button', { name: 'Retry Save' })).toBeEnabled();
+
+      fireEvent.change(detailInput, { target: { value: 'Draft B' } });
+      expect(screen.queryByRole('button', { name: 'Retry Save' })).not.toBeInTheDocument();
+      expect(screen.getByText('Unsaved changes')).toBeInTheDocument();
+      expect(deleteAssetMock).not.toHaveBeenCalled();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Back to characters' }));
+      expect(screen.getByRole('dialog')).toHaveTextContent('Unsaved Changes');
+      fireEvent.click(screen.getByRole('button', { name: 'Stay' }));
+
+      fireEvent.click(screen.getByRole('button', { name: 'Save with newer photo' }));
+      await waitFor(() => expect(updateCharacterMock).toHaveBeenCalledTimes(2));
+      expect(updateCharacterMock.mock.calls[1][1]).toMatchObject({
+        data: { details: 'Draft B' },
+        tokenImageUrl: '/api/assets/tokens/newer-photo',
+      });
+      expect(deleteAssetMock).toHaveBeenCalledTimes(1);
+      expect(deleteAssetMock).toHaveBeenCalledWith('uploaded-photo');
+      expect(deleteAssetMock).not.toHaveBeenCalledWith('newer-photo');
+      expect(screen.getByText('Unsaved changes')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Retry Save' })).toBeEnabled();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Back to characters' }));
+      expect(screen.getByRole('dialog')).toHaveTextContent('Unsaved Changes');
+      fireEvent.click(screen.getByRole('button', { name: 'Stay' }));
+
+      fireEvent.click(screen.getByRole('button', { name: 'Retry Save' }));
+      await waitFor(() => expect(updateCharacterMock).toHaveBeenCalledTimes(3));
+      expect(updateCharacterMock.mock.calls[2][1]).toMatchObject({
+        data: { details: 'Draft B' },
+        tokenImageUrl: '/api/assets/tokens/newer-photo',
+      });
+      await waitFor(() => expect(screen.queryByText('Unsaved changes')).not.toBeInTheDocument());
+      expect(screen.queryByRole('button', { name: 'Retry Save' })).not.toBeInTheDocument();
+
+      fireEvent.click(screen.getByRole('button', { name: 'Back to characters' }));
+      expect(await screen.findByText('Characters list')).toBeInTheDocument();
+      expect(deleteAssetMock).toHaveBeenCalledTimes(1);
+    } finally {
+      unmount();
+      consoleError.mockRestore();
+      consoleLog.mockRestore();
+    }
+  });
 });

@@ -45,6 +45,7 @@ export default function CharacterEditorPage() {
   const [error, setError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [hasPendingSave, setHasPendingSave] = useState(false);
   const [saving, setSaving] = useState(false);
   const [confirmLeave, setConfirmLeave] = useState(false);
   const [permissionError, setPermissionError] = useState<string | null>(null);
@@ -70,6 +71,13 @@ export default function CharacterEditorPage() {
     unattachedTokenAssetIdRef.current = null;
     if (assetId) deleteUnattachedTokenAsset(assetId);
   }, [deleteUnattachedTokenAsset]);
+
+  const invalidatePendingSave = useCallback(() => {
+    if (!pendingSaveRef.current) return;
+
+    pendingSaveRef.current = null;
+    setHasPendingSave(false);
+  }, []);
 
   // ============================================
   // Fetch Character & Check Permissions
@@ -193,6 +201,7 @@ export default function CharacterEditorPage() {
         setCharacter(updated);
         setHasUnsavedChanges(false);
         pendingSaveRef.current = null;
+        setHasPendingSave(false);
 
         if (doShowToast) {
           showToast('Character saved!', 'success');
@@ -202,6 +211,7 @@ export default function CharacterEditorPage() {
         console.error('Error response:', err.response?.data);
         setHasUnsavedChanges(true);
         pendingSaveRef.current = { data, tokenImageUrl };
+        setHasPendingSave(true);
 
         const status = err.response?.status;
         const definitelyRejected = typeof status === 'number' && status >= 400 && status < 500;
@@ -423,7 +433,7 @@ export default function CharacterEditorPage() {
             )}
             {/* Retry only a payload retained after a failed sheet save. Ordinary
                 edits are saved through the character sheet's own Save button. */}
-            {pendingSaveRef.current && (
+            {hasPendingSave && (
               <Button
                 onClick={handleManualSave}
                 disabled={saving}
@@ -448,7 +458,12 @@ export default function CharacterEditorPage() {
       </div>
 
       {/* Character Sheet Editor */}
-      <div className="p-4">
+      <div
+        className="p-4"
+        onChangeCapture={invalidatePendingSave}
+        onInputCapture={invalidatePendingSave}
+        onClickCapture={invalidatePendingSave}
+      >
         <CharacterSheetRouter
           character={character}
           mode="edit"
