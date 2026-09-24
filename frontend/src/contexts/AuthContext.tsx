@@ -6,6 +6,7 @@
 
 import React, { createContext, useContext, useState, useEffect, useCallback, useMemo } from 'react';
 import { authService } from '@/services/auth.service';
+import { queryClient } from '@/lib/queryClient';
 import type {
   User,
   AuthContextType,
@@ -48,11 +49,13 @@ export function AuthProvider({ children }: AuthProviderProps) {
     try {
       setLoading(true);
       const currentUser = await authService.getCurrentUser();
+      queryClient.clear();
       setUser(currentUser);
       setAuthenticated(true);
       setMustChangePassword(currentUser.mustChangePassword || false);
     } catch (error) {
       // Not authenticated or session expired
+      queryClient.clear();
       setUser(null);
       setAuthenticated(false);
       setMustChangePassword(false);
@@ -75,6 +78,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
       // Check if MFA is required
       if ('mfaRequired' in response && response.mfaRequired) {
+        queryClient.clear();
         setMfaPending(true);
         setUser(null);
         setAuthenticated(false);
@@ -84,11 +88,13 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
       // Login successful — MFA branch returned early above, so response is AuthResponse
       const authResponse = response as AuthResponse;
+      queryClient.clear();
       setUser(authResponse.user);
       setAuthenticated(true);
       setMfaPending(false);
       setMustChangePassword(authResponse.mustChangePassword || false);
     } catch (error) {
+      queryClient.clear();
       setUser(null);
       setAuthenticated(false);
       setMfaPending(false);
@@ -107,6 +113,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
       console.error('Logout error:', error);
       // Continue with local logout even if API call fails
     } finally {
+      queryClient.clear();
       setUser(null);
       setAuthenticated(false);
       setMfaPending(false);
@@ -129,12 +136,14 @@ export function AuthProvider({ children }: AuthProviderProps) {
         // Account created but pending admin approval — do not authenticate
         return { pendingApproval: true };
       }
+      queryClient.clear();
       setUser(response.user);
       setAuthenticated(true);
       setMfaPending(false);
       setMustChangePassword(response.mustChangePassword || false);
       return {};
     } catch (error) {
+      queryClient.clear();
       setUser(null);
       setAuthenticated(false);
       throw error;
@@ -151,6 +160,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
     }
 
     const response = await authService.verifyMFALogin(token);
+    queryClient.clear();
     setUser(response.user);
     setAuthenticated(true);
     setMfaPending(false);
@@ -163,6 +173,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
     }
 
     const response = await authService.verifyMFALoginWithBackupCode(backupCode);
+    queryClient.clear();
     setUser(response.user);
     setAuthenticated(true);
     setMfaPending(false);
@@ -242,6 +253,9 @@ export function AuthProvider({ children }: AuthProviderProps) {
   const refreshUser = useCallback(async (): Promise<void> => {
     try {
       const currentUser = await authService.getCurrentUser();
+      if (user?.id !== currentUser.id) {
+        queryClient.clear();
+      }
       setUser(currentUser);
       setAuthenticated(true);
       setMfaPending(false);
@@ -252,13 +266,14 @@ export function AuthProvider({ children }: AuthProviderProps) {
         // If refresh fails for an authenticated user, the session may have expired.
         await logout();
       } else {
+        queryClient.clear();
         setUser(null);
         setAuthenticated(false);
         setMfaPending(false);
         setMustChangePassword(false);
       }
     }
-  }, [authenticated, logout]);
+  }, [authenticated, logout, user?.id]);
 
   // ============================================
   // Context Value
