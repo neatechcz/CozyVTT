@@ -1,0 +1,122 @@
+import { render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { MemoryRouter } from 'react-router-dom';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import AdminPage from './AdminPage';
+
+const mocks = vi.hoisted(() => ({
+  getStats: vi.fn(),
+  getUsers: vi.fn(),
+  getSettings: vi.fn(),
+  getConfig: vi.fn(),
+}));
+
+vi.mock('@/contexts/AuthContext', () => ({
+  useAuth: () => ({
+    user: { id: 'admin-1', displayName: 'Admin', email: 'admin@example.test', platformRole: 'ADMIN' },
+  }),
+}));
+
+vi.mock('@/contexts/ToastContext', () => ({ useToast: () => ({ showToast: vi.fn() }) }));
+vi.mock('@/contexts/ThemeContext', () => ({ useTheme: () => ({ refreshAppearance: vi.fn() }) }));
+vi.mock('@/services/admin.service', () => ({
+  adminService: {
+    getStats: mocks.getStats,
+    getUsers: mocks.getUsers,
+    getSettings: mocks.getSettings,
+    getConfig: mocks.getConfig,
+  },
+}));
+vi.mock('@/services/api', () => ({ api: {} }));
+vi.mock('@/components/appearance/ThemePicker', () => ({ default: () => null }));
+
+const settings = {
+  id: 'settings-1',
+  instanceName: 'CozyVTT',
+  timezone: 'UTC',
+  allowRegistration: false,
+  requireAdminApproval: true,
+  themeId: 'cozy-default',
+  customThemeColors: null,
+  fontId: 'default',
+  customLogoUrl: null,
+  customFaviconUrl: null,
+  customMascotUrl: null,
+};
+
+function renderAdmin() {
+  return render(
+    <MemoryRouter future={{ v7_startTransition: true, v7_relativeSplatPath: true }}>
+      <AdminPage />
+    </MemoryRouter>,
+  );
+}
+
+describe('AdminPage accessibility', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.getStats.mockResolvedValue({
+      userCount: 1,
+      campaignCount: 0,
+      activeCampaignCount: 0,
+      totalStorageBytes: 0,
+      activeSessionCount: 0,
+      sessionCount: 0,
+      characterCount: 0,
+      mapCount: 0,
+      assetBreakdown: [],
+    });
+    mocks.getUsers.mockResolvedValue([]);
+    mocks.getSettings.mockResolvedValue(settings);
+    mocks.getConfig.mockResolvedValue(null);
+  });
+
+  it('exposes the Create User overlay as a dialog and closes on Escape with focus restored', async () => {
+    const user = userEvent.setup();
+    renderAdmin();
+
+    await user.click(screen.getByRole('tab', { name: 'Users' }));
+    const trigger = await screen.findByRole('button', { name: 'Create User' });
+    trigger.focus();
+    await user.click(trigger);
+
+    const dialog = await screen.findByRole('dialog', { name: 'Create User' });
+    expect(dialog).toHaveAttribute('aria-modal', 'true');
+    expect(within(dialog).getByRole('button', { name: 'Close dialog' })).toBeInTheDocument();
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Close dialog' })).toHaveFocus());
+    await user.keyboard('{Shift>}{Tab}{/Shift}');
+    expect(within(dialog).getByRole('button', { name: 'Cancel' })).toHaveFocus();
+    await user.keyboard('{Tab}');
+    expect(within(dialog).getByRole('button', { name: 'Close dialog' })).toHaveFocus();
+
+    await user.keyboard('{Escape}');
+
+    await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Create User' })).not.toBeInTheDocument());
+    expect(trigger).toHaveFocus();
+  });
+
+  it('names the settings switches and moves tab focus and selection with arrow keys', async () => {
+    const user = userEvent.setup();
+    renderAdmin();
+
+    const dashboardTab = screen.getByRole('tab', { name: 'Dashboard' });
+    dashboardTab.focus();
+    await user.keyboard('{ArrowRight}');
+    const usersTab = screen.getByRole('tab', { name: 'Users' });
+    expect(usersTab).toHaveFocus();
+    expect(usersTab).toHaveAttribute('aria-selected', 'true');
+
+    await user.click(screen.getByRole('tab', { name: 'Settings' }));
+    expect(await screen.findByRole('switch', { name: 'Allow Public Registration' })).toBeInTheDocument();
+    expect(screen.getByRole('switch', { name: 'Require Admin Approval' })).toBeInTheDocument();
+  });
+
+  it('lets the tab list wrap within its available width', async () => {
+    renderAdmin();
+
+    const tabList = screen.getByRole('tablist', { name: 'Admin tabs' });
+    expect(tabList).toHaveClass('flex-wrap');
+    expect(tabList).toHaveClass('max-w-full');
+    await screen.findByText('Healthy');
+  });
+});
