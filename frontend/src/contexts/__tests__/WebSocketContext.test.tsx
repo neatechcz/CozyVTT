@@ -199,4 +199,38 @@ describe('WebSocketProvider automatic reconnection', () => {
     expect(screen.getByTestId('connection-status')).toHaveTextContent('error');
     expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
   });
+
+  it('still refreshes campaign state when a socket error is followed by successful authentication', async () => {
+    const socket = createSocket();
+    const manager = socket.io as unknown as FakeEmitter;
+    const onRefresh = vi.fn();
+    renderCampaign(socket, onRefresh);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('connection-status')).toHaveTextContent('connected');
+    });
+
+    act(() => socket.emit('disconnect', 'transport close'));
+    act(() => manager.emit('reconnect_attempt', 1));
+    act(() => {
+      socket.emit('connect');
+      manager.emit('reconnect', 1);
+    });
+    act(() => socket.emit('error', { message: 'A campaign action was rejected' }));
+
+    expect(screen.getByTestId('connection-status')).toHaveTextContent('error');
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
+    expect(screen.getByTestId('reconnect-count')).toHaveTextContent('0');
+    expect(onRefresh).not.toHaveBeenCalled();
+
+    act(() => socket.emit('authenticated', { campaignId: 'c1' }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('connection-status')).toHaveTextContent('connected');
+      expect(screen.getByTestId('reconnect-count')).toHaveTextContent('1');
+      expect(screen.getByText('Connected')).toBeInTheDocument();
+      expect(onRefresh).toHaveBeenCalledTimes(1);
+    });
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
+  });
 });

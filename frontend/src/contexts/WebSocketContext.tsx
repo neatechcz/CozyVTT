@@ -187,7 +187,10 @@ export function WebSocketProvider({ children }: WebSocketProviderProps) {
 
         const handleSocketError = (payload: unknown) => {
           if (!isMountedRef.current || !isAwaitingReconnectRef.current) return;
-          isAwaitingReconnectRef.current = false;
+
+          // Generic Socket errors can come from domain handlers while the
+          // campaign auth handshake is still in flight. Keep the reconnect
+          // pending so a later `authenticated` event still triggers resync.
 
           const message =
             typeof payload === 'string'
