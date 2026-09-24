@@ -28,6 +28,7 @@ export default function CharacterEditorPage() {
   const [campaign, setCampaign] = useState<Campaign | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [saving, setSaving] = useState(false);
   const [confirmLeave, setConfirmLeave] = useState(false);
@@ -36,7 +37,7 @@ export default function CharacterEditorPage() {
 
   // Auto-save timer ref
   const autoSaveTimerRef = useRef<number | null>(null);
-  const pendingDataRef = useRef<any>(null);
+  const pendingSaveRef = useRef<{ data: any; tokenImageUrl?: string } | null>(null);
 
   // ============================================
   // Fetch Character & Check Permissions
@@ -120,11 +121,12 @@ export default function CharacterEditorPage() {
   // ============================================
 
   const handleSave = useCallback(
-    async (data: any, doShowToast = true, tokenImageUrl?: string) => {
+    async (data: any, doShowToast = true, tokenImageUrl?: string): Promise<void> => {
       if (!character) return;
 
       try {
         setSaving(true);
+        setSaveError(null);
 
         // Update character via API
         // Use the new tokenImageUrl if provided, otherwise keep the existing one
@@ -138,7 +140,7 @@ export default function CharacterEditorPage() {
         setCharacter(updated);
         setHasUnsavedChanges(false);
         setLastSaved(new Date());
-        pendingDataRef.current = null;
+        pendingSaveRef.current = null;
 
         if (doShowToast) {
           showToast('Character saved!', 'success');
@@ -146,15 +148,20 @@ export default function CharacterEditorPage() {
       } catch (err: any) {
         console.error('Failed to save character:', err);
         console.error('Error response:', err.response?.data);
+        setHasUnsavedChanges(true);
+        pendingSaveRef.current = { data, tokenImageUrl };
 
         // Show detailed validation errors if available
         if (err.response?.data?.validationErrors) {
           const validationErrors = err.response.data.validationErrors;
           const errorMessages = validationErrors.map((e: any) => `${e.path}: ${e.message}`).join('\n');
-          setError(`Validation errors:\n${errorMessages}`);
+          setSaveError(
+            `Validation errors:\n${errorMessages}\n\nCorrect the listed values and try saving again.`,
+          );
           console.error('Validation errors:', validationErrors);
         } else {
-          setError(err.response?.data?.message || err.message || 'Failed to save character');
+          const message = err.response?.data?.message || err.message || 'Failed to save character';
+          setSaveError(`${message}\n\nPlease review your changes and try saving again.`);
         }
       } finally {
         setSaving(false);
@@ -175,9 +182,6 @@ export default function CharacterEditorPage() {
       // Save immediately when user clicks save in character sheet
       // Pass tokenImageUrl through so token images are persisted
       await handleSave(data, showToast ?? true, tokenImageUrl);
-
-      // Store for top save button reference
-      pendingDataRef.current = data;
     },
     [handleSave]
   );
@@ -232,8 +236,9 @@ export default function CharacterEditorPage() {
   // ============================================
 
   const handleManualSave = async () => {
-    if (pendingDataRef.current) {
-      await handleSave(pendingDataRef.current, true);
+    const pendingSave = pendingSaveRef.current;
+    if (pendingSave) {
+      await handleSave(pendingSave.data, true, pendingSave.tokenImageUrl);
     }
   };
 
@@ -300,6 +305,14 @@ export default function CharacterEditorPage() {
       onCancel={() => setConfirmLeave(false)}
     />
     <div className="min-h-screen bg-gradient-to-br from-soft-cream via-parchment to-warm-amber/20">
+      {saveError && (
+        <div
+          role="alert"
+          className="glass-panel mx-4 mt-4 border border-spirit-red/30 p-4 text-spirit-red whitespace-pre-wrap"
+        >
+          {saveError}
+        </div>
+      )}
       {/* Header */}
       <div className="glass-panel m-4 p-4">
         <div className="flex items-center justify-between gap-4">

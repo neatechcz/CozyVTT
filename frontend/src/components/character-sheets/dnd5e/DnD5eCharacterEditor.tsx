@@ -94,6 +94,24 @@ const shouldUseWhiteText = (hexColor: string): boolean => {
   return luminance < 0.5;
 };
 
+const categorizeProficiencies = (all: string[]) => {
+  const languages = ['Common', 'Elvish', 'Dwarvish', 'Draconic', 'Giant', 'Gnomish', 'Goblin', 'Halfling', 'Orc', 'Abyssal', 'Celestial', 'Deep Speech', 'Infernal', 'Primordial', 'Sylvan', 'Undercommon'];
+  const armorKeywords = ['Armor', 'Shield'];
+  const toolKeywords = ['Tools', 'Supplies', 'Kit', 'Instruments', 'Vehicles', 'Vehicle'];
+
+  const armor = all.filter((proficiency) => armorKeywords.some((keyword) => proficiency.includes(keyword)));
+  const weapons = all.filter((proficiency) =>
+    !armorKeywords.some((keyword) => proficiency.includes(keyword))
+    && !toolKeywords.some((keyword) => proficiency.includes(keyword))
+    && !languages.includes(proficiency)
+    && (proficiency.includes('Weapon') || ['Dagger', 'Sword', 'Bow', 'Axe', 'Mace', 'Staff', 'Crossbow', 'Spear', 'Hammer'].some((weapon) => proficiency.includes(weapon))),
+  );
+  const tools = all.filter((proficiency) => toolKeywords.some((keyword) => proficiency.includes(keyword)));
+  const languageProficiencies = all.filter((proficiency) => languages.includes(proficiency));
+
+  return { armor, weapons, tools, languages: languageProficiencies };
+};
+
 /**
  * DnD5eCharacterEditor - Editable D&D 5e character sheet
  */
@@ -119,25 +137,17 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
     skills: data.skills || {},
     hp: data.hp || { maximum: 0, current: 0, temporary: 0 },
     deathSaves: data.deathSaves || { successes: 0, failures: 0 },
-    spellcasting: data.spellcasting || {
-      ability: '',
-      spellSaveDC: 0,
-      spellAttackBonus: 0,
-      cantrips: [],
-      slots: {},
-      spells: [],
-    },
+    ...(data.spellcasting ? { spellcasting: data.spellcasting } : {}),
     currency: data.currency || { cp: 0, sp: 0, ep: 0, gp: 0, pp: 0 },
     inventory: data.inventory || [],
     attacks: data.attacks || [],
     hitDice: data.hitDice || [],
     conditions: data.conditions || [],
     proficienciesAndLanguages: data.proficienciesAndLanguages || [],
-    // Always use a structured object for proficiencies so the textarea fields work correctly.
-    // If legacy data stored proficiencies as an array, ignore it and start with empty strings.
-    proficiencies: (data.proficiencies && !Array.isArray(data.proficiencies))
-      ? { armor: '', weapons: '', tools: '', languages: '', ...data.proficiencies }
-      : { armor: '', weapons: '', tools: '', languages: '' },
+    // Keep legacy flattened proficiencies untouched unless structured values exist or are edited.
+    ...(data.proficiencies && typeof data.proficiencies === 'object' && !Array.isArray(data.proficiencies)
+      ? { proficiencies: { armor: '', weapons: '', tools: '', languages: '', ...data.proficiencies } }
+      : {}),
     featuresAndTraits: data.featuresAndTraits || [],
     appearance: data.appearance || {},
     personality: data.personality || {},
@@ -413,6 +423,10 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
         const weaponsArray = parseCommaSeparated(updatedData.proficiencies.weapons);
         const toolsArray = parseCommaSeparated(updatedData.proficiencies.tools);
         const languagesArray = parseCommaSeparated(updatedData.proficiencies.languages);
+        const originalCategories = categorizeProficiencies(data.proficienciesAndLanguages || []);
+        const categorizedOriginals = new Set(Object.values(originalCategories).flat());
+        const uncategorizedOriginals = (data.proficienciesAndLanguages || [])
+          .filter((proficiency: string) => !categorizedOriginals.has(proficiency));
 
         // Flatten to backwards-compatible array
         updatedData.proficienciesAndLanguages = [
@@ -420,6 +434,7 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
           ...weaponsArray,
           ...toolsArray,
           ...languagesArray,
+          ...uncategorizedOriginals,
         ];
       }
 
@@ -473,6 +488,10 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
   const updateField = (path: string, value: any) => {
     setFormData((prev: any) => {
       const newData = { ...prev };
+      if (path.startsWith('proficiencies.') && !newData.proficiencies) {
+        // Seed legacy category fields from their current display values before editing one.
+        newData.proficiencies = getProficienciesByCategory();
+      }
       const keys = path.split('.');
       let current = newData;
       for (let i = 0; i < keys.length - 1; i++) {
@@ -1610,21 +1629,13 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
     }
 
     // Backwards compatibility: parse from flat array
-    const all = formData.proficienciesAndLanguages || [];
-    const languages = ['Common', 'Elvish', 'Dwarvish', 'Draconic', 'Giant', 'Gnomish', 'Goblin', 'Halfling', 'Orc', 'Abyssal', 'Celestial', 'Deep Speech', 'Infernal', 'Primordial', 'Sylvan', 'Undercommon'];
-    const armorKeywords = ['Armor', 'Shield'];
-    const toolKeywords = ['Tools', 'Supplies', 'Kit', 'Instruments', 'Vehicles', 'Vehicle'];
-
-    const armorList = all.filter((p: string) => armorKeywords.some(k => p.includes(k)));
-    const weaponsList = all.filter((p: string) => !armorKeywords.some(k => p.includes(k)) && !toolKeywords.some(k => p.includes(k)) && !languages.includes(p) && (p.includes('Weapon') || ['Dagger', 'Sword', 'Bow', 'Axe', 'Mace', 'Staff', 'Crossbow', 'Spear', 'Hammer'].some(w => p.includes(w))));
-    const toolsList = all.filter((p: string) => toolKeywords.some(k => p.includes(k)));
-    const languagesList = all.filter((p: string) => languages.includes(p));
+    const categories = categorizeProficiencies(formData.proficienciesAndLanguages || []);
 
     return {
-      armor: armorList.join(', '),
-      weapons: weaponsList.join(', '),
-      tools: toolsList.join(', '),
-      languages: languagesList.join(', '),
+      armor: categories.armor.join(', '),
+      weapons: categories.weapons.join(', '),
+      tools: categories.tools.join(', '),
+      languages: categories.languages.join(', '),
     };
   };
 
