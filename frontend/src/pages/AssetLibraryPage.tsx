@@ -175,8 +175,9 @@ export default function AssetLibraryPage() {
                 onClick={() => navigate('/dashboard')}
                 variant="secondary" className="flex items-center gap-2"
                 title="Back to Dashboard"
+                aria-label="Back to Dashboard"
               >
-                <Home className="w-5 h-5" />
+                <Home className="w-5 h-5" aria-hidden="true" />
                 <span className="hidden sm:inline">Dashboard</span>
               </Button>
               <div>
@@ -190,8 +191,9 @@ export default function AssetLibraryPage() {
               <Button
                 onClick={() => setIsUploadModalOpen(true)}
                 className="flex items-center gap-2"
+                aria-label="Upload Asset"
               >
-                <Upload className="w-5 h-5" />
+                <Upload className="w-5 h-5" aria-hidden="true" />
                 <span className="hidden sm:inline">Upload Asset</span>
               </Button>
             ) : (
@@ -236,8 +238,9 @@ export default function AssetLibraryPage() {
                   onClick={() => setFolderScope(key)}
                   variant={folderScope === key ? 'primary' : 'secondary'}
                   className="flex items-center gap-2 !rounded-lg"
+                  aria-label={label}
                 >
-                  {icon}
+                  <span aria-hidden="true">{icon}</span>
                   <span className="hidden sm:inline">{label}</span>
                 </Button>
               ))}
