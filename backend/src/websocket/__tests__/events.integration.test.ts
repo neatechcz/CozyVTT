@@ -266,6 +266,57 @@ describe('delegated character rolls', () => {
     assigned.disconnect();
     other.disconnect();
   });
+
+  it('does not attribute a player roll from an unverified free-text character name', async () => {
+    const player = await server.connectAndAuth(player2Cookie, campaignId);
+    const dm = await server.connectAndAuth(dmCookie, campaignId);
+
+    try {
+      const rollEvent = waitForEvent<{ characterName: string | null; userId: string }>(dm, 'dice.rolled');
+      player.emit('dice.roll', { expression: '1d20+17', characterName: 'Delegated Hero' });
+
+      const roll = await rollEvent;
+      expect(roll).toMatchObject({ userId: player2Id, characterName: null });
+      const savedRoll = await prisma.diceRoll.findFirstOrThrow({
+        where: { campaignId, userId: player2Id, expression: '1d20+17' },
+        orderBy: { rolledAt: 'desc' },
+      });
+      expect(savedRoll.characterName).toBeNull();
+      const savedMessage = await prisma.message.findFirstOrThrow({
+        where: {
+          campaignId,
+          type: 'DICE_ROLL',
+          content: { contains: '1d20+17' },
+        },
+        orderBy: { createdAt: 'desc' },
+      });
+      expect(savedMessage.content).not.toContain('Delegated Hero');
+      expect((savedMessage.metadata as { characterName: string | null }).characterName).toBeNull();
+    } finally {
+      player.disconnect();
+      dm.disconnect();
+    }
+  });
+
+  it('allows a DM to attribute a generic roll to an NPC label', async () => {
+    const dm = await server.connectAndAuth(dmCookie, campaignId);
+    const player = await server.connectAndAuth(player1Cookie, campaignId);
+
+    try {
+      const rollEvent = waitForEvent<{ characterName: string | null; userId: string }>(player, 'dice.rolled');
+      dm.emit('dice.roll', { expression: '1d20+18', characterName: 'Ancient Dragon' });
+
+      expect(await rollEvent).toMatchObject({ userId: dmId, characterName: 'Ancient Dragon' });
+      const savedRoll = await prisma.diceRoll.findFirstOrThrow({
+        where: { campaignId, userId: dmId, expression: '1d20+18' },
+        orderBy: { rolledAt: 'desc' },
+      });
+      expect(savedRoll.characterName).toBe('Ancient Dragon');
+    } finally {
+      dm.disconnect();
+      player.disconnect();
+    }
+  });
 });
 
 // ── 1. Connection & campaign authentication ─────────────────────────────────

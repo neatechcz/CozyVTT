@@ -24,7 +24,11 @@ export function registerDiceHandlers(io: Server, socket: AuthenticatedSocket): v
       }
 
       const { expression, characterId, characterName: requestedCharacterName, purpose, secret } = data;
-      let characterName = requestedCharacterName;
+      // Only DMs can free-type NPC labels. Players must identify a character
+      // by ID so the server can verify ownership or campaign assignment.
+      let characterName = socket.role === 'DM' && typeof requestedCharacterName === 'string'
+        ? requestedCharacterName.trim() || undefined
+        : undefined;
 
       // Validate expression is provided
       if (!expression || typeof expression !== 'string') {
