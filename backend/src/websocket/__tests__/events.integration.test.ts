@@ -229,10 +229,15 @@ describe('delegated character HP', () => {
     });
     const assigned = await server.connectAndAuth(player1Cookie, campaignId);
     const other = await server.connectAndAuth(player2Cookie, campaignId);
+    const dm = await server.connectAndAuth(dmCookie, campaignId);
 
     const updated = waitForEvent<{ characterId: string; hp: { current: number } }>(assigned, 'character.hp.updated');
+    const dmUpdated = waitForEvent<{ characterId: string; hp: { current: number } }>(dm, 'character.hp.updated');
+    const otherSilence = expectNoEvent(other, 'character.hp.updated');
     assigned.emit('character.hp.update', { characterId, delta: -2 });
     expect((await updated).hp.current).toBe(8);
+    expect((await dmUpdated).hp.current).toBe(8);
+    await otherSilence;
     const denial = waitForEvent<{ message: string }>(other, 'error');
     other.emit('character.hp.update', { characterId, delta: -2 });
     expect((await denial).message).toMatch(/permission/);
@@ -240,6 +245,7 @@ describe('delegated character HP', () => {
     expect((character.data as { hp: { current: number } }).hp.current).toBe(8);
     assigned.disconnect();
     other.disconnect();
+    dm.disconnect();
   });
 });
 

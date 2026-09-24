@@ -92,11 +92,23 @@ export function registerCharacterHandlers(io: Server, socket: AuthenticatedSocke
         data: { data: charData },
       });
 
-      // Broadcast updated HP to all campaign members
-      io.to(socket.campaignId!).emit('character.hp.updated', {
-        characterId,
-        hp: { current, max, temp },
+      // HP is sheet data: send it only to the owner, DMs and assigned player.
+      const recipients = await prisma.campaignMembership.findMany({
+        where: {
+          campaignId: socket.campaignId,
+          OR: [
+            { role: 'DM' },
+            { role: 'PLAYER', characterIds: { has: characterId } },
+          ],
+        },
+        select: { userId: true },
       });
+      for (const recipientId of new Set([character.userId, ...recipients.map((m) => m.userId)])) {
+        io.to(recipientId).emit('character.hp.updated', {
+          characterId,
+          hp: { current, max, temp },
+        });
+      }
 
     } catch (error) {
       logger.error('character.hp.update failed', { err: error });
