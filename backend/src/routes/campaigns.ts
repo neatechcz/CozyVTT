@@ -321,6 +321,62 @@ function extractCharacterHp(
   }
 }
 
+/** Assign one campaign character to a player without changing its owner. */
+router.put('/:campaignId/characters/:characterId/controller', campaignDM, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { campaignId, characterId } = req.params;
+    const { userId } = req.body ?? {};
+    if (userId !== null && (typeof userId !== 'string' || !userId)) {
+      return res.status(400).json({ error: 'Validation Error', message: 'userId must be a player ID or null' });
+    }
+
+    const character = await prisma.character.findUnique({ where: { id: characterId }, select: { campaignId: true } });
+    if (!character || character.campaignId !== campaignId) {
+      return res.status(404).json({ error: 'Not Found', message: 'Character not found in this campaign' });
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+      const players = await tx.campaignMembership.findMany({ where: { campaignId, role: 'PLAYER' } });
+      const target = userId === null ? null : players.find((player) => player.userId === userId);
+      if (userId !== null && !target) return false;
+
+      for (const player of players) {
+        const nextIds = player.characterIds.filter((id) => id !== characterId);
+        if (player.userId === userId) nextIds.push(characterId);
+        if (nextIds.length !== player.characterIds.length || nextIds.some((id, index) => id !== player.characterIds[index])) {
+          await tx.campaignMembership.update({ where: { id: player.id }, data: { characterIds: nextIds } });
+        }
+      }
+      const maps = await tx.map.findMany({ where: { campaignId }, select: { id: true, tokens: true } });
+      for (const map of maps) {
+        if (!Array.isArray(map.tokens)) continue;
+        let changed = false;
+        const tokens = map.tokens.map((value) => {
+          if (!value || typeof value !== 'object' || Array.isArray(value) || value.characterId !== characterId) return value;
+          if (value.controlledBy === userId) return value;
+          changed = true;
+          return { ...value, controlledBy: userId };
+        });
+        if (changed) await tx.map.update({ where: { id: map.id }, data: { tokens } });
+      }
+      return true;
+    });
+    if (!result) {
+      return res.status(400).json({ error: 'Validation Error', message: 'Controller must be a player in this campaign' });
+    }
+
+    try {
+      broadcastToCampaign(campaignId, 'roster.updated', { action: 'character.controller.updated', characterId, userId });
+    } catch (error) {
+      logger.error('Failed to broadcast character controller update', { err: error });
+    }
+    return res.status(200).json({ characterId, controllerUserId: userId });
+  } catch (error) {
+    logger.error('Failed to update character controller', { err: error });
+    return res.status(500).json({ error: 'Internal Server Error', message: 'Failed to update character controller' });
+  }
+});
+
 router.get('/:campaignId/characters', campaignMember, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { campaignId } = req.params;
@@ -346,6 +402,7 @@ router.get('/:campaignId/characters', campaignMember, async (req: AuthenticatedR
     const characters = await prisma.character.findMany({
       where: {
         id: { in: allCharacterIds },
+        campaignId,
       },
       select: {
         id: true,
@@ -357,10 +414,17 @@ router.get('/:campaignId/characters', campaignMember, async (req: AuthenticatedR
       },
     });
 
+    // Player assignments take display priority; DMs retain their complete
+    // characterIds for authorization without duplicating PCs in the roster.
+    const playerCharacterIds = new Set(
+      memberships.filter((membership) => membership.role === 'PLAYER').flatMap((membership) => membership.characterIds)
+    );
+
     // Build response — extract HP from character data, never expose raw data
     const roster = memberships.map((membership) => {
       const memberCharacters = characters
-        .filter((c) => membership.characterIds.includes(c.id))
+        .filter((c) => membership.characterIds.includes(c.id) &&
+          (membership.role !== 'DM' || !playerCharacterIds.has(c.id)))
         .map(({ data, ...char }) => ({
           ...char,
           hp: extractCharacterHp(char.gameSystem, data),

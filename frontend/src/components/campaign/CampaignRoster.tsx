@@ -9,12 +9,14 @@ import { useCampaign } from '@/contexts/CampaignContext';
 import { useWebSocket } from '@/contexts/WebSocketContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { api } from '@/services/api';
+import { canEditCharacter, canRollAsCharacter } from '@/services/permissions';
 import { Users, Crown, Gamepad2, Eye, Edit, UserPlus, X, Minus, Plus, Dices } from 'lucide-react';
 import type { CharacterHpInfo } from '@/utils/characterHp';
 import CharacterSheetViewerModal from '../character/CharacterSheetViewerModal';
 import CharacterSheetEditorModal from '../character/CharacterSheetEditorModal';
 import CharacterContextMenu from './CharacterContextMenu';
 import CharacterRollPicker from './CharacterRollPicker';
+import CharacterControllerModal from './CharacterControllerModal';
 import Toast, { useToast } from '@/components/Toast';
 import ConfirmDialog from '@/components/common/ConfirmDialog';
 import type { CampaignRole, GameSystem, Character } from '@/types';
@@ -36,7 +38,7 @@ interface RosterMember {
 }
 
 export default function CampaignRoster() {
-  const { campaign, userRole, characterHpCache, seedCharacterHpCache } = useCampaign();
+  const { campaign, userRole, characterHpCache, seedCharacterHpCache, refreshCampaign } = useCampaign();
   const { socket } = useWebSocket();
   const { user } = useAuth();
   const { toast, showToast, hideToast } = useToast();
@@ -48,6 +50,8 @@ export default function CampaignRoster() {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; characterId: string; characterUserId: string } | null>(null);
   const [rollPicker, setRollPicker] = useState<{ x: number; y: number; characterId: string } | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
+  const [assigningCharacter, setAssigningCharacter] = useState<{ id: string; name: string } | null>(null);
+  const [savingController, setSavingController] = useState(false);
 
   // Fetch roster data
   const fetchRoster = async () => {
@@ -81,6 +85,7 @@ export default function CampaignRoster() {
     const handleRosterUpdate = () => {
       console.log('Roster updated - refetching...');
       fetchRoster();
+      void refreshCampaign();
     };
 
     socket.on('roster.updated', handleRosterUpdate);
@@ -88,7 +93,7 @@ export default function CampaignRoster() {
     return () => {
       socket.off('roster.updated', handleRosterUpdate);
     };
-  }, [socket, campaign?.id]);
+  }, [socket, campaign?.id, refreshCampaign]);
 
   // Handle character click - fetch full character and open viewer
   const handleCharacterClick = async (characterId: string) => {
@@ -161,8 +166,26 @@ export default function CampaignRoster() {
     socket?.emitCharacterHpUpdate({ characterId, delta });
   };
 
-  const handleReassignCharacter = async () => {
-    showToast('Character reassignment is not yet available', 'info');
+  const handleReassignCharacter = () => {
+    if (!contextMenu) return;
+    const character = roster.flatMap((member) => member.characters).find((item) => item.id === contextMenu.characterId);
+    if (character) setAssigningCharacter({ id: character.id, name: character.name });
+  };
+
+  const handleSaveController = async (userId: string | null) => {
+    if (!campaign || !assigningCharacter) return;
+    setSavingController(true);
+    try {
+      await api.setCharacterController(campaign.id, assigningCharacter.id, userId);
+      await Promise.all([fetchRoster(), refreshCampaign()]);
+      setAssigningCharacter(null);
+      showToast('Character access updated', 'success');
+    } catch (error) {
+      console.error('Failed to assign character controller:', error);
+      showToast('Could not update character access', 'error');
+    } finally {
+      setSavingController(false);
+    }
   };
 
   const handleRemoveFromCampaign = () => {
@@ -328,17 +351,17 @@ export default function CampaignRoster() {
                 setRollPicker({ x: contextMenu.x, y: contextMenu.y, characterId: contextMenu.characterId });
                 handleCloseContextMenu();
               },
-              visible: true,
+              visible: canRollAsCharacter(user, { id: contextMenu.characterId, userId: contextMenu.characterUserId }, userMembership),
             },
             {
               icon: Edit,
               label: 'Edit Character Sheet',
               onClick: handleEditCharacterSheet,
-              visible: user.id === contextMenu.characterUserId || userMembership.role === 'DM',
+              visible: canEditCharacter(user, { id: contextMenu.characterId, userId: contextMenu.characterUserId }, userMembership),
             },
             {
               icon: UserPlus,
-              label: 'Reassign to Player',
+              label: 'Assign to Player',
               onClick: handleReassignCharacter,
               visible: userMembership.role === 'DM',
             },
@@ -354,6 +377,17 @@ export default function CampaignRoster() {
         />
       )}
 
+      {assigningCharacter && (
+        <CharacterControllerModal
+          characterName={assigningCharacter.name}
+          players={roster.filter((member) => member.role === 'PLAYER').map((member) => ({ userId: member.userId, displayName: member.userName }))}
+          selectedUserId={roster.find((member) => member.role === 'PLAYER' && member.characters.some((char) => char.id === assigningCharacter.id))?.userId ?? null}
+          saving={savingController}
+          onSave={handleSaveController}
+          onClose={() => setAssigningCharacter(null)}
+        />
+      )}
+
       {/* Roll Picker */}
       {rollPicker && (
         <CharacterRollPicker
@@ -361,7 +395,7 @@ export default function CampaignRoster() {
           anchorX={rollPicker.x}
           anchorY={rollPicker.y}
           onRoll={(expression, purpose) => {
-            socket?.emitDiceRoll({ expression, purpose });
+            socket?.emitDiceRoll({ characterId: rollPicker.characterId, expression, purpose });
           }}
           onClose={() => setRollPicker(null)}
         />
@@ -497,7 +531,8 @@ function MemberCard({ member, getRoleIcon, getSystemBadgeColor, getSystemShortNa
             {/* HP bar + controls — shown when character has HP data and user can edit */}
             {(() => {
               const hp = characterHpCache[character.id] ?? character.hp;
-              const canAdjust = isDM || character.userId === currentUserId;
+              const canAdjust = isDM || character.userId === currentUserId ||
+                (member.role === 'PLAYER' && member.userId === currentUserId);
               if (!hp || hp.max === 0) return null;
               const pct = Math.max(0, Math.min(1, hp.current / hp.max));
               const barColor = pct >= 0.75 ? 'bg-green-500'

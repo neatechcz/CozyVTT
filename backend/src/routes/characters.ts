@@ -428,7 +428,8 @@ router.put('/:id', authenticated, async (req: AuthenticatedRequest, res: Respons
         },
       });
 
-      if (membership && membership.role === 'DM') {
+      if (membership && (membership.role === 'DM' ||
+        (membership.role === 'PLAYER' && membership.characterIds.includes(id)))) {
         isAuthorized = true;
       }
     }

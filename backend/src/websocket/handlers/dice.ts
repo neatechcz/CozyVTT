@@ -16,19 +16,40 @@ export function registerDiceHandlers(io: Server, socket: AuthenticatedSocket): v
    * Rate limited to 30 rolls per minute per user.
    * SECURITY: Uses server-authenticated socket.campaignId only.
    */
-  socket.on('dice.roll', async (data: { expression: string; characterName?: string; purpose?: string; secret?: boolean }) => {
+  socket.on('dice.roll', async (data: { expression: string; characterId?: string; characterName?: string; purpose?: string; secret?: boolean }) => {
     try {
       if (!socket.campaignId) {
         socket.emit('error', { message: 'Not authenticated to a campaign' });
         return;
       }
 
-      const { expression, characterName, purpose, secret } = data;
+      const { expression, characterId, characterName: requestedCharacterName, purpose, secret } = data;
+      let characterName = requestedCharacterName;
 
       // Validate expression is provided
       if (!expression || typeof expression !== 'string') {
         socket.emit('error', { message: 'Dice expression required' });
         return;
+      }
+
+      if (characterId !== undefined) {
+        if (typeof characterId !== 'string' || !characterId) {
+          socket.emit('error', { message: 'Invalid characterId' });
+          return;
+        }
+        const [character, membership] = await Promise.all([
+          prisma.character.findUnique({ where: { id: characterId }, select: { campaignId: true, userId: true, name: true } }),
+          prisma.campaignMembership.findUnique({ where: {
+            userId_campaignId: { userId: socket.userId!, campaignId: socket.campaignId },
+          } }),
+        ]);
+        if (!character || character.campaignId !== socket.campaignId || !membership ||
+          (character.userId !== socket.userId && membership.role !== 'DM' &&
+            !(membership.role === 'PLAYER' && membership.characterIds.includes(characterId)))) {
+          socket.emit('error', { message: 'You do not have permission to roll for this character' });
+          return;
+        }
+        characterName = character.name;
       }
 
       // Rate limiting: 30 rolls per minute per user

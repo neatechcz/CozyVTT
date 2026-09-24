@@ -432,6 +432,11 @@ class ApiClient {
     return response.data;
   }
 
+  async setCharacterController(campaignId: string, characterId: string, userId: string | null): Promise<{ characterId: string; controllerUserId: string | null }> {
+    const response = await this.client.put(`/api/campaigns/${campaignId}/characters/${characterId}/controller`, { userId });
+    return response.data;
+  }
+
   // ============================================
   // Campaign Invitations
   // ============================================

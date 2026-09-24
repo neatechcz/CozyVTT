@@ -54,7 +54,7 @@ export function canRemoveCampaignMember(
  */
 export function canEditCharacter(
   user: User,
-  character: Character,
+  character: Pick<Character, 'id' | 'userId'>,
   membership?: CampaignMembership
 ): boolean {
   // User owns the character
@@ -64,6 +64,10 @@ export function canEditCharacter(
 
   // User is DM of the campaign
   if (membership && membership.role === 'DM') {
+    return true;
+  }
+
+  if (membership?.role === 'PLAYER' && membership.characterIds.includes(character.id)) {
     return true;
   }
 
@@ -94,6 +98,16 @@ export function canViewCharacter(
   }
 
   return false;
+}
+
+/** Character-based rolls use the sheet's modifiers and require control. */
+export function canRollAsCharacter(
+  user: User,
+  character: Pick<Character, 'id' | 'userId'>,
+  membership?: CampaignMembership
+): boolean {
+  return character.userId === user.id || membership?.role === 'DM' ||
+    (membership?.role === 'PLAYER' && membership.characterIds.includes(character.id)) || false;
 }
 
 /**

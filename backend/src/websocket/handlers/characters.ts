@@ -33,18 +33,20 @@ export function registerCharacterHandlers(io: Server, socket: AuthenticatedSocke
         return;
       }
 
-      // Verify character belongs to this campaign
-      const membership = await prisma.campaignMembership.findFirst({
-        where: { campaignId: socket.campaignId, characterIds: { has: characterId } },
+      // Resolve the caller's current membership; assignment may have changed
+      // since the socket first authenticated.
+      const membership = await prisma.campaignMembership.findUnique({
+        where: { userId_campaignId: { userId: socket.userId!, campaignId: socket.campaignId } },
       });
 
-      if (!membership) {
+      if (!membership || character.campaignId !== socket.campaignId) {
         socket.emit('error', { message: 'Character is not in this campaign' });
         return;
       }
 
-      // Permission: character owner or DM
-      if (character.userId !== socket.userId && socket.role !== 'DM') {
+      // Permission: owner, DM, or the PLAYER explicitly assigned this character.
+      if (character.userId !== socket.userId && membership.role !== 'DM' &&
+        !(membership.role === 'PLAYER' && membership.characterIds.includes(characterId))) {
         socket.emit('error', { message: 'You do not have permission to update this character\'s HP' });
         return;
       }
