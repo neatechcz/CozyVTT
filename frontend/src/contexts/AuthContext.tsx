@@ -240,18 +240,23 @@ export function AuthProvider({ children }: AuthProviderProps) {
   // ============================================
 
   const refreshUser = useCallback(async (): Promise<void> => {
-    if (!authenticated) {
-      return;
-    }
-
     try {
       const currentUser = await authService.getCurrentUser();
       setUser(currentUser);
+      setAuthenticated(true);
+      setMfaPending(false);
       setMustChangePassword(currentUser.mustChangePassword || false);
     } catch (error) {
       console.error('Failed to refresh user:', error);
-      // If refresh fails, user might be logged out
-      await logout();
+      if (authenticated) {
+        // If refresh fails for an authenticated user, the session may have expired.
+        await logout();
+      } else {
+        setUser(null);
+        setAuthenticated(false);
+        setMfaPending(false);
+        setMustChangePassword(false);
+      }
     }
   }, [authenticated, logout]);
 

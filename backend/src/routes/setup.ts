@@ -102,11 +102,36 @@ router.post('/init', async (req: Request, res: Response) => {
     // Mark setup as completed
     await markSetupCompleted();
 
-    // Create session for the new admin user
-    req.session.userId = user.id;
-    req.session.email = user.email;
-    req.session.displayName = user.displayName;
-    req.session.platformRole = user.platformRole;
+    // Rotate the session ID so setup cannot carry an attacker-provided or
+    // pre-authentication session into the new administrator session.
+    try {
+      await new Promise<void>((resolve, reject) => {
+        req.session.regenerate((error) => {
+          if (error) reject(error);
+          else resolve();
+        });
+      });
+
+      req.session.userId = user.id;
+      req.session.email = user.email;
+      req.session.displayName = user.displayName;
+      req.session.platformRole = user.platformRole;
+
+      // Save before responding so the first authenticated request after setup
+      // cannot race the session store write.
+      await new Promise<void>((resolve, reject) => {
+        req.session.save((error) => {
+          if (error) reject(error);
+          else resolve();
+        });
+      });
+    } catch (error) {
+      logger.error('Failed to establish the setup administrator session', { err: error });
+      return res.status(500).json({
+        error: 'Setup Session Failed',
+        message: 'Setup completed, but automatic login failed. Please sign in with the administrator account you created.',
+      });
+    }
 
     return res.status(201).json({
       message: 'Setup completed successfully',
