@@ -36,14 +36,14 @@ const asset = {
   tags: [],
 } as unknown as Asset;
 
-function PanelHost() {
+function PanelHost({ selectedAsset = asset }: { selectedAsset?: Asset }) {
   const [open, setOpen] = useState(false);
   return (
     <>
       <button type="button" onClick={() => setOpen(true)}>Open asset details</button>
       {open && (
         <AssetDetailPanel
-          asset={asset}
+          asset={selectedAsset}
           onClose={() => setOpen(false)}
           onDelete={() => {}}
         />
@@ -96,5 +96,29 @@ describe('AssetDetailPanel accessibility', () => {
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Delete Asset' })).not.toBeInTheDocument());
     expect(screen.getByRole('dialog', { name: 'Goblin Token' })).toBeInTheDocument();
     expect(within(panel).getByRole('button', { name: 'Delete' })).toHaveFocus();
+  });
+
+  it('allows Tab from Download to reach native audio controls', async () => {
+    const user = userEvent.setup();
+    const audioAsset = {
+      ...asset,
+      name: 'Battle theme',
+      type: AssetType.AUDIO,
+      mimeType: 'audio/mpeg',
+      uploadedById: 'another-user',
+    } as Asset;
+
+    render(<PanelHost selectedAsset={audioAsset} />);
+    await user.click(screen.getByRole('button', { name: 'Open asset details' }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'Battle theme' });
+    const downloadButton = within(dialog).getByRole('button', { name: 'Download' });
+    expect(dialog.querySelector('audio[controls]')).not.toBeNull();
+
+    downloadButton.focus();
+    const tabEvent = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true });
+    downloadButton.dispatchEvent(tabEvent);
+
+    expect(tabEvent.defaultPrevented).toBe(false);
   });
 });
