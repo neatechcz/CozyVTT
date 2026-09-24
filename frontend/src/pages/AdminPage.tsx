@@ -594,9 +594,14 @@ export default function AdminPage() {
     setNewUserPasswordCopied(false);
   };
 
+  const handleCloseCreateUserModal = () => {
+    if (creatingUser || newUserPassword) return;
+    closeCreateUserModal();
+  };
+
   const createUserDialogRef = useFocusTrap(
     createUserOpen,
-    closeCreateUserModal,
+    handleCloseCreateUserModal,
     createUserTriggerRef,
   );
 
@@ -2486,7 +2491,7 @@ export default function AdminPage() {
       {createUserOpen && (
         <div
           className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
-          onClick={e => { if (e.target === e.currentTarget && !creatingUser && !newUserPassword) closeCreateUserModal(); }}
+          onClick={e => { if (e.target === e.currentTarget) handleCloseCreateUserModal(); }}
         >
           <div
             ref={createUserDialogRef}
@@ -2503,7 +2508,7 @@ export default function AdminPage() {
               {!newUserPassword && (
                 <button
                   type="button"
-                  onClick={closeCreateUserModal}
+                  onClick={handleCloseCreateUserModal}
                   disabled={creatingUser}
                   aria-label="Close dialog"
                   className="text-warm-gray hover:text-stone-gray transition-colors disabled:opacity-50 disabled:cursor-not-allowed"

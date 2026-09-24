@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   getUsers: vi.fn(),
   getSettings: vi.fn(),
   getConfig: vi.fn(),
+  createUser: vi.fn(),
 }));
 
 vi.mock('@/contexts/AuthContext', () => ({
@@ -25,6 +26,7 @@ vi.mock('@/services/admin.service', () => ({
     getUsers: mocks.getUsers,
     getSettings: mocks.getSettings,
     getConfig: mocks.getConfig,
+    createUser: mocks.createUser,
   },
 }));
 vi.mock('@/services/api', () => ({ api: {} }));
@@ -42,6 +44,21 @@ const settings = {
   customLogoUrl: null,
   customFaviconUrl: null,
   customMascotUrl: null,
+};
+
+const createdUser = {
+  id: 'user-2',
+  email: 'new@example.test',
+  displayName: 'New User',
+  platformRole: 'USER',
+  globalAssetManager: false,
+  mfaEnabled: false,
+  avatarUrl: null,
+  bio: null,
+  createdAt: '2026-09-24T00:00:00.000Z',
+  updatedAt: '2026-09-24T00:00:00.000Z',
+  lastLoginAt: null,
+  isApproved: true,
 };
 
 function renderAdmin() {
@@ -69,6 +86,7 @@ describe('AdminPage accessibility', () => {
     mocks.getUsers.mockResolvedValue([]);
     mocks.getSettings.mockResolvedValue(settings);
     mocks.getConfig.mockResolvedValue(null);
+    mocks.createUser.mockReset();
   });
 
   it('exposes the Create User overlay as a dialog and closes on Escape with focus restored', async () => {
@@ -93,6 +111,48 @@ describe('AdminPage accessibility', () => {
 
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Create User' })).not.toBeInTheDocument());
     expect(trigger).toHaveFocus();
+  });
+
+  it('keeps the dialog open when Escape is pressed while user creation is pending', async () => {
+    const user = userEvent.setup();
+    let resolveCreate!: (result: { user: typeof createdUser; temporaryPassword: string }) => void;
+    mocks.createUser.mockReturnValue(new Promise(resolve => { resolveCreate = resolve; }));
+    renderAdmin();
+
+    await user.click(screen.getByRole('tab', { name: 'Users' }));
+    await user.click(await screen.findByRole('button', { name: 'Create User' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Create User' });
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Close dialog' })).toHaveFocus());
+    await user.type(within(dialog).getByLabelText(/Email/), 'new@example.test');
+    await user.click(within(dialog).getByRole('button', { name: 'Create User' }));
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Create User' })).toBeDisabled());
+
+    await user.keyboard('{Escape}');
+    expect(screen.getByRole('dialog', { name: 'Create User' })).toBeInTheDocument();
+
+    await act(async () => resolveCreate({ user: createdUser, temporaryPassword: 'temporary-secret' }));
+    expect(await within(dialog).findByText('User created successfully!')).toBeInTheDocument();
+  });
+
+  it('keeps the one-time password visible when Escape is pressed after creation', async () => {
+    const user = userEvent.setup();
+    mocks.createUser.mockResolvedValue({ user: createdUser, temporaryPassword: 'temporary-secret' });
+    renderAdmin();
+
+    await user.click(screen.getByRole('tab', { name: 'Users' }));
+    await user.click(await screen.findByRole('button', { name: 'Create User' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Create User' });
+    await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Close dialog' })).toHaveFocus());
+    await user.type(within(dialog).getByLabelText(/Email/), 'new@example.test');
+    await user.click(within(dialog).getByRole('button', { name: 'Create User' }));
+    expect(await within(dialog).findByText('User created successfully!')).toBeInTheDocument();
+
+    await user.keyboard('{Escape}');
+
+    expect(screen.getByRole('dialog', { name: 'Create User' })).toBeInTheDocument();
+    expect(screen.getByText('temporary-secret')).toBeInTheDocument();
+    await user.click(within(dialog).getByRole('button', { name: 'Done' }));
+    expect(screen.queryByRole('dialog', { name: 'Create User' })).not.toBeInTheDocument();
   });
 
   it('names the settings switches and moves tab focus and selection with arrow keys', async () => {
