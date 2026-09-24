@@ -1,5 +1,6 @@
 import { useEffect } from 'react';
 import { act, render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Socket } from 'socket.io-client';
@@ -15,6 +16,7 @@ vi.mock('@/services/socket', () => ({ default: socketClientMock }));
 vi.mock('@/services/api', () => ({ default: { pingSession: vi.fn() } }));
 
 import { WebSocketProvider, useWebSocket } from '../WebSocketContext';
+import ConnectionStatus from '@/components/ConnectionStatus';
 
 type Listener = (...args: unknown[]) => void;
 
@@ -58,13 +60,16 @@ function ConnectionProbe({ onRefresh }: { onRefresh: () => void }) {
     <>
       <div data-testid="connection-status">{status}</div>
       <div data-testid="reconnect-count">{reconnectCount}</div>
+      <ConnectionStatus />
     </>
   );
 }
 
-function renderCampaign(socket: Socket, onRefresh: () => void) {
+function renderCampaign(socketOrSockets: Socket | Socket[], onRefresh: () => void) {
+  const sockets = Array.isArray(socketOrSockets) ? socketOrSockets : [socketOrSockets];
   socketClientMock.connect.mockResolvedValue(undefined);
-  socketClientMock.getSocket.mockReturnValue(socket);
+  sockets.forEach((socket) => socketClientMock.getSocket.mockReturnValueOnce(socket));
+  socketClientMock.getSocket.mockReturnValue(sockets[sockets.length - 1]);
   socketClientMock.startHeartbeat.mockReturnValue(vi.fn());
 
   return render(
@@ -88,7 +93,7 @@ function renderCampaign(socket: Socket, onRefresh: () => void) {
 
 describe('WebSocketProvider automatic reconnection', () => {
   beforeEach(() => {
-    vi.clearAllMocks();
+    vi.resetAllMocks();
   });
 
   it('restores connection state and refreshes campaign data once after an automatic reconnect', async () => {
@@ -134,8 +139,64 @@ describe('WebSocketProvider automatic reconnection', () => {
     expect(socketEvents.listenerCount('disconnect')).toBe(0);
     expect(socketEvents.listenerCount('connect')).toBe(0);
     expect(socketEvents.listenerCount('authenticated')).toBe(0);
+    expect(socketEvents.listenerCount('error')).toBe(0);
     expect(manager.listenerCount('reconnect_attempt')).toBe(0);
     expect(manager.listenerCount('reconnect')).toBe(0);
     expect(manager.listenerCount('reconnect_failed')).toBe(0);
+  });
+
+  it('shows an actionable error and allows manual retry when campaign authentication fails after transport reconnect', async () => {
+    const socket = createSocket();
+    const retrySocket = createSocket();
+    const manager = socket.io as unknown as FakeEmitter;
+    const onRefresh = vi.fn();
+    renderCampaign([socket, retrySocket], onRefresh);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('connection-status')).toHaveTextContent('connected');
+    });
+
+    act(() => socket.emit('disconnect', 'transport close'));
+    act(() => manager.emit('reconnect_attempt', 1));
+    act(() => {
+      socket.emit('connect');
+      manager.emit('reconnect', 1);
+    });
+    expect(screen.getByTestId('connection-status')).toHaveTextContent('connecting');
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument();
+
+    act(() => socket.emit('error', { message: 'Campaign membership is required' }));
+    expect(screen.getByTestId('connection-status')).toHaveTextContent('error');
+    expect(screen.getByRole('button', { name: 'Retry' })).toHaveAttribute(
+      'title',
+      'Campaign membership is required'
+    );
+    expect(screen.getByTestId('reconnect-count')).toHaveTextContent('0');
+    expect(onRefresh).not.toHaveBeenCalled();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('connection-status')).toHaveTextContent('connected');
+      expect(screen.getByTestId('reconnect-count')).toHaveTextContent('1');
+      expect(onRefresh).toHaveBeenCalledTimes(1);
+    });
+    expect(socketClientMock.connect).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows Retry when the Manager exhausts automatic reconnect attempts', async () => {
+    const socket = createSocket();
+    const manager = socket.io as unknown as FakeEmitter;
+    renderCampaign(socket, vi.fn());
+
+    await waitFor(() => {
+      expect(screen.getByTestId('connection-status')).toHaveTextContent('connected');
+    });
+
+    act(() => socket.emit('disconnect', 'transport close'));
+    act(() => manager.emit('reconnect_failed'));
+
+    expect(screen.getByTestId('connection-status')).toHaveTextContent('error');
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument();
   });
 });

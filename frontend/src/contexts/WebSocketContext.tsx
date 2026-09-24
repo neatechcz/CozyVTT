@@ -185,9 +185,28 @@ export function WebSocketProvider({ children }: WebSocketProviderProps) {
           setError('Connection lost. Click Retry to try again.');
         };
 
+        const handleSocketError = (payload: unknown) => {
+          if (!isMountedRef.current || !isAwaitingReconnectRef.current) return;
+          isAwaitingReconnectRef.current = false;
+
+          const message =
+            typeof payload === 'string'
+              ? payload
+              : payload &&
+                  typeof payload === 'object' &&
+                  'message' in payload &&
+                  typeof payload.message === 'string'
+                ? payload.message
+                : 'Connection lost. Click Retry to try again.';
+
+          setStatus('error');
+          setError(message);
+        };
+
         socket.on('disconnect', handleDisconnect);
         socket.on('connect', handleTransportReconnect);
         socket.on('authenticated', handleAuthenticated);
+        socket.on('error', handleSocketError);
         socket.io.on('reconnect_attempt', handleReconnectAttempt);
         socket.io.on('reconnect', handleTransportReconnect);
         socket.io.on('reconnect_failed', handleReconnectFailed);
@@ -196,6 +215,7 @@ export function WebSocketProvider({ children }: WebSocketProviderProps) {
           socket.off('disconnect', handleDisconnect);
           socket.off('connect', handleTransportReconnect);
           socket.off('authenticated', handleAuthenticated);
+          socket.off('error', handleSocketError);
           socket.io.off('reconnect_attempt', handleReconnectAttempt);
           socket.io.off('reconnect', handleTransportReconnect);
           socket.io.off('reconnect_failed', handleReconnectFailed);
