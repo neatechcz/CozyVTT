@@ -48,6 +48,7 @@ import { createVisionCache, type VisionSource } from './map/vision';
 import { useTokenAnimation, useFogRevealAnimation } from './map/useMapAnimations';
 import { useRenderLoop, type MapLayer } from './map/useRenderLoop';
 import api from '@/services/api';
+import { canViewCharacter } from '@/services/permissions';
 import CharacterSheetViewerModal from '@/components/character/CharacterSheetViewerModal';
 import CharacterRollPicker from '@/components/campaign/CharacterRollPicker';
 import NpcRollPicker from '@/components/campaign/NpcRollPicker';
@@ -3164,7 +3165,10 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
         >
           {contextMenu.token.characterId && (
             <>
-              <button
+              {(user && canViewCharacter(user, {
+                id: contextMenu.token.characterId,
+                userId: campaign?.characters?.find((character) => character.id === contextMenu.token.characterId)?.userId ?? '',
+              }, campaign?.memberships?.find((membership) => membership.userId === user.id))) && <button
                 className="w-full px-4 py-2 text-left text-sm text-stone-gray hover:bg-moss-green/10 transition-colors"
                 onClick={async () => {
                   const characterId = contextMenu.token.characterId!;
@@ -3178,7 +3182,7 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
                 }}
               >
                 View Character Sheet
-              </button>
+              </button>}
               {(userRole === 'DM' || campaign?.memberships?.some((membership) =>
                 membership.userId === user?.id &&
                 membership.role === 'PLAYER' &&

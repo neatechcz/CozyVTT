@@ -59,7 +59,7 @@ export default function CharacterEditorPage() {
         const canEdit = await checkEditPermission(fetchedCharacter);
         if (!canEdit) {
           setPermissionError(
-            'You do not have permission to edit this character. Only the owner or the DM of the assigned campaign can edit characters.'
+            'You do not have permission to edit this character. The owner, a campaign DM, or an assigned player can edit it.'
           );
           return;
         }
@@ -99,7 +99,7 @@ export default function CharacterEditorPage() {
       return true;
     }
 
-    // Character is assigned to a campaign - check if user is the DM
+    // Character is assigned to a campaign - check DM or player assignment.
     if (char.campaignId) {
       try {
         const camp = await campaignService.getCampaign(char.campaignId);

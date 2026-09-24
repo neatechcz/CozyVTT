@@ -12,6 +12,7 @@
 
 import { randomUUID } from 'crypto';
 import { io as ioc } from 'socket.io-client';
+import request from 'supertest';
 import { prisma } from '../../config/database';
 import { clearState as clearCombatState } from '../initiativeState';
 import {
@@ -184,10 +185,39 @@ afterAll(async () => {
 beforeEach(async () => {
   await resetGameState();
   await prisma.character.update({ where: { id: characterId }, data: {
+    name: 'Delegated Hero',
     data: { hp: { current: 10, maximum: 10, temporary: 0 } },
   } });
   await prisma.campaignMembership.updateMany({
     where: { campaignId, role: 'PLAYER' }, data: { characterIds: [] },
+  });
+});
+
+describe('character sheet update privacy', () => {
+  it('sends a full sheet only to the owner, DMs and the assigned player', async () => {
+    await prisma.campaignMembership.update({
+      where: { userId_campaignId: { userId: player1Id, campaignId } },
+      data: { characterIds: [characterId] },
+    });
+    const [dm, coDm, assigned, other] = await Promise.all([
+      server.connectAndAuth(dmCookie, campaignId),
+      server.connectAndAuth(coDmCookie, campaignId),
+      server.connectAndAuth(player1Cookie, campaignId),
+      server.connectAndAuth(player2Cookie, campaignId),
+    ]);
+    const dmUpdate = waitForEvent<{ characterId: string }>(dm, 'character.updated');
+    const coDmUpdate = waitForEvent<{ characterId: string }>(coDm, 'character.updated');
+    const assignedUpdate = waitForEvent<{ characterId: string }>(assigned, 'character.updated');
+    const otherSilence = expectNoEvent(other, 'character.updated');
+
+    const response = await request(server.httpServer)
+      .put(`/api/characters/${characterId}`)
+      .set('Cookie', player1Cookie)
+      .send({ name: 'Delegated Hero Updated' });
+    expect(response.status).toBe(200);
+    const updates = await Promise.all([dmUpdate, coDmUpdate, assignedUpdate]);
+    expect(updates.map((event) => event.characterId)).toEqual([characterId, characterId, characterId]);
+    await otherSilence;
   });
 });
 

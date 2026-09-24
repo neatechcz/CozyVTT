@@ -24,6 +24,7 @@ async function login(email: string) {
 describe('delegated character control', () => {
   let campaignId: string;
   let characterId: string;
+  let otherCharacterId: string;
   let mapId: string;
   let ownerId: string;
   let dmId: string;
@@ -50,6 +51,10 @@ describe('delegated character control', () => {
       data: { userId: ownerId, campaignId, name: 'Mich', data: { notes: 'original' } },
     });
     characterId = character.id;
+    const otherCharacter = await prisma.character.create({
+      data: { userId: ownerId, campaignId, name: 'Tomin', data: { notes: 'private to other player' } },
+    });
+    otherCharacterId = otherCharacter.id;
     const map = await prisma.map.create({ data: {
       campaignId,
       name: 'Test Map',
@@ -63,8 +68,8 @@ describe('delegated character control', () => {
     } });
     mapId = map.id;
     await prisma.campaignMembership.createMany({ data: [
-      { userId: ownerId, campaignId, role: CampaignRole.DM, characterIds: [characterId] },
-      { userId: dmId, campaignId, role: CampaignRole.DM, characterIds: [characterId] },
+      { userId: ownerId, campaignId, role: CampaignRole.DM, characterIds: [characterId, otherCharacterId] },
+      { userId: dmId, campaignId, role: CampaignRole.DM, characterIds: [characterId, otherCharacterId] },
       { userId: playerId, campaignId, role: CampaignRole.PLAYER, characterIds: [] },
       { userId: otherPlayerId, campaignId, role: CampaignRole.PLAYER, characterIds: [] },
     ] });
@@ -121,6 +126,47 @@ describe('delegated character control', () => {
     const other = await otherPlayerAgent.put(`/api/characters/${characterId}`).send({ data: { notes: 'wrong edit' } });
     expect(assigned.status).toBe(200);
     expect(other.status).toBe(403);
+  });
+
+  it('shows each player only their assigned character across lists, campaign, roster, and sheet URLs', async () => {
+    await prisma.campaignMembership.update({
+      where: { userId_campaignId: { userId: playerId, campaignId } },
+      data: { characterIds: [characterId] },
+    });
+    await prisma.campaignMembership.update({
+      where: { userId_campaignId: { userId: otherPlayerId, campaignId } },
+      data: { characterIds: [otherCharacterId] },
+    });
+
+    const [myList, otherList, mySheet, forbiddenSheet, otherSheet, otherForbiddenSheet, dmSheet, myCampaign, myCampaigns, myRoster, dmRoster] = await Promise.all([
+      playerAgent.get('/api/characters'),
+      otherPlayerAgent.get('/api/characters'),
+      playerAgent.get(`/api/characters/${characterId}`),
+      playerAgent.get(`/api/characters/${otherCharacterId}`),
+      otherPlayerAgent.get(`/api/characters/${otherCharacterId}`),
+      otherPlayerAgent.get(`/api/characters/${characterId}`),
+      dmAgent.get(`/api/characters/${otherCharacterId}`),
+      playerAgent.get(`/api/campaigns/${campaignId}`),
+      playerAgent.get('/api/campaigns'),
+      playerAgent.get(`/api/campaigns/${campaignId}/characters`),
+      dmAgent.get(`/api/campaigns/${campaignId}/characters`),
+    ]);
+
+    expect(myList.body.characters.map((char: { id: string }) => char.id)).toEqual([characterId]);
+    expect(otherList.body.characters.map((char: { id: string }) => char.id)).toEqual([otherCharacterId]);
+    expect(mySheet.status).toBe(200);
+    expect(forbiddenSheet.status).toBe(403);
+    expect(otherSheet.status).toBe(200);
+    expect(otherForbiddenSheet.status).toBe(403);
+    expect(dmSheet.status).toBe(200);
+    expect(myCampaign.body.campaign.characters.map((char: { id: string }) => char.id)).toEqual([characterId]);
+    expect(myCampaign.body.campaign.memberships.find((m: { userId: string }) => m.userId === playerId).characterIds).toEqual([characterId]);
+    expect(myCampaign.body.campaign.memberships.filter((m: { userId: string }) => m.userId !== playerId)
+      .every((m: { characterIds: string[] }) => m.characterIds.length === 0)).toBe(true);
+    expect(myCampaigns.body.campaigns[0].memberships.filter((m: { userId: string }) => m.userId !== playerId)
+      .every((m: { characterIds: string[] }) => m.characterIds.length === 0)).toBe(true);
+    expect(myRoster.body.roster.flatMap((m: { characters: Array<{ id: string }> }) => m.characters.map((c) => c.id))).toEqual([characterId]);
+    expect(dmRoster.body.roster.flatMap((m: { characters: Array<{ id: string }> }) => m.characters.map((c) => c.id))).toEqual(expect.arrayContaining([characterId, otherCharacterId]));
   });
 
   it('rejects assignment by a player', async () => {

@@ -76,7 +76,7 @@ export function canEditCharacter(
 
 /**
  * Check if a user can view a character
- * In campaign context, all members can view characters
+ * In campaign context, DMs and assigned players can view full sheets
  * @param user - Current user
  * @param character - Character to view
  * @param membership - User's campaign membership (if in campaign context)
@@ -84,7 +84,7 @@ export function canEditCharacter(
  */
 export function canViewCharacter(
   user: User,
-  character: Character,
+  character: Pick<Character, 'id' | 'userId'>,
   membership?: CampaignMembership
 ): boolean {
   // User owns the character
@@ -92,12 +92,8 @@ export function canViewCharacter(
     return true;
   }
 
-  // User is a member of the campaign (any role can view)
-  if (membership) {
-    return true;
-  }
-
-  return false;
+  return membership?.role === 'DM' ||
+    (membership?.role === 'PLAYER' && membership.characterIds.includes(character.id)) || false;
 }
 
 /** Character-based rolls use the sheet's modifiers and require control. */

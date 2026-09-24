@@ -22,7 +22,7 @@ import type { Character, Campaign } from '@/types';
 import Button from '@/components/ui/Button';
 
 export default function CharactersPage() {
-  const { logout } = useAuth();
+  const { logout, user } = useAuth();
   const navigate = useNavigate();
   const { showToast } = useToast();
   const { mascotUrl } = useTheme();
@@ -280,6 +280,7 @@ export default function CharactersPage() {
                   <CharacterCard
                     key={character.id}
                     character={character}
+                    canManage={character.userId === user?.id}
                     campaign={getCharacterCampaign(character)}
                     onEdit={handleEdit}
                     onCopy={handleCopy}

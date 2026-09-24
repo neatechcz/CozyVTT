@@ -87,6 +87,10 @@ router.get('/', authenticated, async (req: AuthenticatedRequest, res: Response) 
 
     const campaigns = memberships.map((m) => ({
       ...m.campaign,
+      memberships: m.role === 'DM' ? m.campaign.memberships : m.campaign.memberships.map((member) => ({
+        ...member,
+        characterIds: member.userId === userId ? member.characterIds : [],
+      })),
       userRole: m.role,
       characterIds: m.characterIds,
     }));
@@ -261,9 +265,18 @@ router.get('/:campaignId', campaignMember, async (req: AuthenticatedRequest, res
 
     // Flatten sessions array → activeSession (first open session, or null)
     const { sessions: _sessions, ...campaignRest } = campaign;
+    const isDM = req.campaignMembership!.role === 'DM';
+    const userId = req.session.userId!;
+    const visibleIds = new Set(req.campaignMembership!.characterIds);
     return res.status(200).json({
       campaign: {
         ...campaignRest,
+        characters: isDM ? campaignRest.characters : campaignRest.characters.filter((character) =>
+          character.userId === userId || visibleIds.has(character.id)),
+        memberships: isDM ? campaignRest.memberships : campaignRest.memberships.map((member) => ({
+          ...member,
+          characterIds: member.userId === userId ? member.characterIds : [],
+        })),
         activeSession: (_sessions && _sessions.length > 0) ? _sessions[0] : null,
         userRole: req.campaignMembership!.role,
       },
@@ -380,6 +393,9 @@ router.put('/:campaignId/characters/:characterId/controller', campaignDM, async 
 router.get('/:campaignId/characters', campaignMember, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { campaignId } = req.params;
+    const isDM = req.campaignMembership!.role === 'DM';
+    const userId = req.session.userId!;
+    const visibleIds = new Set(req.campaignMembership!.characterIds);
 
     // Fetch all memberships with their character assignments
     const memberships = await prisma.campaignMembership.findMany({
@@ -424,7 +440,8 @@ router.get('/:campaignId/characters', campaignMember, async (req: AuthenticatedR
     const roster = memberships.map((membership) => {
       const memberCharacters = characters
         .filter((c) => membership.characterIds.includes(c.id) &&
-          (membership.role !== 'DM' || !playerCharacterIds.has(c.id)))
+          (membership.role !== 'DM' || !playerCharacterIds.has(c.id)) &&
+          (isDM || c.userId === userId || visibleIds.has(c.id)))
         .map(({ data, ...char }) => ({
           ...char,
           hp: extractCharacterHp(char.gameSystem, data),

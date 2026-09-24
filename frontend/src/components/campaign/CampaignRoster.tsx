@@ -9,7 +9,7 @@ import { useCampaign } from '@/contexts/CampaignContext';
 import { useWebSocket } from '@/contexts/WebSocketContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { api } from '@/services/api';
-import { canEditCharacter, canRollAsCharacter } from '@/services/permissions';
+import { canEditCharacter, canRollAsCharacter, canViewCharacter } from '@/services/permissions';
 import { Users, Crown, Gamepad2, Eye, Edit, UserPlus, X, Minus, Plus, Dices } from 'lucide-react';
 import type { CharacterHpInfo } from '@/utils/characterHp';
 import CharacterSheetViewerModal from '../character/CharacterSheetViewerModal';
@@ -342,7 +342,7 @@ export default function CampaignRoster() {
               icon: Eye,
               label: 'View Character Sheet',
               onClick: handleViewCharacterSheet,
-              visible: true,
+              visible: canViewCharacter(user, { id: contextMenu.characterId, userId: contextMenu.characterUserId }, userMembership),
             },
             {
               icon: Dices,

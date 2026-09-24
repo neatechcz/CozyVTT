@@ -11,6 +11,7 @@ import {
 import {
   canDeleteCampaign,
   canEditCharacter,
+  canViewCharacter,
   canManageDmRoles,
   canRemoveCampaignMember,
   canRollAsCharacter,
@@ -121,6 +122,13 @@ describe('delegated character access', () => {
     expect(canEditCharacter(player, character, playerMembership)).toBe(false);
     expect(canEditCharacter(player, character, { ...playerMembership, role: CampaignRole.SPECTATOR, characterIds: ['mich'] })).toBe(false);
     expect(canEditCharacter(coDm, character, coDmMembership)).toBe(true);
+  });
+
+  it('shows a full sheet only to its owner, a DM or its assigned player', () => {
+    expect(canViewCharacter(player, character, { ...playerMembership, characterIds: ['mich'] })).toBe(true);
+    expect(canViewCharacter(player, character, playerMembership)).toBe(false);
+    expect(canViewCharacter(player, character, { ...playerMembership, role: CampaignRole.SPECTATOR, characterIds: ['mich'] })).toBe(false);
+    expect(canViewCharacter(coDm, character, coDmMembership)).toBe(true);
   });
 
   it('offers sheet rolls to the owner, DM and assigned player only', () => {
