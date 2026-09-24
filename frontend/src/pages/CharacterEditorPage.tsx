@@ -468,9 +468,11 @@ export default function CharacterEditorPage() {
       {/* Character Sheet Editor */}
       <div
         className="p-4"
-        onChangeCapture={invalidatePendingSave}
-        onInputCapture={invalidatePendingSave}
-        onClickCapture={invalidatePendingSave}
+        // Let controlled sheet fields process their event before clearing the
+        // retained retry. A capture-phase update can rerender the wrapper
+        // before the child applies the first edit after a failed save.
+        onChange={invalidatePendingSave}
+        onClick={invalidatePendingSave}
       >
         <CharacterSheetRouter
           character={character}
