@@ -23,6 +23,9 @@ export interface InitializeSetupRequest {
   email: string;
   password: string;
   displayName: string;
+  instanceName: string;
+  timezone: string;
+  allowRegistration: boolean;
 }
 
 export interface InitializeSetupResponse {

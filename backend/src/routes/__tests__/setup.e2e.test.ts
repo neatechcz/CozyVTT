@@ -1,12 +1,13 @@
 /**
  * Setup route session integration tests.
- * Uses an in-memory Express session store and mocks user creation/settings so
- * the test never writes to a configured application database.
+ * Uses an in-memory Express session store and a small settings fake so the
+ * test never writes to a configured application database.
  */
 
 jest.mock('../../services/systemSettings', () => ({
-  isSetupCompleted: jest.fn().mockResolvedValue(false),
-  markSetupCompleted: jest.fn().mockResolvedValue(undefined),
+  getSystemSettings: jest.fn(),
+  isSetupCompleted: jest.fn(),
+  markSetupCompleted: jest.fn(),
   hasUsers: jest.fn().mockResolvedValue(false),
 }));
 
@@ -19,7 +20,9 @@ import express from 'express';
 import session from 'express-session';
 import request from 'supertest';
 import { registerUser } from '../../services/auth';
+import { getSystemSettings, isSetupCompleted, markSetupCompleted } from '../../services/systemSettings';
 import setupRoutes from '../setup';
+import adminRoutes from '../admin';
 
 const setupAdmin = {
   id: 'setup-admin-id',
@@ -29,6 +32,10 @@ const setupAdmin = {
 };
 
 const registerUserMock = jest.mocked(registerUser);
+const getSystemSettingsMock = jest.mocked(getSystemSettings);
+const isSetupCompletedMock = jest.mocked(isSetupCompleted);
+const markSetupCompletedMock = jest.mocked(markSetupCompleted);
+let persistedSettings: Record<string, unknown>;
 
 function createSetupTestApp(): express.Express {
   const app = express();
@@ -56,6 +63,7 @@ function createSetupTestApp(): express.Express {
     });
   });
   app.use('/api/setup', setupRoutes);
+  app.use('/api/admin', adminRoutes);
   return app;
 }
 
@@ -63,6 +71,18 @@ describe('POST /api/setup/init session', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     registerUserMock.mockResolvedValue(setupAdmin as never);
+    persistedSettings = {
+      setupCompleted: false,
+      instanceName: 'CozyVTT',
+      timezone: 'UTC',
+      allowRegistration: false,
+    };
+    isSetupCompletedMock.mockImplementation(async () => persistedSettings.setupCompleted as boolean);
+    getSystemSettingsMock.mockImplementation(async () => persistedSettings as never);
+    markSetupCompletedMock.mockImplementation(async (...args: any[]) => {
+      const initialSettings = args[0] as Record<string, unknown> | undefined;
+      Object.assign(persistedSettings, initialSettings, { setupCompleted: true });
+    });
   });
 
   it('rotates and persists the authenticated admin session before returning success', async () => {
@@ -89,5 +109,71 @@ describe('POST /api/setup/init session', () => {
       displayName: setupAdmin.displayName,
       platformRole: setupAdmin.platformRole,
     });
+  });
+
+  it('persists reviewed instance settings during setup and exposes them through admin settings', async () => {
+    const agent = request.agent(createSetupTestApp());
+    const response = await agent.post('/api/setup/init').send({
+      email: setupAdmin.email,
+      password: 'StrongSetupPass1!',
+      displayName: setupAdmin.displayName,
+      instanceName: '  Supplement Audit  ',
+      timezone: 'Europe/Prague',
+      allowRegistration: true,
+    });
+
+    expect(response.status).toBe(201);
+    expect(markSetupCompletedMock).toHaveBeenCalledWith({
+      instanceName: 'Supplement Audit',
+      timezone: 'Europe/Prague',
+      allowRegistration: true,
+    });
+
+    const settingsResponse = await agent.get('/api/admin/settings');
+    expect(settingsResponse.status).toBe(200);
+    expect(settingsResponse.body.settings).toEqual(expect.objectContaining({
+      setupCompleted: true,
+      instanceName: 'Supplement Audit',
+      timezone: 'Europe/Prague',
+      allowRegistration: true,
+    }));
+
+    const reinitResponse = await agent.post('/api/setup/init').send({
+      email: 'second-admin@example.test',
+      password: 'StrongSetupPass1!',
+      displayName: 'Second Admin',
+    });
+    expect(reinitResponse.status).toBe(400);
+    expect(registerUserMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects an invalid timezone before creating the administrator', async () => {
+    const response = await request(createSetupTestApp()).post('/api/setup/init').send({
+      email: setupAdmin.email,
+      password: 'StrongSetupPass1!',
+      displayName: setupAdmin.displayName,
+      instanceName: 'Supplement Audit',
+      timezone: 'Mars/Olympus_Mons',
+      allowRegistration: true,
+    });
+
+    expect(response.status).toBe(400);
+    expect(registerUserMock).not.toHaveBeenCalled();
+    expect(markSetupCompletedMock).not.toHaveBeenCalled();
+  });
+
+  it('rejects a non-boolean public registration setting before creating the administrator', async () => {
+    const response = await request(createSetupTestApp()).post('/api/setup/init').send({
+      email: setupAdmin.email,
+      password: 'StrongSetupPass1!',
+      displayName: setupAdmin.displayName,
+      instanceName: 'Supplement Audit',
+      timezone: 'Europe/Prague',
+      allowRegistration: 'true',
+    });
+
+    expect(response.status).toBe(400);
+    expect(registerUserMock).not.toHaveBeenCalled();
+    expect(markSetupCompletedMock).not.toHaveBeenCalled();
   });
 });

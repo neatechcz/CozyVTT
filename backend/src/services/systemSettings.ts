@@ -43,12 +43,19 @@ export async function isSetupCompleted(): Promise<boolean> {
 /**
  * Mark setup as completed
  */
-export async function markSetupCompleted(): Promise<void> {
+export async function markSetupCompleted(initialSettings: {
+  instanceName?: string;
+  timezone?: string;
+  allowRegistration?: boolean;
+} = {}): Promise<void> {
   // Ensure a settings row exists, then mark every row complete. updateMany makes
   // this idempotent and self-healing even if a create race left more than one
-  // settings row behind — all of them read as complete afterward.
+  // settings row behind. Apply the first-run choices to those rows at the same
+  // time so the canonical row returned by getSystemSettings reflects the review.
   await getSystemSettings();
-  await prisma.systemSettings.updateMany({ data: { setupCompleted: true } });
+  await prisma.systemSettings.updateMany({
+    data: { ...initialSettings, setupCompleted: true },
+  });
 }
 
 /**

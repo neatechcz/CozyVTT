@@ -192,6 +192,9 @@ export default function SetupWizardPage() {
         email: adminData.email,
         password: adminData.password,
         displayName: adminData.displayName,
+        instanceName: systemConfig.instanceName,
+        timezone: systemConfig.timezone,
+        allowRegistration: systemConfig.enableRegistration,
       });
 
       // Refresh auth context to get the new admin user
@@ -634,6 +637,7 @@ function Step3SystemConfig({ data, setData, fieldErrors }: Step3Props) {
               fieldErrors.instanceName ? 'border-spirit-red' : ''
             }`}
             placeholder="CozyVTT"
+            maxLength={100}
           />
           <p className="mt-1 text-xs text-warm-gray">
             This will appear in the browser tab and page titles

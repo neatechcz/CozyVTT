@@ -2,7 +2,7 @@
 import { Router, Request, Response } from 'express';
 import { isSetupCompleted, markSetupCompleted, hasUsers } from '../services/systemSettings';
 import { registerUser, sanitizeUser } from '../services/auth';
-import { validateEmail, validatePasswordStrength } from '../utils/validation';
+import { sanitizeInput, validateEmail, validatePasswordStrength } from '../utils/validation';
 import logger from '../utils/logger';
 
 const router = Router();
@@ -45,7 +45,14 @@ router.get('/status', async (_req: Request, res: Response) => {
  */
 router.post('/init', async (req: Request, res: Response) => {
   try {
-    const { email, password, displayName } = req.body;
+    const {
+      email,
+      password,
+      displayName,
+      instanceName,
+      timezone,
+      allowRegistration,
+    } = req.body || {};
 
     // Check if setup is already completed
     const setupComplete = await isSetupCompleted();
@@ -91,6 +98,63 @@ router.post('/init', async (req: Request, res: Response) => {
       });
     }
 
+    // Older clients can omit the optional instance settings and keep their
+    // existing defaults. Validate and sanitize any reviewed values before
+    // creating the first administrator account.
+    const initialSettings: {
+      instanceName?: string;
+      timezone?: string;
+      allowRegistration?: boolean;
+    } = {};
+
+    if (instanceName !== undefined) {
+      if (typeof instanceName !== 'string') {
+        return res.status(400).json({
+          error: 'Validation Error',
+          message: 'Instance name must be text',
+        });
+      }
+
+      const safeInstanceName = sanitizeInput(instanceName).slice(0, 100);
+      if (safeInstanceName.length < 2) {
+        return res.status(400).json({
+          error: 'Validation Error',
+          message: 'Instance name must be at least 2 characters',
+        });
+      }
+      initialSettings.instanceName = safeInstanceName;
+    }
+
+    if (timezone !== undefined) {
+      if (typeof timezone !== 'string') {
+        return res.status(400).json({
+          error: 'Validation Error',
+          message: 'Timezone must be text',
+        });
+      }
+
+      const safeTimezone = sanitizeInput(timezone).slice(0, 50);
+      try {
+        new Intl.DateTimeFormat('en-US', { timeZone: safeTimezone });
+      } catch {
+        return res.status(400).json({
+          error: 'Validation Error',
+          message: 'Invalid timezone',
+        });
+      }
+      initialSettings.timezone = safeTimezone;
+    }
+
+    if (allowRegistration !== undefined) {
+      if (typeof allowRegistration !== 'boolean') {
+        return res.status(400).json({
+          error: 'Validation Error',
+          message: 'Public registration setting must be a boolean',
+        });
+      }
+      initialSettings.allowRegistration = allowRegistration;
+    }
+
     // Create first admin user
     // registerUser automatically makes first user an ADMIN
     const user = await registerUser({
@@ -100,7 +164,7 @@ router.post('/init', async (req: Request, res: Response) => {
     });
 
     // Mark setup as completed
-    await markSetupCompleted();
+    await markSetupCompleted(initialSettings);
 
     // Rotate the session ID so setup cannot carry an attacker-provided or
     // pre-authentication session into the new administrator session.
