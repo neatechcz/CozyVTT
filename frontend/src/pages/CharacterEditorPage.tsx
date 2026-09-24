@@ -240,6 +240,10 @@ export default function CharacterEditorPage() {
           const message = err.response?.data?.message || err.message || 'Failed to save character';
           setSaveError(`${message}\n\nPlease review your changes and try saving again.`);
         }
+
+        // Let game-system sheet wrappers know the save failed so they stay in
+        // edit mode and keep the draft mounted.
+        throw err;
       } finally {
         savingRef.current = false;
         setSaving(false);
@@ -317,7 +321,11 @@ export default function CharacterEditorPage() {
   const handleManualSave = async () => {
     const pendingSave = pendingSaveRef.current;
     if (pendingSave) {
-      await handleSave(pendingSave.data, true, pendingSave.tokenImageUrl);
+      try {
+        await handleSave(pendingSave.data, true, pendingSave.tokenImageUrl);
+      } catch {
+        // handleSave keeps the validation/server message in the page alert.
+      }
     }
   };
 

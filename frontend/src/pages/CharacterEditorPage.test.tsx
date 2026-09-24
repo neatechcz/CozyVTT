@@ -40,8 +40,27 @@ vi.mock('@/components/character-sheets/CharacterSheetRouter', async () => {
   const React = await import('react');
 
   return {
-    CharacterSheetRouter: ({ character, onSave }: any) => {
+    CharacterSheetRouter: ({ character, onSave, mode }: any) => {
       const [draft, setDraft] = React.useState(character.data.details);
+      const [currentMode, setCurrentMode] = React.useState(mode);
+
+      const save = async (...args: any[]) => {
+        try {
+          await onSave(...args);
+          setCurrentMode('view');
+        } catch {
+          // The real sheet wrappers stay in edit mode when onSave rejects.
+        }
+      };
+
+      if (currentMode === 'view') {
+        return (
+          <section aria-label="Character sheet view">
+            <p>Character sheet view</p>
+            <button type="button" onClick={() => setCurrentMode('edit')}>Edit character</button>
+          </section>
+        );
+      }
 
       return (
         <section aria-label="Character sheet editor">
@@ -54,25 +73,25 @@ vi.mock('@/components/character-sheets/CharacterSheetRouter', async () => {
           </label>
           <button
             type="button"
-            onClick={() => void onSave({ ...character.data, details: draft })}
+            onClick={() => void save({ ...character.data, details: draft })}
           >
             Save sheet
           </button>
           <button
             type="button"
-            onClick={() => void onSave({ ...character.data, details: draft }, true, '/api/assets/tokens/uploaded-photo')}
+            onClick={() => void save({ ...character.data, details: draft }, true, '/api/assets/tokens/uploaded-photo')}
           >
             Save with photo
           </button>
           <button
             type="button"
-            onClick={() => void onSave({ ...character.data, details: draft }, true, '/api/assets/tokens/newer-photo')}
+            onClick={() => void save({ ...character.data, details: draft }, true, '/api/assets/tokens/newer-photo')}
           >
             Save with newer photo
           </button>
           <button
             type="button"
-            onClick={() => void onSave({ ...character.data, details: draft }, true, '')}
+            onClick={() => void save({ ...character.data, details: draft }, true, '')}
           >
             Clear token image
           </button>
@@ -171,6 +190,7 @@ describe('CharacterEditorPage', () => {
       expect(screen.getByRole('heading', { name: 'Editing: Robin' })).toBeInTheDocument();
       expect(screen.queryByText('Unsaved changes')).not.toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Retry Save' })).not.toBeInTheDocument();
+      expect(screen.getByText('Character sheet view')).toBeInTheDocument();
     } finally {
       unmount();
       consoleError.mockRestore();
