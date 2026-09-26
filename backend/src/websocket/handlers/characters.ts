@@ -6,6 +6,7 @@
 import { Server } from 'socket.io';
 import { AuthenticatedSocket } from '../auth';
 import { prisma } from '../../config/database';
+import { resolveUpdatedBy } from '../../services/characterPatch';
 import logger from '../../utils/logger';
 
 export function registerCharacterHandlers(io: Server, socket: AuthenticatedSocket): void {
@@ -54,6 +55,7 @@ export function registerCharacterHandlers(io: Server, socket: AuthenticatedSocke
       let current: number;
       let max: number;
       let temp: number;
+      let hpPath: string;
 
       switch (character.gameSystem) {
         case 'DND_5E':
@@ -66,6 +68,7 @@ export function registerCharacterHandlers(io: Server, socket: AuthenticatedSocke
           temp = typeof charData.hp.temporary === 'number' ? charData.hp.temporary : 0;
           current = Math.max(0, Math.min(max, (typeof charData.hp.current === 'number' ? charData.hp.current : max) + delta));
           charData.hp.current = current;
+          hpPath = 'hp.current';
           break;
         }
         case 'CALL_OF_CTHULHU_7E': {
@@ -77,6 +80,7 @@ export function registerCharacterHandlers(io: Server, socket: AuthenticatedSocke
           temp = 0;
           current = Math.max(0, Math.min(max, (typeof charData.derivedStats.hp.current === 'number' ? charData.derivedStats.hp.current : max) + delta));
           charData.derivedStats.hp.current = current;
+          hpPath = 'derivedStats.hp.current';
           break;
         }
         default:
@@ -85,7 +89,7 @@ export function registerCharacterHandlers(io: Server, socket: AuthenticatedSocke
       }
 
       // Save updated character data
-      await prisma.character.update({
+      const savedCharacter = await prisma.character.update({
         where: { id: characterId },
         data: { data: charData },
       });
@@ -95,6 +99,20 @@ export function registerCharacterHandlers(io: Server, socket: AuthenticatedSocke
         characterId,
         hp: { current, max, temp },
       });
+
+      // Same event as PUT/PATCH so open sheet editors merge the HP change
+      try {
+        const updatedBy = await resolveUpdatedBy(prisma, socket.userId!);
+        io.to(socket.campaignId!).emit('character.updated', {
+          characterId,
+          character: savedCharacter,
+          userId: socket.userId,
+          changedPaths: [hpPath],
+          updatedBy,
+        });
+      } catch (error) {
+        logger.error('Failed to broadcast character update', { err: error });
+      }
 
     } catch (error) {
       logger.error('character.hp.update failed', { err: error });

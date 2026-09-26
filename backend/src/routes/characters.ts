@@ -1,11 +1,20 @@
 import { Router, Response } from 'express';
+import { z } from 'zod';
 import { AuthenticatedRequest } from '../middleware/rbac';
 import { authenticated } from '../middleware/compose';
 import { prisma } from '../config/database';
 import { normalizeAssetUrl } from '../utils/asset-urls';
+import { diffPaths, isSafePath } from '../utils/character-paths';
 import { GameSystem } from '../game-systems';
 import { validateCharacterData } from '../validators/game-systems';
 import { CreateCharacterSchema, UpdateCharacterSchema } from '../validators/characters';
+import {
+  InvalidPathError,
+  MAX_CHANGES,
+  TooManyChangesError,
+  patchCharacterData,
+  resolveUpdatedBy,
+} from '../services/characterPatch';
 import { broadcastToCampaign } from '../websocket/utils';
 import logger from '../utils/logger';
 
@@ -15,6 +24,86 @@ const router = Router();
  * Character Management Routes
  * Character Management
  */
+
+/** PATCH /api/characters/:id/data body */
+const PatchCharacterDataSchema = z.object({
+  changes: z
+    .array(
+      z.object({
+        path: z.string().refine(isSafePath, 'Invalid change path'),
+        base: z.unknown(),
+        value: z.unknown(),
+      })
+    )
+    .max(MAX_CHANGES, `At most ${MAX_CHANGES} changes per request`),
+});
+
+/**
+ * Edit permission shared by PUT and PATCH:
+ * character owner, or DM of the campaign the character is in.
+ */
+async function canEditCharacter(
+  req: AuthenticatedRequest,
+  character: { userId: string; campaignId: string | null }
+): Promise<boolean> {
+  const userId = req.session.userId!;
+
+  // Owner can always edit
+  if (character.userId === userId) {
+    return true;
+  }
+
+  // If character is in a campaign, check if requester is the DM
+  if (character.campaignId) {
+    const membership = await prisma.campaignMembership.findUnique({
+      where: {
+        userId_campaignId: {
+          userId,
+          campaignId: character.campaignId,
+        },
+      },
+    });
+
+    if (membership && membership.role === 'DM') {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Broadcast `character.updated` to the character's campaign (if any).
+ * Never throws — a failed broadcast must not fail the request.
+ */
+async function broadcastCharacterUpdated(
+  character: { id: string; campaignId: string | null },
+  userId: string,
+  changedPaths: string[]
+): Promise<void> {
+  if (!character.campaignId) return;
+
+  try {
+    const updatedBy = await resolveUpdatedBy(prisma, userId);
+    broadcastToCampaign(character.campaignId, 'character.updated', {
+      characterId: character.id,
+      character,
+      userId,
+      changedPaths,
+      updatedBy,
+    });
+  } catch (error) {
+    logger.error('Failed to broadcast character update', { err: error });
+  }
+}
+
+function formatValidationErrors(errors: z.ZodError) {
+  return errors.issues.map((issue) => ({
+    path: issue.path.join('.'),
+    message: issue.message,
+    code: issue.code,
+  }));
+}
 
 /**
  * POST /api/characters
@@ -410,30 +499,7 @@ router.put('/:id', authenticated, async (req: AuthenticatedRequest, res: Respons
     }
 
     // Check authorization
-    let isAuthorized = false;
-
-    // Owner can always edit
-    if (character.userId === userId) {
-      isAuthorized = true;
-    }
-
-    // If character is in a campaign, check if requester is the DM
-    if (!isAuthorized && character.campaignId) {
-      const membership = await prisma.campaignMembership.findUnique({
-        where: {
-          userId_campaignId: {
-            userId,
-            campaignId: character.campaignId,
-          },
-        },
-      });
-
-      if (membership && membership.role === 'DM') {
-        isAuthorized = true;
-      }
-    }
-
-    if (!isAuthorized) {
+    if (!(await canEditCharacter(req, character))) {
       return res.status(403).json({
         error: 'Forbidden',
         message: 'You do not have permission to edit this character',
@@ -447,11 +513,7 @@ router.put('/:id', authenticated, async (req: AuthenticatedRequest, res: Respons
         return res.status(400).json({
           error: 'Validation Error',
           message: 'Character data does not match game system schema',
-          validationErrors: validationResult.errors.issues.map((issue) => ({
-            path: issue.path.join('.'),
-            message: issue.message,
-            code: issue.code,
-          })),
+          validationErrors: formatValidationErrors(validationResult.errors),
         });
       }
     }
@@ -479,18 +541,11 @@ router.put('/:id', authenticated, async (req: AuthenticatedRequest, res: Respons
     });
 
     // Broadcast character update to campaign if character is in a campaign
-    if (updatedCharacter.campaignId) {
-      try {
-        broadcastToCampaign(updatedCharacter.campaignId, 'character.updated', {
-          characterId: updatedCharacter.id,
-          character: updatedCharacter,
-          userId,
-        });
-      } catch (error) {
-        logger.error('Failed to broadcast character update', { err: error });
-        // Don't fail the request if broadcast fails
-      }
-    }
+    await broadcastCharacterUpdated(
+      updatedCharacter,
+      userId,
+      diffPaths(character.data, updatedCharacter.data)
+    );
 
     return res.status(200).json({
       message: 'Character updated successfully',
@@ -498,6 +553,95 @@ router.put('/:id', authenticated, async (req: AuthenticatedRequest, res: Respons
     });
   } catch (error) {
     logger.error('Error updating character', { err: error });
+    return res.status(500).json({
+      error: 'Internal Server Error',
+      message: 'Failed to update character',
+    });
+  }
+});
+
+/**
+ * PATCH /api/characters/:id/data
+ * Field-level compare-and-set update of character data.
+ * Body: { changes: [{ path, base, value }] } (max 200)
+ * 200 { character, applied, conflicts } — 409 same body when nothing applied
+ * and there are conflicts — 400 with validationErrors when the merged data
+ * fails the game-system schema (nothing written).
+ * Requires: Authentication
+ * Authorization: same as PUT (owner OR campaign DM)
+ */
+router.patch('/:id/data', authenticated, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const userId = req.session.userId!;
+    const { id } = req.params;
+
+    const parsed = PatchCharacterDataSchema.safeParse(req.body);
+    if (!parsed.success) {
+      return res.status(400).json({
+        error: 'Validation Error',
+        message: parsed.error.issues[0]?.message ?? 'Invalid change set',
+      });
+    }
+
+    const character = await prisma.character.findUnique({
+      where: { id },
+    });
+
+    if (!character) {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'Character not found',
+      });
+    }
+
+    if (!(await canEditCharacter(req, character))) {
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'You do not have permission to edit this character',
+      });
+    }
+
+    let result;
+    try {
+      result = await patchCharacterData(
+        { prisma, validate: validateCharacterData },
+        { id, changes: parsed.data.changes.map(({ path, base, value }) => ({ path, base, value })) }
+      );
+    } catch (error) {
+      if (error instanceof InvalidPathError || error instanceof TooManyChangesError) {
+        return res.status(400).json({
+          error: 'Validation Error',
+          message: error.message,
+        });
+      }
+      throw error;
+    }
+
+    if (result.status === 'not_found') {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'Character not found',
+      });
+    }
+
+    if (result.status === 'invalid') {
+      return res.status(400).json({
+        error: 'Validation Error',
+        message: 'Character data does not match game system schema',
+        validationErrors: formatValidationErrors(result.errors),
+      });
+    }
+
+    const { character: updatedCharacter, applied, conflicts, written } = result;
+
+    if (written) {
+      await broadcastCharacterUpdated(updatedCharacter, userId, applied);
+    }
+
+    const status = applied.length === 0 && conflicts.length > 0 ? 409 : 200;
+    return res.status(status).json({ character: updatedCharacter, applied, conflicts });
+  } catch (error) {
+    logger.error('Error patching character data', { err: error });
     return res.status(500).json({
       error: 'Internal Server Error',
       message: 'Failed to update character',
