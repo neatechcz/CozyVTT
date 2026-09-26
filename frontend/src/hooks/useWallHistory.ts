@@ -19,6 +19,14 @@ export interface WallHistoryResult {
   push: (next: WallSegment[]) => void;
   /** Restore walls directly (e.g. from server sync) without pushing to history. */
   replace: (next: WallSegment[]) => void;
+  /**
+   * Restore walls and drop the entire history (undo and redo) — stack
+   * becomes `[next]` at idx 0. Used for a map change or a confirmed remote
+   * change: existing undo/redo entries predate it and would otherwise
+   * resurrect stale walls (and, on undo, re-broadcast them, erasing the
+   * remote change for everyone).
+   */
+  reset: (next: WallSegment[]) => void;
   undo: () => WallSegment[] | null;
   redo: () => WallSegment[] | null;
   canUndo: boolean;
@@ -54,6 +62,11 @@ export function useWallHistory(initial: WallSegment[]): WallHistoryResult {
     });
   }, []);
 
+  // Reset: drop the whole history and start a fresh single-entry stack.
+  const reset = useCallback((next: WallSegment[]) => {
+    setWs({ stack: [next], idx: 0 });
+  }, []);
+
   // Undo: move idx back by 1. Returns the restored segments (or null if already at start).
   // Reads ws directly so the caller gets the correct wall list back synchronously.
   const undo = useCallback((): WallSegment[] | null => {
@@ -75,6 +88,7 @@ export function useWallHistory(initial: WallSegment[]): WallHistoryResult {
     walls: ws.stack[ws.idx] ?? initial,
     push,
     replace,
+    reset,
     undo,
     redo,
     canUndo: ws.idx > 0,
