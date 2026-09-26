@@ -77,26 +77,38 @@ export function registerEventHandlers(io: Server): void {
           return;
         }
 
-        // SECURITY: Enforce single campaign context per socket
-        // Leave previous campaign room if exists
-        if (socket.campaignId && socket.campaignId !== data.campaignId) {
-          await socket.leave(socket.campaignId);
+        // SECURITY: Enforce single campaign context per socket. Everything
+        // below runs synchronously (no await) so the room, campaignId and role
+        // always change together — per-recipient filters that read
+        // socket.role can never see one campaign's room with another's role.
+        const previousCampaignId = socket.campaignId;
+        const previousQuiet = socket.quiet === true;
+        const quiet = data.quiet === true;
 
-          // Notify old campaign that user left (a quiet join was never announced)
-          if (!socket.quiet) {
-            socket.to(socket.campaignId).emit('user.left', {
-              userId: socket.userId,
-              timestamp: new Date().toISOString(),
-            });
+        // Leave every other campaign room (keep the socket's own and the
+        // user's personal room): exactly one campaign room per socket
+        for (const room of [...socket.rooms]) {
+          if (room !== socket.id && room !== socket.userId && room !== data.campaignId) {
+            void socket.leave(room);
           }
         }
 
         // Join the campaign room — quiet sockets too, so they receive every
-        // campaign event; only the announcements below are skipped for them
-        const quiet = data.quiet === true;
+        // campaign event; only the announcements are skipped for them
         socket.join(data.campaignId);
-        socket.campaignId = data.campaignId; // Update stored campaign ID
-        socket.quiet = quiet;
+        socket.campaignId = data.campaignId;
+        socket.role = result.role;
+        // Re-authenticating to the campaign it was already announced in stays
+        // announced, so its leave is announced too
+        socket.quiet = previousCampaignId === data.campaignId ? previousQuiet && quiet : quiet;
+
+        // Notify old campaign that user left (a quiet join was never announced)
+        if (previousCampaignId && previousCampaignId !== data.campaignId && !previousQuiet) {
+          socket.to(previousCampaignId).emit('user.left', {
+            userId: socket.userId,
+            timestamp: new Date().toISOString(),
+          });
+        }
 
         // Notify the user they've been authenticated
         socket.emit('authenticated', {

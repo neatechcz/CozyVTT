@@ -2,8 +2,21 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 type Listener = (...args: any[]) => void;
 
+class FakeManager {
+  listeners = new Map<string, Listener[]>();
+  on(event: string, listener: Listener) {
+    this.listeners.set(event, [...(this.listeners.get(event) ?? []), listener]);
+    return this;
+  }
+  fire(event: string, ...args: unknown[]) {
+    for (const listener of this.listeners.get(event) ?? []) listener(...args);
+  }
+}
+
 class FakeSocket {
   connected = false;
+  /** socket.io Manager: reconnect_* events are emitted here, not on the socket */
+  io = new FakeManager();
   listeners = new Map<string, Listener[]>();
   emitted: { event: string; payload: unknown }[] = [];
   disconnect = vi.fn(() => {
@@ -158,5 +171,50 @@ describe('socketClient quiet campaign join', () => {
     expect(created[1].disconnect).not.toHaveBeenCalled();
     expect(client.isConnected()).toBe(true);
     expect(client.getSocket()).toBe(created[1]);
+  });
+});
+
+describe('socketClient lifecycle signals', () => {
+  it('signals replaced for every new underlying socket, authenticated for every join, disconnected for drops', async () => {
+    vi.useFakeTimers();
+    const client = await freshClient();
+    const events: string[] = [];
+    const unsubscribe = client.onLifecycle((event) => events.push(event));
+
+    const connecting = client.connect('camp-1', { quiet: true });
+    expect(events).toEqual(['replaced']);
+    handshake(created[0]);
+    await connecting;
+    expect(events).toEqual(['replaced', 'authenticated']);
+
+    // socket.io auto-reconnect of the same socket
+    created[0].fire('disconnect', 'transport close');
+    created[0].fire('connect');
+    created[0].fire('connected', { userId: 'u1' });
+    created[0].fire('authenticated', { campaignId: 'camp-1' });
+    expect(events).toEqual(['replaced', 'authenticated', 'disconnected', 'authenticated']);
+
+    // Server-forced disconnect: the client recreates the underlying socket
+    created[0].fire('disconnect', 'io server disconnect');
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(created).toHaveLength(2);
+    expect(events.slice(-2)).toEqual(['disconnected', 'replaced']);
+
+    unsubscribe();
+    handshake(created[1]);
+    expect(events.slice(-1)).toEqual(['replaced']);
+  });
+
+  it('signals failed when socket.io gives up reconnecting', async () => {
+    const client = await freshClient();
+    const events: string[] = [];
+    client.onLifecycle((event) => events.push(event));
+    const connecting = client.connect('camp-1', { quiet: true });
+    handshake(created[0]);
+    await connecting;
+
+    created[0].io.fire('reconnect_failed');
+
+    expect(events.slice(-1)).toEqual(['failed']);
   });
 });

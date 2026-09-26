@@ -52,8 +52,11 @@ export async function authenticateSocket(socket: AuthenticatedSocket): Promise<b
 }
 
 /**
- * Validate campaign membership and assign role
- * Called when user joins a campaign room
+ * Validate campaign membership and return the user's role in it.
+ * Called when user joins a campaign room. Pure check: it does NOT touch
+ * socket.campaignId / socket.role — the authenticate handler moves the socket
+ * (leaves the old campaign room, joins the new one, sets both) in one step, so
+ * a socket is never in one campaign's room with another campaign's role.
  */
 export async function authenticateCampaign(
   socket: AuthenticatedSocket,
@@ -88,9 +91,6 @@ export async function authenticateCampaign(
     if (!membership) {
       return { success: false, error: 'You are not a member of this campaign' };
     }
-
-    socket.campaignId = campaignId;
-    socket.role = membership.role;
 
     return {
       success: true,

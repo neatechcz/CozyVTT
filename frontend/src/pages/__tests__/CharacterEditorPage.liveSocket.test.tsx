@@ -11,7 +11,9 @@ import CharacterEditorPage from '../CharacterEditorPage';
 const mocks = vi.hoisted(() => ({
   getCharacter: vi.fn(),
   getCampaign: vi.fn(),
+  apiGetCharacter: vi.fn(),
   user: { id: 'owner', displayName: 'Owner' },
+  lifecycle: new Set<(event: string) => void>(),
   socket: {
     on: vi.fn(),
     off: vi.fn(),
@@ -19,6 +21,8 @@ const mocks = vi.hoisted(() => ({
     disconnect: vi.fn(),
     isConnected: vi.fn(),
     getCampaignId: vi.fn(),
+    getSocket: vi.fn(),
+    onLifecycle: vi.fn(),
   },
 }));
 
@@ -30,7 +34,7 @@ vi.mock('@/services/character.service', () => ({
 vi.mock('@/services/campaign.service', () => ({ default: { getCampaign: mocks.getCampaign } }));
 vi.mock('@/services/socket', () => ({ socketClient: mocks.socket, default: mocks.socket }));
 vi.mock('@/services/api', () => {
-  const api = { patchCharacterData: vi.fn(), getCharacter: vi.fn(), updateCharacter: vi.fn(), uploadAsset: vi.fn() };
+  const api = { patchCharacterData: vi.fn(), getCharacter: mocks.apiGetCharacter, updateCharacter: vi.fn(), uploadAsset: vi.fn() };
   return { api, default: api };
 });
 vi.mock('@/components/character-sheets/CharacterSheetRouter', () => ({
@@ -62,9 +66,32 @@ function renderPage() {
   );
 }
 
+const OFFLINE = 'Živé změny nejsou dostupné — změny ostatních se zobrazí po obnovení spojení.';
+
+/** The currently subscribed character.updated listener (latest on(), not yet off()) */
 function characterUpdatedHandler() {
-  const call = mocks.socket.on.mock.calls.find(([event]) => event === 'character.updated');
-  return call?.[1] as ((payload: unknown) => void) | undefined;
+  const ons = mocks.socket.on.mock.calls.filter(([event]) => event === 'character.updated');
+  const offs = new Set(mocks.socket.off.mock.calls.filter(([event]) => event === 'character.updated').map(([, cb]) => cb));
+  const live = ons.map(([, cb]) => cb).filter((cb) => !offs.has(cb));
+  return live[live.length - 1] as ((payload: unknown) => void) | undefined;
+}
+
+function lifecycle(event: 'replaced' | 'authenticated' | 'disconnected' | 'failed') {
+  act(() => {
+    for (const listener of [...mocks.lifecycle]) listener(event);
+  });
+}
+
+function remoteRename(name: string, updatedAt: string) {
+  act(() => {
+    characterUpdatedHandler()!({
+      characterId: 'char-1',
+      character: { ...character, name, updatedAt },
+      userId: 'dm',
+      changedPaths: ['characterName'],
+      updatedBy: { userId: 'dm', displayName: 'DM' },
+    });
+  });
 }
 
 beforeEach(() => {
@@ -75,6 +102,13 @@ beforeEach(() => {
   mocks.socket.connect.mockResolvedValue(undefined);
   mocks.socket.isConnected.mockReturnValue(false);
   mocks.socket.getCampaignId.mockReturnValue(null);
+  mocks.socket.getSocket.mockReturnValue(null);
+  mocks.lifecycle.clear();
+  mocks.socket.onLifecycle.mockImplementation((listener: (event: string) => void) => {
+    mocks.lifecycle.add(listener);
+    return () => mocks.lifecycle.delete(listener);
+  });
+  mocks.apiGetCharacter.mockResolvedValue({ character });
 });
 
 describe('CharacterEditorPage live socket', () => {
@@ -101,10 +135,11 @@ describe('CharacterEditorPage live socket', () => {
   it('disconnects on unmount the connection it opened itself', async () => {
     const { unmount } = renderPage();
     await waitFor(() => expect(characterUpdatedHandler()).toBeDefined());
+    const handler = characterUpdatedHandler();
 
     unmount();
 
-    expect(mocks.socket.off).toHaveBeenCalledWith('character.updated', characterUpdatedHandler());
+    expect(mocks.socket.off).toHaveBeenCalledWith('character.updated', handler);
     expect(mocks.socket.disconnect).toHaveBeenCalledTimes(1);
   });
 
@@ -149,20 +184,151 @@ describe('CharacterEditorPage live socket', () => {
     expect(mocks.socket.connect).not.toHaveBeenCalled();
   });
 
-  it('keeps editing without live updates when the connection is refused', async () => {
+  it('after a failed connect, listens on the socket socket.io keeps retrying and catches up once it joins', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-    mocks.socket.connect.mockRejectedValue(new Error('Not a member of this campaign'));
+    mocks.socket.connect.mockRejectedValue(new Error('xhr poll error'));
+    // The client still holds the socket for this campaign; socket.io retries it
+    mocks.socket.getCampaignId.mockReturnValue('camp-1');
+    mocks.socket.getSocket.mockReturnValue({});
 
-    const { unmount } = renderPage();
-    await screen.findByText('Editing: Tomin');
-    await waitFor(() => expect(warn).toHaveBeenCalled());
-
-    expect(characterUpdatedHandler()).toBeUndefined();
+    renderPage();
+    expect(await screen.findByText(OFFLINE)).toBeInTheDocument();
+    expect(warn).toHaveBeenCalledTimes(1);
     expect(screen.getByText('sheet')).toBeInTheDocument();
 
-    unmount();
-    // It started that connection attempt, so it cleans it up
-    expect(mocks.socket.disconnect).toHaveBeenCalledTimes(1);
+    // socket.io reconnects and the rejoin succeeds
+    mocks.apiGetCharacter.mockResolvedValue({
+      character: { ...character, name: 'Tomin Reloaded', updatedAt: '2026-09-26T00:30:00.000Z' },
+    });
+    lifecycle('authenticated');
+
+    expect(screen.queryByText(OFFLINE)).not.toBeInTheDocument();
+    // Anything missed while offline is reloaded
+    expect(await screen.findByText('Editing: Tomin Reloaded')).toBeInTheDocument();
+    expect(mocks.apiGetCharacter).toHaveBeenCalledWith('char-1');
+    // and later events are applied
+    remoteRename('Tomin Live', '2026-09-26T01:00:00.000Z');
+    expect(screen.getByText('Editing: Tomin Live')).toBeInTheDocument();
+    expect(mocks.socket.connect).toHaveBeenCalledTimes(1);
     warn.mockRestore();
+  });
+
+  it('retries with backoff when the connection attempt left no socket', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    mocks.socket.connect.mockRejectedValue(new Error('Connection timeout - server did not respond'));
+
+    try {
+      renderPage();
+      expect(await screen.findByText(OFFLINE)).toBeInTheDocument();
+      expect(mocks.socket.connect).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000);
+      });
+      expect(mocks.socket.connect).toHaveBeenCalledTimes(2);
+
+      mocks.socket.connect.mockResolvedValue(undefined);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      expect(mocks.socket.connect).toHaveBeenCalledTimes(3);
+      expect(screen.queryByText(OFFLINE)).not.toBeInTheDocument();
+
+      // Connected: no more attempts
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+      expect(mocks.socket.connect).toHaveBeenCalledTimes(3);
+      expect(warn).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('shows the indicator while disconnected and reloads the character on every rejoin', async () => {
+    mocks.socket.getCampaignId.mockReturnValue('camp-1');
+    renderPage();
+    await waitFor(() => expect(mocks.socket.connect).toHaveBeenCalled());
+    await screen.findByText('Editing: Tomin');
+
+    lifecycle('authenticated');
+    await waitFor(() => expect(mocks.apiGetCharacter).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText(OFFLINE)).not.toBeInTheDocument();
+
+    lifecycle('disconnected');
+    expect(screen.getByText(OFFLINE)).toBeInTheDocument();
+
+    lifecycle('authenticated');
+    expect(screen.queryByText(OFFLINE)).not.toBeInTheDocument();
+    await waitFor(() => expect(mocks.apiGetCharacter).toHaveBeenCalledTimes(2));
+  });
+
+  it('schedules a new connection when socket.io gives up', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    mocks.socket.getCampaignId.mockReturnValue('camp-1');
+    try {
+      renderPage();
+      await waitFor(() => expect(mocks.socket.connect).toHaveBeenCalledTimes(1));
+
+      lifecycle('failed');
+      expect(screen.getByText(OFFLINE)).toBeInTheDocument();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000);
+      });
+      expect(mocks.socket.connect).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('subscribes again when the client replaces its underlying socket', async () => {
+    renderPage();
+    await waitFor(() => expect(characterUpdatedHandler()).toBeDefined());
+    const before = characterUpdatedHandler();
+    const subscriptions = mocks.socket.on.mock.calls.length;
+
+    lifecycle('replaced');
+
+    await waitFor(() => expect(mocks.socket.on.mock.calls.length).toBe(subscriptions + 1));
+    expect(mocks.socket.off).toHaveBeenCalledWith('character.updated', before);
+    expect(characterUpdatedHandler()).not.toBe(before);
+    remoteRename('Tomin After Replace', '2026-09-26T02:00:00.000Z');
+    expect(screen.getByText('Editing: Tomin After Replace')).toBeInTheDocument();
+  });
+
+  it('unmounting mid-connect: the late rejection neither warns nor retries', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const error = vi.spyOn(console, 'error');
+    let rejectConnect: (reason: Error) => void = () => undefined;
+    mocks.socket.connect.mockImplementation(
+      () => new Promise<void>((_, reject) => {
+        rejectConnect = reject;
+      }),
+    );
+
+    try {
+      const { unmount } = renderPage();
+      await waitFor(() => expect(mocks.socket.connect).toHaveBeenCalledTimes(1));
+
+      unmount();
+      expect(mocks.socket.disconnect).toHaveBeenCalledTimes(1);
+      expect(mocks.lifecycle.size).toBe(0);
+
+      await act(async () => {
+        rejectConnect(new Error('Connection abandoned'));
+        await vi.advanceTimersByTimeAsync(60_000);
+      });
+
+      expect(warn).not.toHaveBeenCalled();
+      expect(error).not.toHaveBeenCalled();
+      expect(mocks.socket.connect).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+      error.mockRestore();
+      vi.useRealTimers();
+    }
   });
 });

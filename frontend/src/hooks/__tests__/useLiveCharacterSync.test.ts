@@ -548,6 +548,53 @@ describe('useLiveCharacterSync', () => {
     expect(outcome?.status).toBe('saved');
   });
 
+  it('refresh() reloads the character and merges it like a remote update (unknown author)', async () => {
+    const { hook, onServerCharacter } = setup();
+    userEdits(hook, { ...baseData(), characterName: 'Tomin the Bold', hp: { current: 5, maximum: 10, temporary: 0 } });
+    const server = makeCharacter(
+      { ...baseData(), experiencePoints: 150, hp: { current: 3, maximum: 10, temporary: 0 } },
+      { updatedAt: '2026-09-26T00:00:05.000Z' },
+    );
+    mocks.getCharacter.mockResolvedValue({ character: server });
+
+    await act(async () => {
+      await hook.result.current.refresh();
+    });
+
+    expect(mocks.getCharacter).toHaveBeenCalledWith('char-1');
+    expect(onServerCharacter).toHaveBeenCalledWith(server);
+    expect(formOf(hook)).toEqual({
+      ...baseData(),
+      characterName: 'Tomin the Bold',
+      experiencePoints: 150,
+      hp: { current: 3, maximum: 10, temporary: 0 },
+    });
+    expect(hook.result.current.resets).toEqual([
+      expect.objectContaining({ path: 'hp.current', mine: 5, theirs: 3, author: expect.objectContaining({ userId: null }) }),
+    ]);
+  });
+
+  it('refresh() ignores a copy older than the form base', async () => {
+    const { hook, socket, onServerCharacter } = setup();
+    act(() =>
+      socket.emit('character.updated', {
+        ...remoteEvent({ ...baseData(), experiencePoints: 150 }, ['experiencePoints']),
+        character: makeCharacter({ ...baseData(), experiencePoints: 150 }, { updatedAt: '2026-09-26T00:00:09.000Z' }),
+      }),
+    );
+    onServerCharacter.mockClear();
+    mocks.getCharacter.mockResolvedValue({
+      character: makeCharacter(baseData(), { updatedAt: '2026-09-26T00:00:01.000Z' }),
+    });
+
+    await act(async () => {
+      await hook.result.current.refresh();
+    });
+
+    expect(onServerCharacter).not.toHaveBeenCalled();
+    expect(formOf(hook).experiencePoints).toBe(150);
+  });
+
   it('switching to another character gives a fresh store: no resets, not dirty', () => {
     const socket = createFakeSocket();
     const first = makeCharacter(baseData());

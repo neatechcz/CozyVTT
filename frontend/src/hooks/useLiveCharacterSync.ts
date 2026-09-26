@@ -69,6 +69,11 @@ export interface UseLiveCharacterSyncResult {
   save: (localData?: unknown) => Promise<LiveSaveOutcome>;
   /** The user has edits that are not on the server */
   isDirty: boolean;
+  /**
+   * Reloads the character and merges it like a remote update (e.g. after a
+   * socket (re)join, to catch changes whose broadcast was missed)
+   */
+  refresh: () => Promise<void>;
 }
 
 const CHARACTER_UPDATED = 'character.updated';
@@ -114,26 +119,26 @@ export function useLiveCharacterSync({
 
   const characterId = store ? trackedIdRef.current : null;
 
+  /** A newer server copy of the tracked character (event or reload) */
+  function applyServerCharacter(serverCharacter: Character, author: SheetResetAuthor) {
+    const target = storeRef.current;
+    if (!target) return;
+    // Older than what we already have (e.g. our own save's answer came first)
+    if (isOlder(serverCharacter.updatedAt, target.getState().baseUpdatedAt)) return;
+
+    onServerCharacterRef.current?.(serverCharacter);
+    target.applyRemote((serverCharacter.data ?? {}) as CharacterDataObject, author, serverCharacter.updatedAt);
+  }
+
   useEffect(() => {
     if (!socket || !characterId) return;
 
     const handleCharacterUpdated = (payload: CharacterUpdatedPayload) => {
       if (!payload || payload.characterId !== trackedIdRef.current || !payload.character) return;
-      const target = storeRef.current;
-      if (!target) return;
-      // Older than what we already have (e.g. our own save's answer came first)
-      if (isOlder(payload.character.updatedAt, target.getState().baseUpdatedAt)) return;
-
-      onServerCharacterRef.current?.(payload.character);
-
       const author: SheetResetAuthor = payload.updatedBy
         ? { userId: payload.updatedBy.userId, displayName: payload.updatedBy.displayName }
         : { ...UNKNOWN_AUTHOR, userId: payload.userId ?? null };
-      target.applyRemote(
-        (payload.character.data ?? {}) as CharacterDataObject,
-        author,
-        payload.character.updatedAt,
-      );
+      applyServerCharacter(payload.character, author);
     };
 
     socket.on(CHARACTER_UPDATED, handleCharacterUpdated);
@@ -141,6 +146,14 @@ export function useLiveCharacterSync({
       socket.off(CHARACTER_UPDATED, handleCharacterUpdated);
     };
   }, [socket, characterId]);
+
+  const refresh = useCallback(async (): Promise<void> => {
+    const id = trackedIdRef.current;
+    if (!id || !storeRef.current) return;
+    const { character: fresh } = await api.getCharacter(id);
+    if (trackedIdRef.current !== id || fresh.id !== id) return;
+    applyServerCharacter(fresh, UNKNOWN_AUTHOR);
+  }, []);
 
   const save = useCallback(async (): Promise<LiveSaveOutcome> => {
     const id = trackedIdRef.current;
@@ -217,6 +230,7 @@ export function useLiveCharacterSync({
     dismissResets,
     save,
     isDirty,
+    refresh,
   };
 }
 

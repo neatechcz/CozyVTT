@@ -1,6 +1,7 @@
 /**
- * Quiet campaign join (authenticate { quiet: true }) unit test.
- * Mocked Prisma, auth and domain handlers with a fake socket — no database.
+ * authenticate / disconnect lifecycle unit test: quiet campaign join and
+ * campaign switching. Mocked Prisma and domain handlers, the real
+ * authenticateCampaign, and a fake socket — no database.
  *
  * A quiet socket (the standalone character editor page) joins the campaign
  * room and receives every campaign event, but is never announced: no
@@ -9,11 +10,15 @@
  */
 
 jest.mock('../../config/database', () => ({
-  prisma: { user: { findUnique: jest.fn() } },
+  prisma: {
+    user: { findUnique: jest.fn() },
+    campaign: { findUnique: jest.fn() },
+    campaignMembership: { findUnique: jest.fn() },
+  },
 }));
 jest.mock('../auth', () => ({
+  ...jest.requireActual('../auth'),
   authenticateSocket: jest.fn(),
-  authenticateCampaign: jest.fn(),
 }));
 jest.mock('../utils', () => ({ sendSystemMessage: jest.fn() }));
 jest.mock('../../utils/logger', () => ({
@@ -34,13 +39,14 @@ jest.mock('../handlers/fog', () => ({ registerFogHandlers: jest.fn() }));
 jest.mock('../handlers/lights', () => ({ registerLightHandlers: jest.fn() }));
 
 import { prisma } from '../../config/database';
-import { authenticateSocket, authenticateCampaign } from '../auth';
+import { authenticateSocket } from '../auth';
 import { sendSystemMessage } from '../utils';
 import { registerEventHandlers } from '../events';
 
 const findUser = prisma.user.findUnique as jest.Mock;
 const authSocket = authenticateSocket as jest.Mock;
-const authCampaign = authenticateCampaign as jest.Mock;
+const findCampaign = prisma.campaign.findUnique as jest.Mock;
+const findMembership = prisma.campaignMembership.findUnique as jest.Mock;
 const systemMessage = sendSystemMessage as jest.Mock;
 
 type Handler = (payload?: unknown) => Promise<void> | void;
@@ -52,6 +58,7 @@ async function connectSocket() {
     id: 'sock-1',
     userId: 'user-1',
     rooms: new Set<string>(['sock-1']),
+    request: {},
     on: jest.fn((event: string, handler: Handler) => {
       handlers[event] = handler;
     }),
@@ -87,7 +94,13 @@ async function connectSocket() {
 beforeEach(() => {
   jest.clearAllMocks();
   authSocket.mockResolvedValue(true);
-  authCampaign.mockResolvedValue({ success: true, role: 'PLAYER' });
+  // user-1 is a PLAYER in camp-1 and the DM of camp-2; not a member of camp-3
+  const roles: Record<string, string> = { 'camp-1': 'PLAYER', 'camp-2': 'DM' };
+  findCampaign.mockImplementation(async ({ where }: any) => ({ id: where.id, name: where.id, status: 'ACTIVE' }));
+  findMembership.mockImplementation(async ({ where }: any) => {
+    const role = roles[where.userId_campaignId.campaignId];
+    return role ? { role } : null;
+  });
   findUser.mockResolvedValue({ displayName: 'Václav' });
 });
 
@@ -117,7 +130,6 @@ describe('authenticate', () => {
 
     await handlers.authenticate({ campaignId: 'camp-1', quiet: true });
 
-    expect(authCampaign).toHaveBeenCalledWith(socket, 'camp-1');
     expect(socket.join).toHaveBeenCalledWith('camp-1');
     expect(socket.rooms.has('camp-1')).toBe(true);
     expect(socket.campaignId).toBe('camp-1');
@@ -130,14 +142,13 @@ describe('authenticate', () => {
   });
 
   test('quiet join is still refused without campaign membership', async () => {
-    authCampaign.mockResolvedValue({ success: false, error: 'Not a member of this campaign' });
     const { socket, handlers, emitted } = await connectSocket();
 
-    await handlers.authenticate({ campaignId: 'camp-1', quiet: true });
+    await handlers.authenticate({ campaignId: 'camp-3', quiet: true });
 
-    expect(socket.join).not.toHaveBeenCalledWith('camp-1');
+    expect(socket.join).not.toHaveBeenCalledWith('camp-3');
     expect(socket.campaignId).toBeUndefined();
-    expect(emitted('error')).toEqual([{ message: 'Not a member of this campaign' }]);
+    expect(emitted('error')).toEqual([{ message: 'You are not a member of this campaign' }]);
     expect(emitted('authenticated')).toEqual([]);
   });
 
@@ -178,6 +189,61 @@ describe('authenticate', () => {
     expect(roomEvents('user.joined').map((e) => e.room)).toEqual(['camp-2']);
     expect(systemMessage).toHaveBeenCalledTimes(1);
     expect(systemMessage).toHaveBeenCalledWith('camp-2', 'Václav has joined the campaign.', expect.anything());
+  });
+});
+
+describe('campaign switch', () => {
+  test('a switched socket leaves the old room: exactly one campaign room, with the new role', async () => {
+    const { socket, handlers, emitted } = await connectSocket();
+    await handlers.authenticate({ campaignId: 'camp-1' });
+    expect(socket.role).toBe('PLAYER');
+
+    await handlers.authenticate({ campaignId: 'camp-2' });
+
+    expect(socket.leave).toHaveBeenCalledWith('camp-1');
+    expect([...socket.rooms].sort()).toEqual(['camp-2', 'sock-1', 'user-1']);
+    expect(socket.campaignId).toBe('camp-2');
+    expect(socket.role).toBe('DM');
+    expect(emitted('authenticated').map((p: any) => [p.campaignId, p.role])).toEqual([
+      ['camp-1', 'PLAYER'],
+      ['camp-2', 'DM'],
+    ]);
+  });
+
+  test('a refused switch keeps the socket in its old campaign with its old role', async () => {
+    const { socket, handlers, emitted, roomEvents } = await connectSocket();
+    await handlers.authenticate({ campaignId: 'camp-1' });
+
+    await handlers.authenticate({ campaignId: 'camp-3' });
+
+    expect(emitted('error')).toEqual([{ message: 'You are not a member of this campaign' }]);
+    expect([...socket.rooms].sort()).toEqual(['camp-1', 'sock-1', 'user-1']);
+    expect(socket.campaignId).toBe('camp-1');
+    expect(socket.role).toBe('PLAYER');
+    expect(roomEvents('user.left')).toEqual([]);
+  });
+
+  test('a quiet re-authenticate to an announced campaign keeps the announced leave', async () => {
+    const { handlers, roomEvents } = await connectSocket();
+    await handlers.authenticate({ campaignId: 'camp-1' });
+    await handlers.authenticate({ campaignId: 'camp-1', quiet: true });
+    systemMessage.mockClear();
+
+    await handlers.disconnect('transport close');
+
+    expect(systemMessage).toHaveBeenCalledWith('camp-1', 'Václav has left the campaign.', expect.anything());
+    expect(roomEvents('user.left').map((e) => e.room)).toEqual(['camp-1']);
+  });
+
+  test('authenticateCampaign only validates — it does not move the socket', async () => {
+    const { authenticateCampaign } = jest.requireActual('../auth');
+    const socket: any = { userId: 'user-1', campaignId: 'camp-1', role: 'PLAYER' };
+
+    const result = await authenticateCampaign(socket, 'camp-2');
+
+    expect(result).toEqual({ success: true, role: 'DM' });
+    expect(socket.campaignId).toBe('camp-1');
+    expect(socket.role).toBe('PLAYER');
   });
 });
 

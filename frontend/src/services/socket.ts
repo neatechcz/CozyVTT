@@ -43,6 +43,16 @@ const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || '';
 
 type EventCallback<T = any> = (data: T) => void;
 
+/**
+ * Client-level connection signals (not server events):
+ * - `replaced`: a new underlying socket was created — listeners added with
+ *   `on()` were on the old one and must be added again
+ * - `authenticated`: joined the campaign room (first join and every rejoin)
+ * - `disconnected`: the connection dropped (socket.io may be retrying)
+ * - `failed`: socket.io gave up reconnecting
+ */
+export type SocketLifecycleEvent = 'replaced' | 'authenticated' | 'disconnected' | 'failed';
+
 class SocketClient {
   private socket: Socket | null = null;
   private reconnectAttempts = 0;
@@ -51,6 +61,7 @@ class SocketClient {
   private isConnecting = false;
   private campaignId: string | null = null;
   private quiet = false;
+  private lifecycleListeners = new Set<(event: SocketLifecycleEvent) => void>();
 
   constructor() {
     // Socket will be initialized when connect() is called
@@ -103,6 +114,7 @@ class SocketClient {
         randomizationFactor: 0.5,
       });
       this.socket = socket;
+      this.emitLifecycle('replaced');
 
       // Set up a timeout to prevent hanging forever
       const connectionTimeout = setTimeout(() => {
@@ -124,6 +136,7 @@ class SocketClient {
         clearTimeout(connectionTimeout);
         this.isConnecting = false;
         resolve();
+        this.emitLifecycle('authenticated');
       });
 
       // Low-level socket.io connection established
@@ -155,6 +168,7 @@ class SocketClient {
 
       // Disconnected
       this.socket.on('disconnect', (reason) => {
+        this.emitLifecycle('disconnected');
         if (reason === 'io server disconnect') {
           // Server disconnected us, need to manually reconnect
           this.reconnect();
@@ -177,6 +191,11 @@ class SocketClient {
         console.error('[Socket] Reconnection failed after max attempts');
         clearTimeout(connectionTimeout);
         reject(new Error('Failed to reconnect after maximum attempts'));
+      });
+
+      // socket.io v4 emits reconnect_* on the Manager, not on the socket
+      socket.io?.on('reconnect_failed', () => {
+        if (this.socket === socket) this.emitLifecycle('failed');
       });
 
       // Error events from server
@@ -219,6 +238,18 @@ class SocketClient {
 
     // Reset connection state to allow reconnection
     this.isConnecting = false;
+  }
+
+  /** Subscribe to client-level connection signals; returns the unsubscribe. */
+  onLifecycle(listener: (event: SocketLifecycleEvent) => void): () => void {
+    this.lifecycleListeners.add(listener);
+    return () => {
+      this.lifecycleListeners.delete(listener);
+    };
+  }
+
+  private emitLifecycle(event: SocketLifecycleEvent) {
+    for (const listener of [...this.lifecycleListeners]) listener(event);
   }
 
   isConnected(): boolean {

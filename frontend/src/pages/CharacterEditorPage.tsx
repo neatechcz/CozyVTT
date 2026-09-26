@@ -3,9 +3,9 @@
 // Allows editing characters for any game system
 // ============================================
 
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, Save, AlertCircle, Loader2, Lock, Download } from 'lucide-react';
+import { ArrowLeft, Save, AlertCircle, Loader2, Lock, Download, WifiOff } from 'lucide-react';
 import CharacterSheetSkeleton from '@/components/skeletons/CharacterSheetSkeleton';
 import ConfirmDialog from '@/components/common/ConfirmDialog';
 import { useAuth } from '@/contexts/AuthContext';
@@ -15,11 +15,14 @@ import campaignService from '@/services/campaign.service';
 import { canEditCharacter } from '@/services/permissions';
 import { CharacterSheetRouter } from '@/components/character-sheets/CharacterSheetRouter';
 import SheetResetPanel from '@/components/character/SheetResetPanel';
-import { useLiveCharacterSync } from '@/hooks/useLiveCharacterSync';
+import { useLiveCharacterSync, type LiveSyncSocket } from '@/hooks/useLiveCharacterSync';
 import { buildDnd5eFormData } from '@/components/character-sheets/dnd5e/dnd5eFormData';
 import socketClient from '@/services/socket';
 import { GameSystem, type Character, type Campaign } from '@/types';
 import Button from '@/components/ui/Button';
+
+/** Backoff between attempts to open the live connection; the last repeats */
+const LIVE_RETRY_DELAYS_MS = [2_000, 5_000, 10_000, 30_000];
 
 export default function CharacterEditorPage() {
   const { id } = useParams<{ id: string }>();
@@ -49,37 +52,22 @@ export default function CharacterEditorPage() {
   const isDnd5e = character?.gameSystem === GameSystem.DND_5E;
   const liveCampaignId =
     isDnd5e && !loading && !permissionError ? character?.campaignId ?? null : null;
-  const [liveSocket, setLiveSocket] = useState<typeof socketClient | null>(null);
-
-  useEffect(() => {
-    if (!liveCampaignId) return;
-
-    let active = true;
-    // Already connected to this campaign (e.g. from the campaign page): reuse
-    // it as is and leave it connected afterwards
-    const openedHere =
-      !(socketClient.isConnected() && socketClient.getCampaignId() === liveCampaignId);
-
-    if (openedHere) {
-      socketClient
-        .connect(liveCampaignId, { quiet: true })
-        .then(() => {
-          if (active) setLiveSocket(socketClient);
-        })
-        .catch((err) => {
-          // Not critical — saves still detect conflicts via PATCH
-          if (active) console.warn('Live character updates unavailable:', err);
-        });
-    } else {
-      setLiveSocket(socketClient);
-    }
-
-    return () => {
-      active = false;
-      setLiveSocket(null);
-      if (openedHere) socketClient.disconnect();
-    };
-  }, [liveCampaignId]);
+  const [liveStatus, setLiveStatus] = useState<'connecting' | 'live' | 'offline'>('connecting');
+  // Bumped whenever the client creates a new underlying socket: listeners
+  // added through socketClient.on() stayed on the old one
+  const [socketGeneration, setSocketGeneration] = useState(0);
+  const liveSocket = useMemo<(LiveSyncSocket & { generation: number }) | null>(
+    () =>
+      liveCampaignId
+        ? {
+            // A new object per socket generation makes the hook subscribe again
+            generation: socketGeneration,
+            on: (event, callback) => socketClient.on(event, callback),
+            off: (event, callback) => socketClient.off(event, callback),
+          }
+        : null,
+    [liveCampaignId, socketGeneration],
+  );
 
   const liveSync = useLiveCharacterSync({
     character,
@@ -88,6 +76,89 @@ export default function CharacterEditorPage() {
     onServerCharacter: setCharacter,
     normalizeForm: buildDnd5eFormData,
   });
+  const { refresh: refreshLiveCharacter } = liveSync;
+
+  useEffect(() => {
+    if (!liveCampaignId) return;
+
+    let active = true;
+    let retryTimer: number | undefined;
+    let retries = 0;
+    let warned = false;
+    const isOurCampaign = () => socketClient.getCampaignId() === liveCampaignId;
+    // Already connected to this campaign (e.g. from the campaign page): reuse
+    // it as is and leave it connected afterwards
+    const openedHere = !(socketClient.isConnected() && isOurCampaign());
+
+    const scheduleRetry = () => {
+      if (!openedHere || retryTimer !== undefined) return;
+      const delay = LIVE_RETRY_DELAYS_MS[Math.min(retries, LIVE_RETRY_DELAYS_MS.length - 1)];
+      retries += 1;
+      retryTimer = window.setTimeout(() => {
+        retryTimer = undefined;
+        if (active) connectLive();
+      }, delay);
+    };
+
+    const connectLive = () => {
+      socketClient
+        .connect(liveCampaignId, { quiet: true })
+        .then(() => {
+          if (active) setLiveStatus('live');
+        })
+        .catch((err) => {
+          if (!active) return;
+          // Not critical — saves still detect conflicts via PATCH
+          if (!warned) console.warn('Live character updates unavailable:', err);
+          warned = true;
+          setLiveStatus('offline');
+          // A socket that still exists is retried by socket.io itself; its
+          // rejoin signals 'authenticated'. Otherwise try again later.
+          if (!(isOurCampaign() && socketClient.getSocket())) scheduleRetry();
+        });
+    };
+
+    const unsubscribe = socketClient.onLifecycle((event) => {
+      if (!active) return;
+      if (event === 'replaced') {
+        setSocketGeneration((generation) => generation + 1);
+        return;
+      }
+      if (!isOurCampaign()) return;
+      if (event === 'authenticated') {
+        retries = 0;
+        warned = false;
+        window.clearTimeout(retryTimer);
+        retryTimer = undefined;
+        setLiveStatus('live');
+        // Catch up on anything whose broadcast was missed (before the join
+        // or while disconnected); merged like any remote change
+        refreshLiveCharacter().catch((err) => {
+          if (active) console.warn('Failed to reload the character after joining:', err);
+        });
+      } else if (event === 'disconnected') {
+        setLiveStatus('offline');
+      } else if (event === 'failed') {
+        setLiveStatus('offline');
+        scheduleRetry();
+      }
+    });
+
+    if (openedHere) {
+      setLiveStatus('connecting');
+      connectLive();
+    } else {
+      setLiveStatus('live');
+    }
+
+    return () => {
+      active = false;
+      window.clearTimeout(retryTimer);
+      unsubscribe();
+      if (openedHere) socketClient.disconnect();
+    };
+  }, [liveCampaignId, refreshLiveCharacter]);
+
   const unsavedChanges = isDnd5e ? liveSync.isDirty : hasUnsavedChanges;
 
   // ============================================
@@ -444,6 +515,15 @@ export default function CharacterEditorPage() {
 
       {/* Character Sheet Editor */}
       <div className="p-4">
+        {liveCampaignId && liveStatus === 'offline' && (
+          <div
+            role="status"
+            className="glass-panel mb-4 p-3 text-sm text-sunset-orange flex items-center gap-2"
+          >
+            <WifiOff className="w-4 h-4 shrink-0" />
+            Živé změny nejsou dostupné — změny ostatních se zobrazí po obnovení spojení.
+          </div>
+        )}
         {isDnd5e && (
           <SheetResetPanel resets={liveSync.resets} onDismiss={liveSync.dismissResets} />
         )}
