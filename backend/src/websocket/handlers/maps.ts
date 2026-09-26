@@ -7,6 +7,7 @@ import { AuthenticatedSocket } from '../auth';
 import { prisma } from '../../config/database';
 import { getTokenViewersFor, filterMapData } from '../../utils/spirit-layer';
 import logger from '../../utils/logger';
+import { bumpMapVersion } from '../mapVersion';
 
 export function registerMapHandlers(io: Server, socket: AuthenticatedSocket): void {
   /**
@@ -35,6 +36,8 @@ export function registerMapHandlers(io: Server, socket: AuthenticatedSocket): vo
         socket.emit('error', { message: 'Map not found' });
         return;
       }
+
+      bumpMapVersion(mapId); // cached drag snapshots reload with the switch
 
       // Broadcast role-filtered map data to each connected campaign member.
       // spiritVisible is included in the payload so the client knows whether

@@ -19,6 +19,7 @@ import {
 } from '../../utils/spirit-layer';
 import logger from '../../utils/logger';
 import { Token, tokenMoveLimiter } from '../shared';
+import { bumpMapVersion, getMapVersion } from '../mapVersion';
 
 /** A socket in the campaign room with the inputs of its token view. */
 interface RoomViewer {
@@ -78,9 +79,13 @@ function isPublicToken(map: TokenViewMap, token: Token | undefined): boolean {
 /**
  * Emit a token-scoped event (`token.move.start`, `token.moved`) to the DMs
  * and to every other socket whose view of `tokens` contains the token — the
- * same per-recipient rules as map.changed. A visible material-plane token on
- * a map without dynamic lighting goes to the whole room (every player sees it
- * there), which keeps the per-frame drag path free of per-socket work.
+ * same per-recipient rules as map.changed (filterTokensForViewer).
+ *
+ * Shortcut: a visible material-plane token on a map without dynamic lighting
+ * goes to the whole room in one emit, but only when every non-DM viewer has a
+ * userId and sees the material plane (nobody is in the spirit realm, where
+ * only spirit-layer tokens are visible) — then each of them would receive it
+ * anyway. Otherwise every viewer is checked.
  */
 async function emitToTokenViewers(
   io: Server,
@@ -93,13 +98,17 @@ async function emitToTokenViewers(
   { excludeSender, viewers }: { excludeSender: boolean; viewers: () => Promise<RoomViewer[]> }
 ): Promise<void> {
   const campaignId = sender.campaignId!;
-  if (isPublicToken(map, tokens.find((t) => t.id === tokenId))) {
+  const roomViewers = await viewers();
+  const everyPlayerSeesMaterialPlane = roomViewers.every(
+    ({ viewer }) => viewer.role === 'DM' || (!!viewer.userId && !viewer.spiritVisible)
+  );
+  if (everyPlayerSeesMaterialPlane && isPublicToken(map, tokens.find((t) => t.id === tokenId))) {
     (excludeSender ? sender.to(campaignId) : io.to(campaignId)).emit(event, payload);
     return;
   }
 
   const view = tokenViewCache(map);
-  for (const { socket, viewer } of await viewers()) {
+  for (const { socket, viewer } of roomViewers) {
     if (excludeSender && socket.id === sender.id) continue;
     if (viewer.role === 'DM' || view(tokens, viewer).some((t) => t.id === tokenId)) {
       socket.emit(event, payload);
@@ -112,6 +121,8 @@ type FrameData = { tokenId: string; mapId: string; x: number; y: number };
 /** What one drag reuses between frames: the map snapshot and the room's viewers. */
 interface DragContext {
   mapId: string;
+  /** getMapVersion(mapId) when loaded: a later map write invalidates the context. */
+  version: number;
   map: TokenViewMap & { campaignId: string; tokens: unknown };
   viewers: () => Promise<RoomViewer[]>;
   expiresAt: number;
@@ -121,7 +132,9 @@ export function registerTokenHandlers(io: Server, socket: AuthenticatedSocket): 
   // ── Per-socket drag state ────────────────────────────────────────────────
   // The map snapshot (bounds, tokens, walls, lights with their light polygons)
   // and the room's viewers are resolved once per drag and reused until
-  // token.move.end, for at most DRAG_CONTEXT_TTL_MS.
+  // token.move.end, for at most DRAG_CONTEXT_TTL_MS, and only while the map's
+  // in-process version (mapVersion.ts) is unchanged — any map writer bumps it,
+  // so the next frame reloads.
   let drag: DragContext | null = null;
   // Frames are processed one at a time, in order; while one is processed only
   // the newest waiting frame is kept (stale frames are dropped, never queued).
@@ -130,7 +143,10 @@ export function registerTokenHandlers(io: Server, socket: AuthenticatedSocket): 
   let lastFrame: FrameData | null = null;
 
   async function loadDragContext(mapId: string): Promise<DragContext | null> {
-    if (drag && drag.mapId === mapId && Date.now() < drag.expiresAt) return drag;
+    if (drag && drag.mapId === mapId && drag.version === getMapVersion(mapId) && Date.now() < drag.expiresAt) {
+      return drag;
+    }
+    const version = getMapVersion(mapId);
     const map = await prisma.map.findUnique({ where: { id: mapId }, select: DRAG_MAP_SELECT });
     if (!map || map.campaignId !== socket.campaignId) {
       drag = null;
@@ -140,6 +156,7 @@ export function registerTokenHandlers(io: Server, socket: AuthenticatedSocket): 
     const campaignId = socket.campaignId!;
     drag = {
       mapId,
+      version,
       map: withLightPolygons(map),
       // Resolved on first use: a public token's frames never need them.
       viewers: () => (viewers ??= getRoomViewers(io, campaignId)),
@@ -402,6 +419,7 @@ export function registerTokenHandlers(io: Server, socket: AuthenticatedSocket): 
         where: { id: mapId },
         data: { tokens: updatedTokens as any },
       });
+      bumpMapVersion(mapId); // other sockets' drag snapshots of this map are stale now
 
       const movedPayload = { tokenId, mapId, x, y, movedBy: socket.userId };
       const viewMap = withLightPolygons(map);

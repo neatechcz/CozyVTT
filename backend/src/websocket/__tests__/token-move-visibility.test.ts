@@ -372,12 +372,13 @@ describe('drag frame cost and ordering', () => {
     dm.handlers['token.move']({ tokenId: 'orc', mapId: MAP_ID, x: 3, y: 7 });
     await sleep(20);
     await flush();
+    const readsAfterFirstFrame = db.map.findUnique.mock.calls.length;
     dm.handlers['token.move']({ tokenId: 'orc', mapId: MAP_ID, x: 3, y: 7 });
     await sleep(20);
     await flush();
 
     expect(movedXs(alice)).toEqual([3]);
-    expect(db.map.findUnique).toHaveBeenCalledTimes(1);
+    expect(db.map.findUnique.mock.calls.length).toBe(readsAfterFirstFrame);
   });
 
   it('processes frames one at a time, in order, dropping stale waiting frames', async () => {
@@ -417,5 +418,92 @@ describe('drag frame cost and ordering', () => {
     await flush();
 
     expect(movedXs(alice)).toEqual([1, 4]);
+  });
+});
+
+describe('players in the spirit realm on a map without lighting', () => {
+  // Bob has personally crossed over: his own token is on the spirit layer of
+  // the campaign's current map, so he sees only spirit-layer tokens.
+  function useCrossoverMap() {
+    const bobSpirit = token('pc-bob', 1, 2, { controlledBy: 'bob', sightRadius: 0, layer: 'spirit' });
+    db.map.findUnique.mockResolvedValue(mapWith(false, [aliceToken, bobSpirit, lurker, orc, wraith, goblin]));
+  }
+
+  it('sends material-token drag frames and the final move only to viewers on the material plane', async () => {
+    useCrossoverMap();
+    await moveStart(dm, 'orc');
+    await moveFrame(dm, 'orc', 4, 6);
+    await moveEnd(dm, 'orc', 4, 7);
+
+    expect(receivedTokenIds(alice)).toEqual(['orc', 'orc', 'orc']);
+    expect(bob.emit).not.toHaveBeenCalled();
+  });
+
+  it('sends spirit-token moves to the spirit-realm player only', async () => {
+    useCrossoverMap();
+    await moveEnd(dm, 'wraith', 4, 4);
+
+    expect(receivedTokenIds(bob)).toEqual(['wraith']);
+    expect(alice.emit).not.toHaveBeenCalled();
+  });
+
+  it('keeps the whole-room shortcut when nobody is in the spirit realm', async () => {
+    useMap(false);
+    await moveEnd(dm, 'orc', 4, 7);
+
+    expect(receivedTokenIds(alice)).toEqual(['orc']);
+    expect(receivedTokenIds(bob)).toEqual(['orc']);
+  });
+});
+
+describe('drag context invalidation', () => {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  it('applies a token the DM hides mid-drag on the next frame', async () => {
+    const { setSocketInstance, broadcastTokenEvent } = jest.requireActual('../utils');
+    setSocketInstance(io as any);
+    useMap(false);
+    registerTokenHandlers(io as any, bob as any);
+    // Bob drags his own token; Alice sees each frame.
+    await bob.handlers['token.move.start']({ tokenId: 'pc-bob', mapId: MAP_ID });
+    bob.handlers['token.move']({ tokenId: 'pc-bob', mapId: MAP_ID, x: 1, y: 3 });
+    await sleep(20);
+    await flush();
+    expect(receivedTokenIds(alice)).toEqual(['pc-bob', 'pc-bob']);
+
+    // Meanwhile the DM hides Bob's token through the REST route.
+    const hidden = { ...bobToken, visible: false };
+    db.map.findUnique.mockResolvedValue(mapWith(false, [aliceToken, hidden, lurker, orc, wraith, goblin]));
+    await broadcastTokenEvent(CAMPAIGN_ID, MAP_ID, bobToken, hidden);
+    alice.emit.mockClear();
+
+    bob.handlers['token.move']({ tokenId: 'pc-bob', mapId: MAP_ID, x: 1, y: 4 });
+    await sleep(20);
+    await flush();
+
+    expect(receivedTokenIds(alice)).toEqual([]);
+  });
+
+  it('applies a door the DM closes mid-drag on the next frame', async () => {
+    const { setSocketInstance, broadcastMapViewChange } = jest.requireActual('../utils');
+    setSocketInstance(io as any);
+    const door = { ...WALL, type: 'door-open' };
+    db.map.findUnique.mockResolvedValue({ ...mapWith(true), wallSegments: [door] });
+    registerTokenHandlers(io as any, dm as any);
+    await dm.handlers['token.move.start']({ tokenId: 'goblin', mapId: MAP_ID });
+    dm.handlers['token.move']({ tokenId: 'goblin', mapId: MAP_ID, x: 7, y: 6 });
+    await sleep(20);
+    await flush();
+    expect(receivedTokenIds(alice)).toEqual(['goblin', 'goblin']);
+
+    db.map.findUnique.mockResolvedValue({ ...mapWith(true), wallSegments: [{ ...WALL, type: 'door-closed' }] });
+    await broadcastMapViewChange(CAMPAIGN_ID, MAP_ID, { wallSegments: [door] });
+    alice.emit.mockClear();
+
+    dm.handlers['token.move']({ tokenId: 'goblin', mapId: MAP_ID, x: 7, y: 7 });
+    await sleep(20);
+    await flush();
+
+    expect(receivedTokenIds(alice)).toEqual([]);
   });
 });

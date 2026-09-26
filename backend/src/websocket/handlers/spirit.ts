@@ -9,6 +9,7 @@ import { prisma } from '../../config/database';
 import { getTokenViewersFor, filterMapData } from '../../utils/spirit-layer';
 import { broadcastTokenEvent, sendSystemMessage } from '../utils';
 import logger from '../../utils/logger';
+import { bumpMapVersion } from '../mapVersion';
 import { Token } from '../shared';
 
 export function registerSpiritHandlers(io: Server, socket: AuthenticatedSocket): void {
@@ -61,6 +62,8 @@ export function registerSpiritHandlers(io: Server, socket: AuthenticatedSocket):
         });
 
         if (currentMap) {
+          // Spirit visibility changed: cached drag viewers of this map are stale.
+          bumpMapVersion(currentMap.id);
           const campaignSockets = await io.in(socket.campaignId).fetchSockets();
           const viewers = await getTokenViewersFor(
             socket.campaignId,

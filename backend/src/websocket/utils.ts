@@ -10,6 +10,7 @@ import {
   type TokenViewMap,
 } from '../utils/spirit-layer';
 import type { AuthenticatedSocket } from './auth';
+import { bumpMapVersion } from './mapVersion';
 
 /**
  * WebSocket Utility Functions
@@ -179,6 +180,7 @@ export async function broadcastTokenEvent(
   try {
     const tokenId = after?.id ?? before?.id;
     if (!tokenId) return;
+    bumpMapVersion(mapId); // cached drag snapshots of this map are stale now
 
     const viewers = await getCampaignViewers(campaignId);
     const hasPlayers = viewers.some(({ viewer }) => viewer.role !== 'DM');
@@ -257,6 +259,7 @@ export async function broadcastMapViewChange(
   previous: MapViewFields
 ): Promise<void> {
   try {
+    bumpMapVersion(mapId); // cached drag snapshots of this map are stale now
     const viewers = (await getCampaignViewers(campaignId)).filter(({ viewer }) => viewer.role !== 'DM');
     if (viewers.length === 0) return;
 
