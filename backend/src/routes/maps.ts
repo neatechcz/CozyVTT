@@ -386,6 +386,7 @@ router.get(
  * - DM always sees all tokens on both layers
  * - Players see spirit tokens only when spiritLayerEnabled is true
  * - Hidden tokens (visible: false) only visible to DM
+ * - Dynamic lighting: players only get tokens in their line of sight
  * - Spirit layer URL hidden from non-privileged users
  */
 router.get('/:id', campaignMember, async (req: AuthenticatedRequest, res: Response) => {
@@ -434,8 +435,9 @@ router.get('/:id', campaignMember, async (req: AuthenticatedRequest, res: Respon
     // Get spirit layer visibility for this user
     const spiritVisible = await getSpiritVisibility(campaignId, userId);
 
-    // Filter map data based on role and spirit visibility
-    const responseMap = filterMapData(map, membership.role, spiritVisible);
+    // Filter map data based on role and spirit visibility — and, for players on
+    // a map with dynamic lighting, line of sight (same view as map.changed)
+    const responseMap = filterMapData(map, membership.role, spiritVisible, userId);
 
     return res.status(200).json({ map: responseMap, spiritVisible });
   } catch (error) {

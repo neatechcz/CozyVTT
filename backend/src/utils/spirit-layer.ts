@@ -340,8 +340,9 @@ export type TokenViewMap = Pick<
  * for a non-DM viewer with a userId on a map with dynamic lighting —
  * filterTokensByLighting from that viewer's line of sight.
  *
- * The single token pipeline shared by filterMapData (map.changed)
- * and the REST token-event broadcast (broadcastTokenEvent).
+ * The single token pipeline shared by filterMapData (map GET, map.changed),
+ * the REST token-event broadcast (broadcastTokenEvent) and the token
+ * movement socket handlers (token.move.start / token.move / token.move.end).
  */
 export function filterTokensForViewer(
   tokens: unknown,
@@ -362,6 +363,41 @@ export function filterTokensForViewer(
     true,
     map.lights
   );
+}
+
+/** How one viewer's token view changed between two filtered views. */
+export interface TokenViewDiff<T extends { id: string }> {
+  /** The event's own token: its new view (`added` / `updated`), `removed`, or null (never seen). */
+  eventToken: { kind: 'added' | 'updated'; token: T } | { kind: 'removed' } | null;
+  /** Other tokens that entered the view. */
+  added: T[];
+  /** Ids of other tokens that left the view. */
+  removedIds: string[];
+}
+
+/**
+ * Compare a viewer's filtered token view before and after a change to one
+ * token (`tokenId`). Other tokens can enter or leave the view too — e.g. when
+ * the changed token is the viewer's own and their line of sight moved.
+ */
+export function diffTokenViews<T extends { id: string }>(
+  before: T[],
+  after: T[],
+  tokenId: string
+): TokenViewDiff<T> {
+  const beforeIds = new Set(before.map((t) => t.id));
+  const afterIds = new Set(after.map((t) => t.id));
+  const eventAfter = after.find((t) => t.id === tokenId);
+  const eventToken: TokenViewDiff<T>['eventToken'] = eventAfter
+    ? { kind: beforeIds.has(tokenId) ? 'updated' : 'added', token: eventAfter }
+    : beforeIds.has(tokenId)
+      ? { kind: 'removed' }
+      : null;
+  return {
+    eventToken,
+    added: after.filter((t) => t.id !== tokenId && !beforeIds.has(t.id)),
+    removedIds: before.filter((t) => t.id !== tokenId && !afterIds.has(t.id)).map((t) => t.id),
+  };
 }
 
 /**

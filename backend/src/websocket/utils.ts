@@ -1,7 +1,12 @@
 import { Server } from 'socket.io';
 import { prisma } from '../config/database';
 import logger from '../utils/logger';
-import { filterTokensByRole, filterTokensForViewer, getSpiritVisibilityBatch } from '../utils/spirit-layer';
+import {
+  diffTokenViews,
+  filterTokensByRole,
+  filterTokensForViewer,
+  getSpiritVisibilityBatch,
+} from '../utils/spirit-layer';
 import type { AuthenticatedSocket } from './auth';
 
 /**
@@ -195,23 +200,18 @@ export async function broadcastTokenEvent(
       if (!map) {
         // Map gone: its lighting is unknown, so send nothing (fail closed).
       } else if (beforeTokens && afterTokens && userId) {
-        const seenBefore = filterTokensForViewer(beforeTokens, map, role, spiritVisible, userId);
-        const seenAfter = filterTokensForViewer(afterTokens, map, role, spiritVisible, userId);
-        const beforeIds = new Set(seenBefore.map((t) => t.id));
-        const afterIds = new Set(seenAfter.map((t) => t.id));
-
-        const eventToken = seenAfter.find((t) => t.id === tokenId);
-        if (eventToken) {
-          events.push([beforeIds.has(tokenId) ? 'token.updated' : 'token.added', { mapId, token: eventToken }]);
-        } else if (beforeIds.has(tokenId)) {
+        const diff = diffTokenViews(
+          filterTokensForViewer(beforeTokens, map, role, spiritVisible, userId),
+          filterTokensForViewer(afterTokens, map, role, spiritVisible, userId),
+          tokenId
+        );
+        if (diff.eventToken?.kind === 'removed') {
           events.push(['token.removed', { mapId, tokenId }]);
+        } else if (diff.eventToken) {
+          events.push([`token.${diff.eventToken.kind}`, { mapId, token: diff.eventToken.token }]);
         }
-        for (const t of seenAfter) {
-          if (t.id !== tokenId && !beforeIds.has(t.id)) events.push(['token.added', { mapId, token: t }]);
-        }
-        for (const t of seenBefore) {
-          if (t.id !== tokenId && !afterIds.has(t.id)) events.push(['token.removed', { mapId, tokenId: t.id }]);
-        }
+        for (const t of diff.added) events.push(['token.added', { mapId, token: t }]);
+        for (const id of diff.removedIds) events.push(['token.removed', { mapId, tokenId: id }]);
       } else {
         const seenBefore = before ? filterTokensByRole([before], role, spiritVisible)[0] ?? null : null;
         const seenAfter = after ? filterTokensByRole([after], role, spiritVisible)[0] ?? null : null;
