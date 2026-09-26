@@ -71,7 +71,7 @@ function Harness({
 }: {
   socket: ReturnType<typeof createFakeSocket>;
   /** Runs after each local report reaches the hook (e.g. to inject a remote event) */
-  afterReport?: (origin: string) => void;
+  afterReport?: (origin: string, appliedVersion: number | undefined) => void;
   /** Rendered before the sheet, so its passive effects run before the editor's */
   before?: (sync: Sync) => ReactNode;
 }) {
@@ -95,9 +95,9 @@ function Harness({
         externalData={sync.externalData}
         externalBase={sync.externalBase}
         externalDataVersion={sync.externalDataVersion}
-        onLocalChange={(formData, origin, resets, appliedVersion) => {
-          sync.reportLocalChange(formData, origin, resets, appliedVersion);
-          afterReport?.(origin);
+        onLocalChange={(formData, origin, resets, appliedVersion, userPaths) => {
+          sync.reportLocalChange(formData, origin, resets, appliedVersion, userPaths);
+          afterReport?.(origin, appliedVersion);
         }}
         onDiscardLocalChanges={sync.discardLocalChanges}
       />
@@ -133,16 +133,18 @@ describe('D&D 5e live sync (editor + hook)', () => {
   it('(b) remote 1 → keystroke → remote 2 before remote 1 is rendered: saving never reverts remote 1', async () => {
     const socket = createFakeSocket();
     let injected = false;
+    let firstUserReportVersion: number | undefined = -1;
     const remote1 = { ...data, hp: { current: 3, maximum: 12, temporary: 0 } };
     const remote2 = { ...remote1, experiencePoints: 400 };
     render(
       <Harness
         socket={socket}
-        afterReport={(origin) => {
+        afterReport={(origin, appliedVersion) => {
           // The keystroke's report arrives before the editor rendered remote 1;
           // remote 2 lands right then.
           if (origin === 'user' && !injected) {
             injected = true;
+            firstUserReportVersion = appliedVersion;
             socket.emit(remote(remote2, '2026-09-26T00:00:06.000Z'));
           }
         }}
@@ -154,6 +156,10 @@ describe('D&D 5e live sync (editor + hook)', () => {
       fireEvent.change(nameInput(), { target: { value: 'Tomin the Bold' } });
     });
     expect(injected).toBe(true);
+    // The scenario really happened: the hook was at version 1 (remote 1) and
+    // the keystroke's report did not include it yet. If scheduling changes,
+    // this fails loudly instead of the test passing vacuously.
+    expect(firstUserReportVersion).toBe(0);
 
     expect(nameInput().value).toBe('Tomin the Bold');
     expect(xpInput().value).toBe('400');
@@ -213,6 +219,42 @@ describe('D&D 5e live sync (editor + hook)', () => {
     expect(dirty()).toBe('false');
   });
 
+  it('a derived-value update in the same render as a rebase never overwrites the remote change', async () => {
+    const socket = createFakeSocket();
+    render(<Harness socket={socket} />);
+    const scoreInput = (ability: string) =>
+      screen.getByText(ability).parentElement!.querySelector('input') as HTMLInputElement;
+
+    // Remote raises strength; in the same (default-lane) render the user's
+    // dexterity edit makes the modifier effect queue a derived update after
+    // the editor's rebase.
+    const remoteData = { ...data, stats: { ...data.stats, strength: ability(18) } };
+    act(() => {
+      socket.emit(remote(remoteData));
+      callReactOnChange(scoreInput('dex'), '16');
+    });
+
+    expect(scoreInput('str').value).toBe('18');
+    expect(scoreInput('dex').value).toBe('16');
+
+    const patch = vi.mocked(api.patchCharacterData);
+    patch.mockReset();
+    patch.mockImplementation(async (_id, changes) => ({
+      character: makeCharacter(remoteData),
+      applied: changes.map((c) => c.path),
+      conflicts: [],
+      status: 200,
+    }));
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^\s*Save\s*$/ }));
+    });
+    const changes = patch.mock.calls[0][1];
+    const paths = changes.map((c) => c.path);
+    expect(paths).not.toContain('stats.strength.score');
+    expect(paths).not.toContain('stats.strength.modifier');
+    expect(changes).toContainEqual({ path: 'stats.dexterity.score', base: 12, value: 16 });
+  });
+
   it.each([
     ['a different field is kept', 'name', undefined],
     ['the same field is reported as a reset', 'xp', 'experiencePoints|120|150|GM'],
@@ -242,6 +284,27 @@ describe('D&D 5e live sync (editor + hook)', () => {
     } else {
       expect(resetLines()).toEqual([expectedReset]);
     }
+  });
+
+  it('a user form committed in the same render as a version bump stays tagged as the user\'s', () => {
+    const socket = createFakeSocket();
+    render(<Harness socket={socket} />);
+
+    // Keystroke and remote update land in the same (default-lane) render, so
+    // the editor's rebase updater may run eagerly before that form is reported.
+    act(() => {
+      socket.emit(remote({ ...data, experiencePoints: 150 }));
+      callReactOnChange(nameInput(), 'Typed');
+    });
+
+    expect(nameInput().value).toBe('Typed');
+    expect(xpInput().value).toBe('150');
+    expect(dirty()).toBe('true');
+
+    // Proof it is tracked as the user's: a later remote change of the same
+    // field is listed in the panel instead of silently replacing it.
+    act(() => socket.emit(remote({ ...data, experiencePoints: 150, characterName: 'GM name' }, '2026-09-26T00:00:07.000Z')));
+    expect(resetLines()).toEqual(['characterName|"Typed"|"GM name"|GM']);
   });
 
   it('typing after a remote update is tracked as a user edit', () => {

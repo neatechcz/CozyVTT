@@ -41,6 +41,7 @@ export interface CharacterSheetProps {
     origin: 'user' | 'system',
     rebaseResets?: import('../../utils/characterMerge').ResetField[],
     appliedVersion?: number,
+    userPaths?: string[],
   ) => void;
   onDiscardLocalChanges?: () => void;
 }

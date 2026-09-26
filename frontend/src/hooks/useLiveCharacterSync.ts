@@ -34,6 +34,8 @@ export interface SheetReset extends ResetField {
   author: SheetResetAuthor;
   /** When the reset happened (ms since epoch) */
   at: number;
+  /** The external push version that caused it (dedupe key with `path`) */
+  version?: number;
 }
 
 /**
@@ -92,6 +94,8 @@ export interface UseLiveCharacterSyncResult {
     origin?: LocalChangeOrigin,
     rebaseResets?: ResetField[],
     appliedVersion?: number,
+    /** Fields the user edited since the last user report (editor-provided) */
+    userPaths?: string[],
   ) => void;
   /** Forget the user's unsaved edits (editor cancelled or closed); keeps resets */
   discardLocalChanges: () => void;
@@ -100,6 +104,8 @@ export interface UseLiveCharacterSyncResult {
 }
 
 export const UNKNOWN_AUTHOR: SheetResetAuthor = { userId: null, displayName: 'někdo jiný' };
+/** Resets caused by the server's answer to the user's own save (normalisation) */
+export const SERVER_AUTHOR: SheetResetAuthor = { userId: null, displayName: 'server' };
 
 const CHARACTER_UPDATED = 'character.updated';
 
@@ -208,19 +214,36 @@ export function useLiveCharacterSync({
     setExternal(push);
   };
 
-  /** Append resets not recorded yet for that push version. */
+  /**
+   * Record resets, one entry per (push version, path): a repeat for the same
+   * push (e.g. a later stale keystroke on the same field) updates that entry's
+   * `mine` to the latest value instead of adding another.
+   */
   const recordResets = (resetFields: ResetField[], version: number, author: SheetResetAuthor) => {
+    if (resetFields.length === 0) return;
     const at = Date.now();
     const fresh: SheetReset[] = [];
+    const updates: ResetField[] = [];
     for (const reset of resetFields) {
       const key = `${version}:${reset.path}`;
-      if (recordedResetKeysRef.current.has(key)) continue;
+      if (recordedResetKeysRef.current.has(key)) {
+        updates.push(reset);
+        continue;
+      }
       recordedResetKeysRef.current.add(key);
-      fresh.push({ ...reset, author, at });
+      fresh.push({ ...reset, author, at, version });
     }
-    if (fresh.length > 0) {
-      setResets((prev) => [...prev, ...fresh]);
-    }
+    setResets((prev) => {
+      let next = prev;
+      if (updates.length > 0) {
+        next = prev.map((entry) => {
+          if (entry.version !== version) return entry;
+          const update = updates.find((reset) => reset.path === entry.path);
+          return update && !deepEqual(update.mine, entry.mine) ? { ...entry, mine: update.mine } : entry;
+        });
+      }
+      return fresh.length > 0 ? [...next, ...fresh] : next;
+    });
   };
 
   /** Move `base` to a new server state, merging it into the local data. */
@@ -286,10 +309,20 @@ export function useLiveCharacterSync({
       origin: LocalChangeOrigin = 'user',
       rebaseResets?: ResetField[],
       appliedVersion?: number,
+      userPaths?: string[],
     ) => {
       if (!trackedIdRef.current) return;
       const next = cloneData(data);
       const push = externalRef.current;
+      /** Changed paths that are the user's: when the editor names the fields it
+       * edited, derived/system changes in the same report are not the user's. */
+      const markUserPaths = (changed: string[]) => {
+        if (origin !== 'user') return;
+        for (const path of changed) {
+          if (userPaths && !userPaths.some((userPath) => pathsOverlap(userPath, path))) continue;
+          touchedRef.current.add(path);
+        }
+      };
 
       if (appliedVersion !== undefined && appliedVersion < push.version && push.data && push.base) {
         // Stale report: the form does not include the latest push yet, so it
@@ -297,11 +330,7 @@ export function useLiveCharacterSync({
         // The user's edits are what changed since the last report; merge the
         // form onto the pending push exactly as the editor will when it
         // applies it — and surface what that merge resets.
-        if (origin === 'user') {
-          for (const path of diffPaths(lastReportedRef.current, next)) {
-            touchedRef.current.add(path);
-          }
-        }
+        markUserPaths(diffPaths(lastReportedRef.current, next));
         const merged = mergeRemoteUpdate(push.base, next, push.data);
         recordResets(
           merged.resetFields.filter((reset) => isTouched(reset.path)),
@@ -310,11 +339,7 @@ export function useLiveCharacterSync({
         );
         localRef.current = merged.data;
       } else {
-        if (origin === 'user') {
-          for (const path of diffPaths(localRef.current, next)) {
-            touchedRef.current.add(path);
-          }
-        }
+        markUserPaths(diffPaths(localRef.current, next));
         localRef.current = next;
       }
       lastReportedRef.current = next;
@@ -353,7 +378,7 @@ export function useLiveCharacterSync({
       baseUpdatedAtRef.current = saved.updatedAt;
       localRef.current = next;
       refreshDirty();
-      pushToEditor(next, UNKNOWN_AUTHOR);
+      pushToEditor(next, SERVER_AUTHOR);
       onServerCharacterRef.current?.(saved);
       return { status: 'saved', character: saved };
     };

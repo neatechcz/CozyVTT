@@ -36,13 +36,14 @@ interface DnD5eCharacterEditorProps {
    * Called on every form data change; `origin` tells user edits from
    * derived/adopted changes, `rebaseResets` lists unreported user edits the
    * last rebase overwrote, `appliedVersion` is the external version the form
-   * includes.
+   * includes, `userPaths` the fields the user edited since the last user report.
    */
   onLocalChange?: (
     data: any,
     origin: 'user' | 'system',
     rebaseResets?: ResetField[],
     appliedVersion?: number,
+    userPaths?: string[],
   ) => void;
   /** Called when the editor goes away (cancel, close, switch to view) */
   onDiscardLocalChanges?: () => void;
@@ -176,9 +177,12 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
   // Form state - initialize with character data
   const [formData, setFormData] = useState<any>(() => buildFormData(data));
 
-  // The form object produced by the latest user edit (updateField). A report
-  // is the user's iff it carries exactly that object.
-  const userObjRef = useRef<any>(null);
+  // Form objects produced by user edits (updateField, or derived from such an
+  // object before it was committed). A report is the user's iff its object is
+  // in this set — nothing can "untag" an object once tagged.
+  const userObjsRef = useRef(new WeakSet<object>());
+  // Form objects already reported (their metadata has been delivered).
+  const reportedObjsRef = useRef(new WeakSet<object>());
   // Paths the user edited (updateField) since the last user report.
   const pendingUserPathsRef = useRef<Set<string>>(new Set());
   // Per form object: resets its rebase produced, and the external version it
@@ -187,6 +191,35 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
   const rebaseResetsRef = useRef(new WeakMap<object, ResetField[]>());
   const formVersionRef = useRef(new WeakMap<object, number>());
   const committedVersionRef = useRef(externalDataVersion ?? 0);
+
+  /**
+   * A new form object built from `from` inside an updater inherits its
+   * not-yet-delivered metadata (user tag, rebase resets, included version),
+   * so a later updater in the same render cannot drop it.
+   */
+  const carryFormMeta = (from: object, to: object) => {
+    if (reportedObjsRef.current.has(from)) return;
+    if (userObjsRef.current.has(from)) userObjsRef.current.add(to);
+    const resets = rebaseResetsRef.current.get(from);
+    if (resets) rebaseResetsRef.current.set(to, resets);
+    const version = formVersionRef.current.get(from);
+    if (version !== undefined) formVersionRef.current.set(to, version);
+  };
+
+  /**
+   * Derived values (modifiers, bonuses, defaults) are always computed from the
+   * latest form (`prev`), never from a render closure — a closure copy would
+   * overwrite a remote change a rebase applied in the same render.
+   * `compute` returns the new form, or null for "nothing to change".
+   */
+  const setDerivedFormData = (compute: (prev: any) => any | null) => {
+    setFormData((prev: any) => {
+      const next = compute(prev);
+      if (!next) return prev;
+      carryFormMeta(prev, next);
+      return next;
+    });
+  };
 
   // Live updates: when the version changes, rebase the CURRENT form onto the
   // external data (no remount — tab, colour picker and token preview are
@@ -207,27 +240,32 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
       }
       const { data: merged, resetFields } = mergeRemoteUpdate(externalBase as any, prev, externalData as any);
       const next = buildFormData(merged);
+      const carried = reportedObjsRef.current.has(prev) ? undefined : rebaseResetsRef.current.get(prev);
       formVersionRef.current.set(next, version);
       const userPaths = [...pendingUserPathsRef.current];
+      let lost: ResetField[] = [];
       if (userPaths.length > 0) {
         // The form still carries unreported user edits: they are the user's.
-        userObjRef.current = next;
-        const lost = resetFields.filter((reset) => userPaths.some((path) => pathsOverlap(path, reset.path)));
-        if (lost.length > 0) rebaseResetsRef.current.set(next, lost);
+        userObjsRef.current.add(next);
+        lost = resetFields.filter((reset) => userPaths.some((path) => pathsOverlap(path, reset.path)));
       }
+      const allLost = [...(carried ?? []), ...lost];
+      if (allLost.length > 0) rebaseResetsRef.current.set(next, allLost);
       return next;
     });
   }, [externalDataVersion]);
 
   // Report every form change, tagged by origin.
   useEffect(() => {
+    reportedObjsRef.current.add(formData);
     const version = formVersionRef.current.get(formData);
     if (version !== undefined) committedVersionRef.current = version;
-    const isUser = formData === userObjRef.current;
+    const isUser = userObjsRef.current.has(formData);
+    const userPaths = isUser ? [...pendingUserPathsRef.current] : [];
     if (isUser) pendingUserPathsRef.current = new Set();
     const rebaseResets = rebaseResetsRef.current.get(formData);
     rebaseResetsRef.current.delete(formData);
-    onLocalChange?.(formData, isUser ? 'user' : 'system', rebaseResets, committedVersionRef.current);
+    onLocalChange?.(formData, isUser ? 'user' : 'system', rebaseResets, committedVersionRef.current, userPaths);
   }, [formData]);
 
   // Unsaved edits die with the editor (cancel, close, back to view mode).
@@ -276,23 +314,23 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
 
   // Auto-calculate modifiers when ability scores change
   useEffect(() => {
-    if (formData.stats) {
-      const updatedStats = { ...formData.stats };
+    setDerivedFormData((prev: any) => {
+      if (!prev.stats) return null;
+      const updatedStats = { ...prev.stats };
       let hasChanges = false;
 
       Object.keys(updatedStats).forEach(ability => {
-        const score = updatedStats[ability].score;
-        const newModifier = calculateModifier(score);
-        if (updatedStats[ability].modifier !== newModifier) {
-          updatedStats[ability].modifier = newModifier;
+        const current = updatedStats[ability];
+        if (!current) return;
+        const newModifier = calculateModifier(current.score);
+        if (current.modifier !== newModifier) {
+          updatedStats[ability] = { ...current, modifier: newModifier };
           hasChanges = true;
         }
       });
 
-      if (hasChanges) {
-        setFormData((prev: any) => ({ ...prev, stats: updatedStats }));
-      }
-    }
+      return hasChanges ? { ...prev, stats: updatedStats } : null;
+    });
   }, [
     formData.stats?.strength?.score,
     formData.stats?.dexterity?.score,
@@ -304,25 +342,25 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
 
   // Auto-calculate saving throws when proficiency or stats change
   useEffect(() => {
-    if (formData.stats && formData.savingThrows && formData.proficiencyBonus !== undefined) {
-      const updatedSavingThrows = { ...formData.savingThrows };
+    setDerivedFormData((prev: any) => {
+      if (!(prev.stats && prev.savingThrows && prev.proficiencyBonus !== undefined)) return null;
+      const updatedSavingThrows = { ...prev.savingThrows };
       let hasChanges = false;
 
       Object.keys(updatedSavingThrows).forEach(ability => {
-        const abilityMod = formData.stats[ability]?.modifier || 0;
-        const proficient = updatedSavingThrows[ability].proficient;
-        const newBonus = abilityMod + (proficient ? formData.proficiencyBonus : 0);
+        const current = updatedSavingThrows[ability];
+        if (!current) return;
+        const abilityMod = prev.stats[ability]?.modifier || 0;
+        const newBonus = abilityMod + (current.proficient ? prev.proficiencyBonus : 0);
 
-        if (updatedSavingThrows[ability].bonus !== newBonus) {
-          updatedSavingThrows[ability].bonus = newBonus;
+        if (current.bonus !== newBonus) {
+          updatedSavingThrows[ability] = { ...current, bonus: newBonus };
           hasChanges = true;
         }
       });
 
-      if (hasChanges) {
-        setFormData((prev: any) => ({ ...prev, savingThrows: updatedSavingThrows }));
-      }
-    }
+      return hasChanges ? { ...prev, savingThrows: updatedSavingThrows } : null;
+    });
   }, [
     formData.proficiencyBonus,
     formData.stats?.strength?.modifier,
@@ -363,8 +401,9 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
 
   // Initialize skills if they don't exist
   useEffect(() => {
-    if (formData.skills) {
-      const updatedSkills = { ...formData.skills };
+    setDerivedFormData((prev: any) => {
+      if (!prev.skills) return null;
+      const updatedSkills = { ...prev.skills };
       let needsUpdate = false;
 
       Object.keys(skillAbilities).forEach((skill) => {
@@ -374,41 +413,38 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
         }
       });
 
-      if (needsUpdate) {
-        setFormData((prev: any) => ({ ...prev, skills: updatedSkills }));
-      }
-    }
+      return needsUpdate ? { ...prev, skills: updatedSkills } : null;
+    });
   }, []); // Run once on mount
 
   // Auto-calculate skill bonuses when ability scores, proficiency, or expertise change
   useEffect(() => {
-    if (formData.stats && formData.skills && formData.proficiencyBonus !== undefined) {
-      const updatedSkills = { ...formData.skills };
+    setDerivedFormData((prev: any) => {
+      if (!(prev.stats && prev.skills && prev.proficiencyBonus !== undefined)) return null;
+      const updatedSkills = { ...prev.skills };
       let hasChanges = false;
 
       Object.keys(updatedSkills).forEach(skill => {
+        const current = updatedSkills[skill];
+        if (!current) return;
         const ability = skillAbilities[skill];
-        const abilityMod = formData.stats[ability]?.modifier || 0;
-        const proficient = updatedSkills[skill].proficient;
-        const expertise = updatedSkills[skill].expertise;
+        const abilityMod = prev.stats[ability]?.modifier || 0;
 
         let newBonus = abilityMod;
-        if (expertise) {
-          newBonus += formData.proficiencyBonus * 2; // Expertise = double proficiency
-        } else if (proficient) {
-          newBonus += formData.proficiencyBonus;
+        if (current.expertise) {
+          newBonus += prev.proficiencyBonus * 2; // Expertise = double proficiency
+        } else if (current.proficient) {
+          newBonus += prev.proficiencyBonus;
         }
 
-        if (updatedSkills[skill].bonus !== newBonus) {
-          updatedSkills[skill].bonus = newBonus;
+        if (current.bonus !== newBonus) {
+          updatedSkills[skill] = { ...current, bonus: newBonus };
           hasChanges = true;
         }
       });
 
-      if (hasChanges) {
-        setFormData((prev: any) => ({ ...prev, skills: updatedSkills }));
-      }
-    }
+      return hasChanges ? { ...prev, skills: updatedSkills } : null;
+    });
   }, [
     formData.proficiencyBonus,
     formData.stats?.strength?.modifier,
@@ -580,12 +616,9 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
       current[keys[keys.length - 1]] = value;
       // Tag this form object as a user edit; carry what a rebase earlier in
       // the same render attached to `prev`.
-      userObjRef.current = newData;
+      carryFormMeta(prev, newData);
+      userObjsRef.current.add(newData);
       pendingUserPathsRef.current.add(path);
-      const carriedResets = rebaseResetsRef.current.get(prev);
-      if (carriedResets) rebaseResetsRef.current.set(newData, carriedResets);
-      const carriedVersion = formVersionRef.current.get(prev);
-      if (carriedVersion !== undefined) formVersionRef.current.set(newData, carriedVersion);
       return newData;
     });
   };
