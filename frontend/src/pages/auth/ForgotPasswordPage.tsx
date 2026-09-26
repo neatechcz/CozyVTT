@@ -5,11 +5,13 @@
 
 import { useState, FormEvent } from 'react';
 import { Link, Navigate } from 'react-router-dom';
-import { Mail, ArrowLeft, CheckCircle } from 'lucide-react';
+import { Mail, ArrowLeft, CheckCircle, AlertCircle } from 'lucide-react';
 import { useAuth } from '@/contexts/AuthContext';
 import { isValidEmail } from '@/utils/validation';
 import authService from '@/services/auth.service';
 import Button from '@/components/ui/Button';
+
+const RESET_UNAVAILABLE_MESSAGE = 'Password reset is not available. Contact your administrator.';
 
 export default function ForgotPasswordPage() {
   const { authenticated } = useAuth();
@@ -17,6 +19,7 @@ export default function ForgotPasswordPage() {
   const [email, setEmail] = useState('');
   const [loading, setLoading] = useState(false);
   const [submitted, setSubmitted] = useState(false);
+  const [resetUnavailable, setResetUnavailable] = useState(false);
   const [emailError, setEmailError] = useState('');
   const [serverMessage, setServerMessage] = useState('');
 
@@ -43,7 +46,11 @@ export default function ForgotPasswordPage() {
 
     setLoading(true);
     try {
-      await authService.forgotPassword(email.trim().toLowerCase());
+      const response = await authService.forgotPassword(email.trim().toLowerCase());
+      if (response.message === RESET_UNAVAILABLE_MESSAGE) {
+        setResetUnavailable(true);
+        setServerMessage(response.message);
+      }
       setSubmitted(true);
     } catch (err: any) {
       // The backend always returns 200 for this endpoint to prevent
@@ -64,16 +71,24 @@ export default function ForgotPasswordPage() {
       <main id="main-content" className="glass-panel max-w-md w-full p-8 space-y-6">
 
         {submitted ? (
-          /* Success state */
+          /* Result state */
           <div className="text-center space-y-4">
-            <CheckCircle className="w-14 h-14 text-moss-green mx-auto" aria-hidden="true" />
-            <h1 className="text-2xl font-bold text-moss-green font-heading">Check your inbox</h1>
+            {resetUnavailable ? (
+              <AlertCircle className="w-14 h-14 text-warm-amber mx-auto" aria-hidden="true" />
+            ) : (
+              <CheckCircle className="w-14 h-14 text-moss-green mx-auto" aria-hidden="true" />
+            )}
+            <h1 className="text-2xl font-bold text-moss-green font-heading">
+              {resetUnavailable ? 'Password reset unavailable' : 'Check your inbox'}
+            </h1>
             <p className="text-sm text-warm-gray leading-relaxed">
               {serverMessage || 'If an account with that email address exists, we\'ve sent a password reset link. The link expires in 1 hour.'}
             </p>
-            <p className="text-xs text-stone-gray/70">
-              Didn't receive it? Check your spam folder, or contact your administrator.
-            </p>
+            {!resetUnavailable && (
+              <p className="text-xs text-stone-gray/70">
+                Didn't receive it? Check your spam folder, or contact your administrator.
+              </p>
+            )}
             <Link
               to="/auth/login"
               className="inline-flex items-center gap-2 text-sm text-moss-green hover:text-moss-green/80 font-medium transition-colors"

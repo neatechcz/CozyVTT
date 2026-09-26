@@ -1,6 +1,7 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useId } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import ConfirmDialog from '@/components/common/ConfirmDialog';
+import { useFocusTrap } from '@/hooks/useFocusTrap';
 import {
   X,
   Download,
@@ -23,6 +24,7 @@ import { Asset, AssetType, AssetScope, PlatformRole, Campaign } from '../../type
 import { useAuth } from '../../contexts/AuthContext';
 import { api } from '../../services/api';
 import campaignService from '../../services/campaign.service';
+import { isCampaignDm } from '../../services/permissions';
 import Button from '@/components/ui/Button';
 
 interface AssetDetailPanelProps {
@@ -39,6 +41,8 @@ interface AssetDetailPanelProps {
  */
 export default function AssetDetailPanel({ asset, onClose, onDelete, onUpdate }: AssetDetailPanelProps) {
   const { user } = useAuth();
+  const titleId = useId();
+  const panelRef = useFocusTrap(true, onClose);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
   // Local asset state so scope changes reflect immediately
@@ -84,8 +88,9 @@ export default function AssetDetailPanel({ asset, onClose, onDelete, onUpdate }:
   // User can move if they own the asset or are admin
   const canMove = !isScopeFixed && (isOwner || isAdmin);
 
-  // Campaigns where the current user is DM (owns the campaign)
-  const dmCampaigns = userCampaigns.filter((c) => c.ownerId === user?.id);
+  const dmCampaigns = user
+    ? userCampaigns.filter((campaign) => isCampaignDm(campaign, user.id))
+    : [];
 
   // Available scopes to move to (exclude current)
   const availableMoveScopes: AssetScope[] = [];
@@ -220,6 +225,10 @@ export default function AssetDetailPanel({ asset, onClose, onDelete, onUpdate }:
             animate={{ x: 0 }}
             exit={{ x: '100%' }}
             transition={{ type: 'spring', damping: 30, stiffness: 300 }}
+            ref={panelRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby={titleId}
             className="absolute right-0 top-0 h-full w-full max-w-2xl bg-paper-white shadow-2xl overflow-y-auto"
             onClick={(e) => e.stopPropagation()}
           >
@@ -227,7 +236,7 @@ export default function AssetDetailPanel({ asset, onClose, onDelete, onUpdate }:
             <div className="sticky top-0 z-10 bg-moss-green/10 backdrop-blur-sm border-b border-moss-green/20 p-6">
               <div className="flex items-start justify-between">
                 <div className="flex-1 min-w-0">
-                  <h2 className="text-2xl font-bold text-moss-green mb-1 truncate">
+                  <h2 id={titleId} className="text-2xl font-bold text-moss-green mb-1 truncate">
                     {currentAsset.name}
                   </h2>
                   <div className="flex items-center gap-2 flex-wrap">
@@ -242,10 +251,12 @@ export default function AssetDetailPanel({ asset, onClose, onDelete, onUpdate }:
                   </div>
                 </div>
                 <button
+                  type="button"
                   onClick={onClose}
                   className="p-2 hover:bg-moss-green/10 rounded-lg transition-colors"
+                  aria-label="Close asset details"
                 >
-                  <X className="w-6 h-6 text-stone-gray" />
+                  <X className="w-6 h-6 text-stone-gray" aria-hidden="true" />
                 </button>
               </div>
 

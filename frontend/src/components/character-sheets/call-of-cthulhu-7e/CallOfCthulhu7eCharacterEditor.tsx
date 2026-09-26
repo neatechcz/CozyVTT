@@ -119,21 +119,23 @@ export const CallOfCthulhu7eCharacterEditor: React.FC<CallOfCthulhu7eCharacterEd
   const [showColorPicker, setShowColorPicker] = useState(false);
   const [errors, setErrors] = useState<Record<string, string>>({});
 
-  const data = character.data as any;
+  const { skills, ...dataWithoutSkills } = character.data as any;
 
   // Form state
   const [formData, setFormData] = useState<any>(() => ({
-    ...data,
-    characteristics: data.characteristics || {},
-    derivedStats: data.derivedStats || {},
-    skills: data.skills || {},
-    combat: data.combat || { weapons: [] },
-    possessions: data.possessions || [],
-    wealth: data.wealth || {},
-    backstory: data.backstory || {},
-    appearance: data.appearance || {},
-    contacts: data.contacts || [],
-    conditions: data.conditions || {},
+    ...dataWithoutSkills,
+    characteristics: dataWithoutSkills.characteristics || {},
+    derivedStats: dataWithoutSkills.derivedStats || {},
+    ...(skills && typeof skills === 'object' && !Array.isArray(skills) && Object.keys(skills).length > 0
+      ? { skills }
+      : {}),
+    combat: dataWithoutSkills.combat || { weapons: [] },
+    possessions: dataWithoutSkills.possessions || [],
+    wealth: dataWithoutSkills.wealth || {},
+    backstory: dataWithoutSkills.backstory || {},
+    appearance: dataWithoutSkills.appearance || {},
+    contacts: dataWithoutSkills.contacts || [],
+    conditions: dataWithoutSkills.conditions || {},
   }));
 
   // Token image state

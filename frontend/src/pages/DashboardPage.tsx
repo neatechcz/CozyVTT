@@ -74,24 +74,24 @@ export default function DashboardPage() {
       {/* Header */}
       <header className="bg-moss-green/10 border-b border-moss-green/20 shadow-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex items-center justify-between py-6">
+          <div className="flex flex-col gap-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:py-6">
             {/* Left: Logo + Title */}
-            <div className="flex items-center gap-4">
+            <div className="flex min-w-0 items-center gap-4">
               <div className="p-1 rounded-lg bg-moss-green/10" aria-hidden="true">
                 <img src={mascotUrl} alt="" className="w-10 h-10 object-contain" />
               </div>
-              <div>
-                <h1 className="text-3xl font-bold text-moss-green font-heading">
+              <div className="min-w-0">
+                <h1 className="text-2xl font-bold text-moss-green font-heading sm:text-3xl">
                   CozyVTT
                 </h1>
-                <p className="text-sm text-warm-gray">
+                <p className="break-words text-sm text-warm-gray">
                   Welcome back, {user?.displayName}
                 </p>
               </div>
             </div>
 
             {/* Right: Actions */}
-            <div className="flex items-center gap-3">
+            <div className="flex w-full flex-wrap items-center justify-end gap-2 sm:w-auto sm:gap-3">
               <Button
                 onClick={loadData}
                 disabled={loading}
@@ -151,7 +151,7 @@ export default function DashboardPage() {
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
             {/* Characters Section */}
             <section className="glass-panel p-6">
-              <div className="flex items-center justify-between mb-4">
+              <div className="mb-4 flex flex-col items-start gap-3 lg:flex-row lg:items-center lg:justify-between">
                 <div className="flex items-center gap-3">
                   <div className="p-2 rounded-lg bg-spirit-purple/10">
                     <User className="w-6 h-6 text-spirit-purple" />
@@ -168,9 +168,10 @@ export default function DashboardPage() {
                 <Button
                   onClick={() => navigate('/characters')}
                   className="flex items-center gap-2"
+                  aria-label="Manage characters"
                 >
                   <span className="hidden sm:inline">Manage</span>
-                  <ArrowRight className="w-4 h-4" />
+                  <ArrowRight className="w-4 h-4" aria-hidden="true" />
                 </Button>
               </div>
 
@@ -249,7 +250,7 @@ export default function DashboardPage() {
 
             {/* Assets Library Section */}
             <section className="glass-panel p-6">
-              <div className="flex items-center justify-between mb-4">
+              <div className="mb-4 flex flex-col items-start gap-3 lg:flex-row lg:items-center lg:justify-between">
                 <div className="flex items-center gap-3">
                   <div className="p-2 rounded-lg bg-warm-amber/10">
                     <FolderOpen className="w-6 h-6 text-warm-amber" />
@@ -266,9 +267,10 @@ export default function DashboardPage() {
                 <Button
                   onClick={() => navigate('/assets')}
                   className="flex items-center gap-2"
+                  aria-label="View asset library"
                 >
                   <span className="hidden sm:inline">View Library</span>
-                  <ArrowRight className="w-4 h-4" />
+                  <ArrowRight className="w-4 h-4" aria-hidden="true" />
                 </Button>
               </div>
 
@@ -338,16 +340,17 @@ export default function DashboardPage() {
 
           {/* Campaigns Section */}
           <section>
-            <div className="flex items-center justify-between mb-6">
+            <div className="mb-6 flex flex-col items-stretch gap-4 sm:flex-row sm:items-center sm:justify-between">
               <h2 className="text-2xl font-semibold text-moss-green font-heading">
                 Your Campaigns
               </h2>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-wrap items-center justify-end gap-2">
                 <Button
                   onClick={() => setShowImportDialog(true)}
                   variant="secondary" className="flex items-center gap-2"
+                  aria-label="Import campaign"
                 >
-                  <Upload className="w-4 h-4" />
+                  <Upload className="w-4 h-4" aria-hidden="true" />
                   <span className="hidden sm:inline">Import</span>
                 </Button>
                 <Button
@@ -387,7 +390,7 @@ export default function DashboardPage() {
 
             {/* Empty State */}
             {!loading && campaigns.length === 0 && (
-              <div className="glass-panel p-12 text-center">
+              <div className="glass-panel p-6 text-center sm:p-12">
                 <div className="max-w-md mx-auto">
                   <div className="mb-4 inline-block p-4 rounded-full bg-moss-green/10">
                     <img src={mascotUrl} alt="" className="w-12 h-12 object-contain" />
@@ -401,7 +404,7 @@ export default function DashboardPage() {
                   </p>
                   <Button
                     onClick={() => setShowCreateModal(true)}
-                    className="inline-flex items-center gap-2"
+                    className="inline-flex max-w-full flex-wrap items-center justify-center gap-2 whitespace-normal text-center"
                   >
                     <Plus className="w-5 h-5" />
                     Create Your First Campaign

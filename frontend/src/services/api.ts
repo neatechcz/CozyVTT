@@ -191,7 +191,14 @@ class ApiClient {
     return response.data;
   }
 
-  async initializeSetup(data: { email: string; password: string; displayName: string }): Promise<{ message: string; user: User }> {
+  async initializeSetup(data: {
+    email: string;
+    password: string;
+    displayName: string;
+    instanceName: string;
+    timezone: string;
+    allowRegistration: boolean;
+  }): Promise<{ message: string; user: User }> {
     const response = await this.client.post('/api/setup/init', data);
     return response.data;
   }
@@ -429,6 +436,11 @@ class ApiClient {
 
   async getCampaignCharacters(campaignId: string): Promise<{ roster: any[] }> {
     const response = await this.client.get(`/api/campaigns/${campaignId}/characters`);
+    return response.data;
+  }
+
+  async setCharacterController(campaignId: string, characterId: string, userId: string | null): Promise<{ characterId: string; controllerUserId: string | null }> {
+    const response = await this.client.put(`/api/campaigns/${campaignId}/characters/${characterId}/controller`, { userId });
     return response.data;
   }
 

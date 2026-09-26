@@ -10,11 +10,27 @@ import CharacterSheetSkeleton from '@/components/skeletons/CharacterSheetSkeleto
 import ConfirmDialog from '@/components/common/ConfirmDialog';
 import { useAuth } from '@/contexts/AuthContext';
 import { useToast } from '@/contexts/ToastContext';
+import { api } from '@/services/api';
 import characterService from '@/services/character.service';
 import campaignService from '@/services/campaign.service';
+import { canEditCharacter } from '@/services/permissions';
 import { CharacterSheetRouter } from '@/components/character-sheets/CharacterSheetRouter';
 import type { Character, Campaign } from '@/types';
 import Button from '@/components/ui/Button';
+
+function getTokenAssetId(tokenImageUrl?: string | null): string | null {
+  if (!tokenImageUrl) return null;
+
+  let pathname = tokenImageUrl;
+  try {
+    pathname = new URL(tokenImageUrl, 'http://cozyvtt.local').pathname;
+  } catch {
+    return null;
+  }
+
+  const match = /^\/api\/assets\/tokens\/([^/]+)$/.exec(pathname);
+  return match?.[1] ? decodeURIComponent(match[1]) : null;
+}
 
 export default function CharacterEditorPage() {
   const { id } = useParams<{ id: string }>();
@@ -27,15 +43,41 @@ export default function CharacterEditorPage() {
   const [campaign, setCampaign] = useState<Campaign | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
+  const [hasPendingSave, setHasPendingSave] = useState(false);
   const [saving, setSaving] = useState(false);
   const [confirmLeave, setConfirmLeave] = useState(false);
-  const [lastSaved, setLastSaved] = useState<Date | null>(null);
   const [permissionError, setPermissionError] = useState<string | null>(null);
 
   // Auto-save timer ref
   const autoSaveTimerRef = useRef<number | null>(null);
-  const pendingDataRef = useRef<any>(null);
+  const pendingSaveRef = useRef<{ data: any; tokenImageUrl?: string } | null>(null);
+  const unattachedTokenAssetIdRef = useRef<string | null>(null);
+  const attachedTokenAssetIdRef = useRef<string | null>(null);
+  const savingRef = useRef(false);
+  const mountedRef = useRef(true);
+
+  const deleteUnattachedTokenAsset = useCallback((assetId: string) => {
+    if (assetId === attachedTokenAssetIdRef.current) return;
+
+    void api.deleteAsset(assetId).catch((cleanupError) => {
+      console.warn('Failed to delete an unattached token asset:', cleanupError);
+    });
+  }, []);
+
+  const cleanupRetainedTokenAsset = useCallback(() => {
+    const assetId = unattachedTokenAssetIdRef.current;
+    unattachedTokenAssetIdRef.current = null;
+    if (assetId) deleteUnattachedTokenAsset(assetId);
+  }, [deleteUnattachedTokenAsset]);
+
+  const invalidatePendingSave = useCallback(() => {
+    if (!pendingSaveRef.current) return;
+
+    pendingSaveRef.current = null;
+    setHasPendingSave(false);
+  }, []);
 
   // ============================================
   // Fetch Character & Check Permissions
@@ -52,13 +94,14 @@ export default function CharacterEditorPage() {
 
         // Fetch character
         const fetchedCharacter = await characterService.getCharacter(id);
+        attachedTokenAssetIdRef.current = getTokenAssetId(fetchedCharacter.tokenImageUrl);
         setCharacter(fetchedCharacter);
 
         // Check permissions
         const canEdit = await checkEditPermission(fetchedCharacter);
         if (!canEdit) {
           setPermissionError(
-            'You do not have permission to edit this character. Only the owner or the DM of the assigned campaign can edit characters.'
+            'You do not have permission to edit this character. The owner, a campaign DM, or an assigned player can edit it.'
           );
           return;
         }
@@ -86,6 +129,17 @@ export default function CharacterEditorPage() {
     fetchCharacter();
   }, [id, user]);
 
+  // A retained upload is safe to delete only after a definite save rejection.
+  // On route changes, release that known-unattached asset. If a save is still
+  // in flight, let its response decide whether the asset was attached first.
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (!savingRef.current) cleanupRetainedTokenAsset();
+    };
+  }, [cleanupRetainedTokenAsset]);
+
   // ============================================
   // Permission Check
   // ============================================
@@ -98,13 +152,14 @@ export default function CharacterEditorPage() {
       return true;
     }
 
-    // Character is assigned to a campaign - check if user is the DM
+    // Character is assigned to a campaign - check DM or player assignment.
     if (char.campaignId) {
       try {
         const camp = await campaignService.getCampaign(char.campaignId);
-        if (camp.ownerId === user.id) {
-          return true;
-        }
+        const membership = camp.memberships?.find(
+          (candidate) => candidate.userId === user.id,
+        );
+        return canEditCharacter(user, char, membership);
       } catch (err) {
         console.error('Failed to check campaign permission:', err);
       }
@@ -118,11 +173,14 @@ export default function CharacterEditorPage() {
   // ============================================
 
   const handleSave = useCallback(
-    async (data: any, doShowToast = true, tokenImageUrl?: string) => {
+    async (data: any, doShowToast = true, tokenImageUrl?: string): Promise<void> => {
       if (!character) return;
+      const uploadedTokenAssetId = getTokenAssetId(tokenImageUrl);
 
       try {
+        savingRef.current = true;
         setSaving(true);
+        setSaveError(null);
 
         // Update character via API
         // Use the new tokenImageUrl if provided, otherwise keep the existing one
@@ -133,10 +191,17 @@ export default function CharacterEditorPage() {
         });
 
         // Update local state
+        const savedTokenAssetId = getTokenAssetId(updated.tokenImageUrl);
+        const previouslyUnattachedAssetId = unattachedTokenAssetIdRef.current;
+        unattachedTokenAssetIdRef.current = null;
+        attachedTokenAssetIdRef.current = savedTokenAssetId;
+        if (previouslyUnattachedAssetId && previouslyUnattachedAssetId !== savedTokenAssetId) {
+          deleteUnattachedTokenAsset(previouslyUnattachedAssetId);
+        }
         setCharacter(updated);
         setHasUnsavedChanges(false);
-        setLastSaved(new Date());
-        pendingDataRef.current = null;
+        pendingSaveRef.current = null;
+        setHasPendingSave(false);
 
         if (doShowToast) {
           showToast('Character saved!', 'success');
@@ -144,21 +209,48 @@ export default function CharacterEditorPage() {
       } catch (err: any) {
         console.error('Failed to save character:', err);
         console.error('Error response:', err.response?.data);
+        setHasUnsavedChanges(true);
+        pendingSaveRef.current = { data, tokenImageUrl };
+        setHasPendingSave(true);
+
+        const status = err.response?.status;
+        const definitelyRejected = typeof status === 'number' && status >= 400 && status < 500;
+        const previouslyUnattachedAssetId = unattachedTokenAssetIdRef.current;
+        if (previouslyUnattachedAssetId && previouslyUnattachedAssetId !== uploadedTokenAssetId) {
+          unattachedTokenAssetIdRef.current = null;
+          deleteUnattachedTokenAsset(previouslyUnattachedAssetId);
+        }
+        if (definitelyRejected && uploadedTokenAssetId && uploadedTokenAssetId !== attachedTokenAssetIdRef.current) {
+          unattachedTokenAssetIdRef.current = uploadedTokenAssetId;
+        } else if (previouslyUnattachedAssetId === uploadedTokenAssetId) {
+          // A network or server error leaves it unclear whether this retry
+          // attached the asset, so don't auto-delete it later.
+          unattachedTokenAssetIdRef.current = null;
+        }
 
         // Show detailed validation errors if available
         if (err.response?.data?.validationErrors) {
           const validationErrors = err.response.data.validationErrors;
           const errorMessages = validationErrors.map((e: any) => `${e.path}: ${e.message}`).join('\n');
-          setError(`Validation errors:\n${errorMessages}`);
+          setSaveError(
+            `Validation errors:\n${errorMessages}\n\nCorrect the listed values and try saving again.`,
+          );
           console.error('Validation errors:', validationErrors);
         } else {
-          setError(err.response?.data?.message || err.message || 'Failed to save character');
+          const message = err.response?.data?.message || err.message || 'Failed to save character';
+          setSaveError(`${message}\n\nPlease review your changes and try saving again.`);
         }
+
+        // Let game-system sheet wrappers know the save failed so they stay in
+        // edit mode and keep the draft mounted.
+        throw err;
       } finally {
+        savingRef.current = false;
         setSaving(false);
+        if (!mountedRef.current) cleanupRetainedTokenAsset();
       }
     },
-    [character]
+    [character, cleanupRetainedTokenAsset, deleteUnattachedTokenAsset]
   );
 
   // ============================================
@@ -173,9 +265,6 @@ export default function CharacterEditorPage() {
       // Save immediately when user clicks save in character sheet
       // Pass tokenImageUrl through so token images are persisted
       await handleSave(data, showToast ?? true, tokenImageUrl);
-
-      // Store for top save button reference
-      pendingDataRef.current = data;
     },
     [handleSave]
   );
@@ -230,9 +319,19 @@ export default function CharacterEditorPage() {
   // ============================================
 
   const handleManualSave = async () => {
-    if (pendingDataRef.current) {
-      await handleSave(pendingDataRef.current, true);
+    const pendingSave = pendingSaveRef.current;
+    if (pendingSave) {
+      try {
+        await handleSave(pendingSave.data, true, pendingSave.tokenImageUrl);
+      } catch {
+        // handleSave keeps the validation/server message in the page alert.
+      }
     }
+  };
+
+  const handleConfirmLeave = () => {
+    if (!savingRef.current) cleanupRetainedTokenAsset();
+    navigate('/characters');
   };
 
   // ============================================
@@ -294,10 +393,18 @@ export default function CharacterEditorPage() {
       confirmLabel="Leave"
       cancelLabel="Stay"
       variant="warning"
-      onConfirm={() => navigate('/characters')}
+      onConfirm={handleConfirmLeave}
       onCancel={() => setConfirmLeave(false)}
     />
     <div className="min-h-screen bg-gradient-to-br from-soft-cream via-parchment to-warm-amber/20">
+      {saveError && (
+        <div
+          role="alert"
+          className="glass-panel mx-4 mt-4 border border-spirit-red/30 p-4 text-spirit-red whitespace-pre-wrap"
+        >
+          {saveError}
+        </div>
+      )}
       {/* Header */}
       <div className="glass-panel m-4 p-4">
         <div className="flex items-center justify-between gap-4">
@@ -332,21 +439,18 @@ export default function CharacterEditorPage() {
                 Saving...
               </span>
             )}
-            {lastSaved && !hasUnsavedChanges && (
-              <span className="text-sm text-stone-gray">
-                Saved {lastSaved.toLocaleTimeString()}
-              </span>
+            {/* Retry only a payload retained after a failed sheet save. Ordinary
+                edits are saved through the character sheet's own Save button. */}
+            {hasPendingSave && (
+              <Button
+                onClick={handleManualSave}
+                disabled={saving}
+                className="flex items-center gap-2"
+              >
+                <Save className="w-4 h-4" />
+                Retry Save
+              </Button>
             )}
-
-            {/* Manual Save Button */}
-            <Button
-              onClick={handleManualSave}
-              disabled={!hasUnsavedChanges || saving}
-              className="flex items-center gap-2"
-            >
-              <Save className="w-4 h-4" />
-              Save
-            </Button>
 
             {/* Export Button */}
             <Button
@@ -362,7 +466,14 @@ export default function CharacterEditorPage() {
       </div>
 
       {/* Character Sheet Editor */}
-      <div className="p-4">
+      <div
+        className="p-4"
+        // Let controlled sheet fields process their event before clearing the
+        // retained retry. A capture-phase update can rerender the wrapper
+        // before the child applies the first edit after a failed save.
+        onChange={invalidatePendingSave}
+        onClick={invalidatePendingSave}
+      >
         <CharacterSheetRouter
           character={character}
           mode="edit"

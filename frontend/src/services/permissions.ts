@@ -2,7 +2,48 @@
  * Permission Utilities
  */
 
-import type { User, Character, CampaignMembership } from '../types';
+import { PlatformRole } from '../types';
+import type {
+  User,
+  Character,
+  Campaign,
+  CampaignMembership,
+} from '../types';
+
+export function isCampaignDm(campaign: Campaign, userId: string): boolean {
+  return (
+    campaign.memberships?.some(
+      (membership) =>
+        membership.userId === userId && membership.role === 'DM',
+    ) ?? false
+  );
+}
+
+export function canManageDmRoles(campaign: Campaign, user: User): boolean {
+  return (
+    user.platformRole === PlatformRole.ADMIN || campaign.ownerId === user.id
+  );
+}
+
+export function canDeleteCampaign(campaign: Campaign, user: User): boolean {
+  return canManageDmRoles(campaign, user);
+}
+
+export function canRemoveCampaignMember(
+  campaign: Campaign,
+  user: User,
+  membership: CampaignMembership,
+): boolean {
+  if (membership.userId === campaign.ownerId) {
+    return false;
+  }
+
+  if (membership.role === 'DM') {
+    return canManageDmRoles(campaign, user);
+  }
+
+  return canManageDmRoles(campaign, user) || isCampaignDm(campaign, user.id);
+}
 
 /**
  * Check if a user can edit a character
@@ -13,7 +54,7 @@ import type { User, Character, CampaignMembership } from '../types';
  */
 export function canEditCharacter(
   user: User,
-  character: Character,
+  character: Pick<Character, 'id' | 'userId'>,
   membership?: CampaignMembership
 ): boolean {
   // User owns the character
@@ -26,12 +67,16 @@ export function canEditCharacter(
     return true;
   }
 
+  if (membership?.role === 'PLAYER' && membership.characterIds.includes(character.id)) {
+    return true;
+  }
+
   return false;
 }
 
 /**
  * Check if a user can view a character
- * In campaign context, all members can view characters
+ * In campaign context, DMs and assigned players can view full sheets
  * @param user - Current user
  * @param character - Character to view
  * @param membership - User's campaign membership (if in campaign context)
@@ -39,7 +84,7 @@ export function canEditCharacter(
  */
 export function canViewCharacter(
   user: User,
-  character: Character,
+  character: Pick<Character, 'id' | 'userId'>,
   membership?: CampaignMembership
 ): boolean {
   // User owns the character
@@ -47,12 +92,18 @@ export function canViewCharacter(
     return true;
   }
 
-  // User is a member of the campaign (any role can view)
-  if (membership) {
-    return true;
-  }
+  return membership?.role === 'DM' ||
+    (membership?.role === 'PLAYER' && membership.characterIds.includes(character.id)) || false;
+}
 
-  return false;
+/** Character-based rolls use the sheet's modifiers and require control. */
+export function canRollAsCharacter(
+  user: User,
+  character: Pick<Character, 'id' | 'userId'>,
+  membership?: CampaignMembership
+): boolean {
+  return character.userId === user.id || membership?.role === 'DM' ||
+    (membership?.role === 'PLAYER' && membership.characterIds.includes(character.id)) || false;
 }
 
 /**

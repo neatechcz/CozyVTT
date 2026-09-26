@@ -6,7 +6,7 @@ import { normalizeAssetUrl } from '../utils/asset-urls';
 import { GameSystem } from '../game-systems';
 import { validateCharacterData } from '../validators/game-systems';
 import { CreateCharacterSchema, UpdateCharacterSchema } from '../validators/characters';
-import { broadcastToCampaign } from '../websocket/utils';
+import { broadcastToCampaign, broadcastToUser } from '../websocket/utils';
 import logger from '../utils/logger';
 
 const router = Router();
@@ -111,15 +111,28 @@ router.post('/', authenticated, async (req: AuthenticatedRequest, res: Response)
 
 /**
  * GET /api/characters
- * List all characters owned by the authenticated user
+ * List characters owned by the user, assigned to the player, or in a campaign they DM
  * Requires: Authentication
  */
 router.get('/', authenticated, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.session.userId!;
+    const memberships = await prisma.campaignMembership.findMany({
+      where: { userId, role: { in: ['PLAYER', 'DM'] } },
+      select: { campaignId: true, characterIds: true, role: true },
+    });
 
     const characters = await prisma.character.findMany({
-      where: { userId },
+      where: {
+        OR: [
+          { userId },
+          ...memberships.map((membership) =>
+            membership.role === 'DM'
+              ? { campaignId: membership.campaignId }
+              : { campaignId: membership.campaignId, id: { in: membership.characterIds } },
+          ),
+        ],
+      },
       include: {
         campaign: {
           select: {
@@ -229,8 +242,7 @@ router.get('/:id', authenticated, async (req: AuthenticatedRequest, res: Respons
             id: true,
             displayName: true,
             avatarUrl: true,
-            // SECURITY: never embed `email` — this endpoint can be hit by
-            // any campaign member viewing another player's character.
+            // SECURITY: never embed email in a player-facing response.
           },
         },
       },
@@ -248,8 +260,7 @@ router.get('/:id', authenticated, async (req: AuthenticatedRequest, res: Respons
       return res.status(200).json({ character });
     }
 
-    // If character is in a campaign, check if requester is a campaign member
-    // All campaign members can VIEW characters, but only owner/DM can EDIT
+    // A campaign DM or assigned player may view the full sheet.
     if (character.campaignId) {
       const membership = await prisma.campaignMembership.findUnique({
         where: {
@@ -260,8 +271,8 @@ router.get('/:id', authenticated, async (req: AuthenticatedRequest, res: Respons
         },
       });
 
-      // Any campaign member (DM, PLAYER, SPECTATOR) can view characters in the campaign
-      if (membership) {
+      if (membership && (membership.role === 'DM' ||
+        (membership.role === 'PLAYER' && membership.characterIds.includes(id)))) {
         return res.status(200).json({ character });
       }
     }
@@ -428,7 +439,8 @@ router.put('/:id', authenticated, async (req: AuthenticatedRequest, res: Respons
         },
       });
 
-      if (membership && membership.role === 'DM') {
+      if (membership && (membership.role === 'DM' ||
+        (membership.role === 'PLAYER' && membership.characterIds.includes(id)))) {
         isAuthorized = true;
       }
     }
@@ -478,14 +490,27 @@ router.put('/:id', authenticated, async (req: AuthenticatedRequest, res: Respons
       },
     });
 
-    // Broadcast character update to campaign if character is in a campaign
+    // Full sheets go only to people who can open them, never the campaign room.
     if (updatedCharacter.campaignId) {
       try {
-        broadcastToCampaign(updatedCharacter.campaignId, 'character.updated', {
-          characterId: updatedCharacter.id,
-          character: updatedCharacter,
-          userId,
+        const memberships = await prisma.campaignMembership.findMany({
+          where: {
+            campaignId: updatedCharacter.campaignId,
+            OR: [
+              { role: 'DM' },
+              { role: 'PLAYER', characterIds: { has: id } },
+            ],
+          },
+          select: { userId: true },
         });
+        const recipients = new Set([updatedCharacter.userId, ...memberships.map((m) => m.userId)]);
+        for (const recipientId of recipients) {
+          broadcastToUser(recipientId, 'character.updated', {
+            characterId: updatedCharacter.id,
+            character: updatedCharacter,
+            userId,
+          });
+        }
       } catch (error) {
         logger.error('Failed to broadcast character update', { err: error });
         // Don't fail the request if broadcast fails

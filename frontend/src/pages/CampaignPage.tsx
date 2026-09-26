@@ -215,7 +215,7 @@ function CampaignPageContent() {
   return (
     <div className="h-screen flex flex-col bg-gradient-to-br from-soft-cream via-parchment to-warm-amber/20">
       {/* Header Bar */}
-      <header className="flex items-center justify-between px-4 py-3 bg-moss-green/10 border-b border-moss-green/20 shadow-sm">
+      <header className="hidden lg:flex items-center justify-between px-4 py-3 bg-moss-green/10 border-b border-moss-green/20 shadow-sm">
         <div className="flex items-center gap-3">
           <Button
             onClick={() => navigate('/dashboard')}
@@ -298,7 +298,7 @@ function CampaignPageContent() {
                 onClick={() => togglePanel(leftPanelRef, '20%')}
               />
             </Tooltip>
-            <Tooltip content={rightCollapsed ? 'Show session panel' : 'Hide session panel'} side="bottom">
+            <Tooltip content={rightCollapsed ? 'Show session panel' : 'Hide session panel'} side="bottom" align="end">
               <Button
                 variant="ghost"
                 iconOnly

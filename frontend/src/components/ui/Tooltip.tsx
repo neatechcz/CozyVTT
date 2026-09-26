@@ -18,10 +18,12 @@ export interface TooltipProps {
   delay?: number;
   /** Placement relative to the wrapped element. */
   side?: 'top' | 'bottom';
+  /** Horizontal alignment. Use start/end for triggers near viewport edges. */
+  align?: 'start' | 'center' | 'end';
   children: React.ReactNode;
 }
 
-export default function Tooltip({ content, delay = 400, side = 'top', children }: TooltipProps) {
+export default function Tooltip({ content, delay = 400, side = 'top', align = 'center', children }: TooltipProps) {
   const [visible, setVisible] = useState(false);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const id = useId();
@@ -47,20 +49,27 @@ export default function Tooltip({ content, delay = 400, side = 'top', children }
       aria-describedby={visible ? id : undefined}
     >
       {children}
-      <span
-        id={id}
-        role="tooltip"
-        className={cn(
-          'pointer-events-none absolute left-1/2 -translate-x-1/2 z-[70]',
-          side === 'top' ? 'bottom-full mb-1.5' : 'top-full mt-1.5',
-          'whitespace-nowrap rounded-lg px-2.5 py-1 text-xs font-medium',
-          'bg-ink text-canvas shadow-lg',
-          'transition-opacity duration-150',
-          visible ? 'opacity-100' : 'opacity-0'
-        )}
-      >
-        {content}
-      </span>
+      {visible && (
+        <span
+          id={id}
+          role="tooltip"
+          style={
+            align === 'start'
+              ? { left: 0 }
+              : align === 'end'
+                ? { right: 0 }
+                : { left: '50%', transform: 'translateX(-50%)' }
+          }
+          className={cn(
+            'pointer-events-none absolute z-[70]',
+            side === 'top' ? 'bottom-full mb-1.5' : 'top-full mt-1.5',
+            'whitespace-nowrap rounded-lg px-2.5 py-1 text-xs font-medium',
+            'bg-ink text-canvas shadow-lg'
+          )}
+        >
+          {content}
+        </span>
+      )}
     </span>
   );
 }

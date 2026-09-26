@@ -75,6 +75,7 @@ import ThemePicker from '@/components/appearance/ThemePicker';
 import TableSkeleton from '@/components/skeletons/TableSkeleton';
 import ConfirmDialog from '@/components/common/ConfirmDialog';
 import Button from '@/components/ui/Button';
+import { useFocusTrap } from '@/hooks/useFocusTrap';
 
 // ============================================
 // Helpers
@@ -183,6 +184,7 @@ export default function AdminPage() {
 
   // Create user modal
   const [createUserOpen, setCreateUserOpen] = useState(false);
+  const createUserTriggerRef = useRef<HTMLButtonElement>(null);
   const [createUserForm, setCreateUserForm] = useState({ email: '', displayName: '', platformRole: 'USER' });
   const [creatingUser, setCreatingUser] = useState(false);
   const [createUserError, setCreateUserError] = useState('');
@@ -592,6 +594,17 @@ export default function AdminPage() {
     setNewUserPasswordCopied(false);
   };
 
+  const handleCloseCreateUserModal = () => {
+    if (creatingUser || newUserPassword) return;
+    closeCreateUserModal();
+  };
+
+  const createUserDialogRef = useFocusTrap(
+    createUserOpen,
+    handleCloseCreateUserModal,
+    createUserTriggerRef,
+  );
+
   const handleResetMfa = async (userId: string) => {
     setIsResettingMfa(true);
     setResetMfaError('');
@@ -772,6 +785,33 @@ export default function AdminPage() {
     { id: 'activity',  label: 'Activity',  icon: <Activity className="w-4 h-4" /> },
   ];
 
+  const handleTabKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>, tabId: Tab) => {
+    const currentIndex = tabs.findIndex(tab => tab.id === tabId);
+    let nextIndex: number;
+
+    switch (event.key) {
+      case 'ArrowRight':
+        nextIndex = (currentIndex + 1) % tabs.length;
+        break;
+      case 'ArrowLeft':
+        nextIndex = (currentIndex - 1 + tabs.length) % tabs.length;
+        break;
+      case 'Home':
+        nextIndex = 0;
+        break;
+      case 'End':
+        nextIndex = tabs.length - 1;
+        break;
+      default:
+        return;
+    }
+
+    event.preventDefault();
+    const nextTab = tabs[nextIndex];
+    setActiveTab(nextTab.id);
+    document.getElementById(`tab-${nextTab.id}`)?.focus();
+  };
+
   // ============================================
   // Render
   // ============================================
@@ -808,7 +848,7 @@ export default function AdminPage() {
 
           {/* Tab Navigation */}
           <nav aria-label="Admin panel sections">
-            <div role="tablist" aria-label="Admin tabs" className="flex gap-1 mt-4">
+            <div role="tablist" aria-label="Admin tabs" className="flex flex-wrap gap-1 mt-4 max-w-full">
               {tabs.map(tab => (
                 <button
                   key={tab.id}
@@ -816,7 +856,9 @@ export default function AdminPage() {
                   id={`tab-${tab.id}`}
                   aria-selected={activeTab === tab.id}
                   aria-controls={`tabpanel-${tab.id}`}
+                  tabIndex={activeTab === tab.id ? 0 : -1}
                   onClick={() => setActiveTab(tab.id)}
+                  onKeyDown={event => handleTabKeyDown(event, tab.id)}
                   className={`flex items-center gap-2 px-4 py-2 rounded-t-lg text-sm font-medium transition-colors ${
                     activeTab === tab.id
                       ? 'bg-paper text-moss-green border border-b-paper border-moss-green/20 -mb-px'
@@ -985,6 +1027,7 @@ export default function AdminPage() {
               <h2 className="text-xl font-semibold text-moss-green">User Management</h2>
               <div className="flex items-center gap-2">
                 <Button
+                  ref={createUserTriggerRef}
                   onClick={() => setCreateUserOpen(true)}
                   className="flex items-center gap-2 text-sm py-1.5 px-3"
                 >
@@ -1743,7 +1786,7 @@ export default function AdminPage() {
                 {/* Allow Registration */}
                 <div className="flex items-center justify-between">
                   <div>
-                    <p className="text-sm font-medium text-stone-gray">Allow Public Registration</p>
+                    <p id="allow-registration-label" className="text-sm font-medium text-stone-gray">Allow Public Registration</p>
                     <p className="text-xs text-warm-gray mt-0.5">
                       When enabled, anyone can create an account via the registration page.
                     </p>
@@ -1754,6 +1797,7 @@ export default function AdminPage() {
                       settingsForm.allowRegistration ? 'bg-moss-green' : 'bg-warm-gray/40'
                     }`}
                     role="switch"
+                    aria-labelledby="allow-registration-label"
                     aria-checked={settingsForm.allowRegistration}
                   >
                     <span
@@ -1767,7 +1811,7 @@ export default function AdminPage() {
                 {/* Require Admin Approval */}
                 <div className="flex items-center justify-between">
                   <div>
-                    <p className="text-sm font-medium text-stone-gray">Require Admin Approval</p>
+                    <p id="require-admin-approval-label" className="text-sm font-medium text-stone-gray">Require Admin Approval</p>
                     <p className="text-xs text-warm-gray mt-0.5">
                       New accounts must be approved by an admin before they can log in.
                     </p>
@@ -1778,6 +1822,7 @@ export default function AdminPage() {
                       settingsForm.requireAdminApproval ? 'bg-moss-green' : 'bg-warm-gray/40'
                     }`}
                     role="switch"
+                    aria-labelledby="require-admin-approval-label"
                     aria-checked={settingsForm.requireAdminApproval}
                   >
                     <span
@@ -2446,17 +2491,29 @@ export default function AdminPage() {
       {createUserOpen && (
         <div
           className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4"
-          onClick={e => { if (e.target === e.currentTarget && !newUserPassword) closeCreateUserModal(); }}
+          onClick={e => { if (e.target === e.currentTarget) handleCloseCreateUserModal(); }}
         >
-          <div className="bg-paper rounded-2xl shadow-2xl w-full max-w-md">
+          <div
+            ref={createUserDialogRef}
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="create-user-title"
+            className="bg-paper rounded-2xl shadow-2xl w-full max-w-md"
+          >
             <div className="flex items-center justify-between p-5 border-b border-warm-gray/20">
-              <h2 className="text-lg font-semibold text-moss-green flex items-center gap-2">
-                <UserPlus className="w-5 h-5" />
+              <h2 id="create-user-title" className="text-lg font-semibold text-moss-green flex items-center gap-2">
+                <UserPlus className="w-5 h-5" aria-hidden="true" />
                 Create User
               </h2>
               {!newUserPassword && (
-                <button onClick={closeCreateUserModal} className="text-warm-gray hover:text-stone-gray transition-colors">
-                  <X className="w-5 h-5" />
+                <button
+                  type="button"
+                  onClick={handleCloseCreateUserModal}
+                  disabled={creatingUser}
+                  aria-label="Close dialog"
+                  className="text-warm-gray hover:text-stone-gray transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <X className="w-5 h-5" aria-hidden="true" />
                 </button>
               )}
             </div>
@@ -2495,10 +2552,11 @@ export default function AdminPage() {
                   )}
 
                   <div>
-                    <label className="block text-sm font-medium text-stone-gray mb-1">
+                    <label htmlFor="create-user-email" className="block text-sm font-medium text-stone-gray mb-1">
                       Email <span className="text-red-500">*</span>
                     </label>
                     <input
+                      id="create-user-email"
                       type="email"
                       value={createUserForm.email}
                       onChange={e => setCreateUserForm(f => ({ ...f, email: e.target.value }))}
@@ -2509,10 +2567,11 @@ export default function AdminPage() {
                   </div>
 
                   <div>
-                    <label className="block text-sm font-medium text-stone-gray mb-1">
+                    <label htmlFor="create-user-display-name" className="block text-sm font-medium text-stone-gray mb-1">
                       Display Name <span className="text-warm-gray text-xs">(optional)</span>
                     </label>
                     <input
+                      id="create-user-display-name"
                       type="text"
                       value={createUserForm.displayName}
                       onChange={e => setCreateUserForm(f => ({ ...f, displayName: e.target.value }))}

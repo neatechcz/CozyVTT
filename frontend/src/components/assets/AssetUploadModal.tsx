@@ -2,9 +2,10 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import { motion } from 'framer-motion';
 import { X, Upload, FileImage, FileAudio, User, MapPin, Loader, Tag as TagIcon, Globe, Users } from 'lucide-react';
 import { api } from '../../services/api';
-import { Asset, AssetType, AssetScope, PlatformRole, Campaign, CampaignRole } from '../../types';
+import { Asset, AssetType, AssetScope, PlatformRole, Campaign } from '../../types';
 import { useAuth } from '../../contexts/AuthContext';
 import campaignService from '../../services/campaign.service';
+import { isCampaignDm } from '../../services/permissions';
 import { Button, Modal } from '@/components/ui';
 
 interface AssetUploadModalProps {
@@ -85,10 +86,9 @@ export default function AssetUploadModal({ isOpen, onClose, onSuccess, defaultTy
   // All other types: DM-only campaigns
   const dropdownCampaigns = assetType === AssetType.TOKEN
     ? allCampaigns
-    : allCampaigns.filter((c) =>
-        c.ownerId === user?.id ||
-        c.memberships?.some((m) => m.userId === user?.id && m.role === CampaignRole.DM)
-      );
+    : user
+      ? allCampaigns.filter((campaign) => isCampaignDm(campaign, user.id))
+      : [];
 
   // Whether the Campaign scope option should be available
   const hasCampaignAccess = allCampaigns.length > 0;

@@ -183,10 +183,11 @@ export default function MFASetupPage() {
             {/* Verification Form */}
             <form onSubmit={handleVerify} className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-stone-gray mb-1.5">
+                <label htmlFor="mfa-verification-code" className="block text-sm font-medium text-stone-gray mb-1.5">
                   Verification Code
                 </label>
                 <input
+                  id="mfa-verification-code"
                   type="text"
                   inputMode="numeric"
                   pattern="[0-9]*"

@@ -129,9 +129,9 @@ class AuthService {
   /**
    * Request password reset email
    */
-  async forgotPassword(email: string): Promise<void> {
+  async forgotPassword(email: string): Promise<{ message: string }> {
     const forgotData: ForgotPasswordRequest = { email };
-    await api.forgotPassword(forgotData);
+    return await api.forgotPassword(forgotData);
   }
 
   /**

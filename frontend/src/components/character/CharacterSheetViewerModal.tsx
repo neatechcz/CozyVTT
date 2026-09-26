@@ -6,8 +6,9 @@ import { useState, useEffect } from 'react';
 import { X, Edit, Shield, User as UserIcon } from 'lucide-react';
 import { useFocusTrap } from '@/hooks/useFocusTrap';
 import { useAuth } from '@/contexts/AuthContext';
+import { useCampaign } from '@/contexts/CampaignContext';
 import { useWebSocket } from '@/contexts/WebSocketContext';
-import { canEditCharacter } from '@/services/permissions';
+import { canEditCharacter, canRollAsCharacter } from '@/services/permissions';
 import { api } from '@/services/api';
 import type { Character, GameSystem, CampaignMembership } from '@/types';
 
@@ -35,6 +36,7 @@ export default function CharacterSheetViewerModal({
   onClose,
 }: CharacterSheetViewerModalProps) {
   const { user } = useAuth();
+  const { campaign } = useCampaign();
   const { socket } = useWebSocket();
   const [character, setCharacter] = useState(initialCharacter);
   const [ownerName, setOwnerName] = useState<string>('');
@@ -79,6 +81,10 @@ export default function CharacterSheetViewerModal({
 
   // Check if user can edit
   const canEdit = user ? canEditCharacter(user, character, membership) : false;
+  const canRoll = user ? canRollAsCharacter(user, character, membership) : false;
+  const assignedPlayer = campaign?.memberships?.find((member) =>
+    member.role === 'PLAYER' && member.characterIds.includes(character.id));
+  const playerName = assignedPlayer?.user?.displayName ?? ownerName;
   const isDMEditingOtherCharacter =
     membership.role === 'DM' && character.userId !== user?.id;
 
@@ -125,7 +131,7 @@ export default function CharacterSheetViewerModal({
   // Handle click-to-roll — emit dice roll via WebSocket
   const handleRoll = (expression: string, purpose: string) => {
     if (socket) {
-      socket.emitDiceRoll({ expression, purpose });
+      socket.emitDiceRoll({ characterId: character.id, expression, purpose });
     }
   };
 
@@ -133,13 +139,13 @@ export default function CharacterSheetViewerModal({
   const renderCharacterSheet = () => {
     switch (character.gameSystem) {
       case 'DND_5E':
-        return <DnD5eCharacterView character={character} onEdit={canEdit ? handleEdit : undefined} onRoll={handleRoll} />;
+        return <DnD5eCharacterView character={character} onEdit={canEdit ? handleEdit : undefined} onRoll={canRoll ? handleRoll : undefined} />;
       case 'PATHFINDER_2E':
-        return <Pathfinder2eCharacterView character={character} onEdit={canEdit ? handleEdit : undefined} onRoll={handleRoll} />;
+        return <Pathfinder2eCharacterView character={character} onEdit={canEdit ? handleEdit : undefined} onRoll={canRoll ? handleRoll : undefined} />;
       case 'SHADOWRUN_6E':
         return <Shadowrun6eCharacterSheet character={character} mode="view" />;
       case 'CALL_OF_CTHULHU_7E':
-        return <CallOfCthulhu7eCharacterView character={character} onEdit={canEdit ? handleEdit : undefined} onRoll={handleRoll} />;
+        return <CallOfCthulhu7eCharacterView character={character} onEdit={canEdit ? handleEdit : undefined} onRoll={canRoll ? handleRoll : undefined} />;
       default:
         return <FlexibleCharacterSheetView character={character} onEdit={canEdit ? handleEdit : undefined} />;
     }
@@ -167,7 +173,7 @@ export default function CharacterSheetViewerModal({
                   {character.name}
                 </h2>
                 <div className="flex items-center gap-3 text-sm text-warm-gray">
-                  <span>Player: {ownerName}</span>
+                  <span>Player: {playerName}</span>
                   <span>•</span>
                   <span>{getSystemName(character.gameSystem)}</span>
                 </div>
@@ -179,7 +185,7 @@ export default function CharacterSheetViewerModal({
               <div className="mt-3 flex items-center gap-2 px-3 py-2 bg-moss-green/10 border border-moss-green/30 rounded-lg">
                 <Shield className="w-4 h-4 text-moss-green" />
                 <p className="text-sm text-moss-green">
-                  You are viewing <strong>{ownerName}'s</strong> character as DM
+                  You can edit this character as DM
                 </p>
               </div>
             )}

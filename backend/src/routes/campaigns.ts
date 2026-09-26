@@ -1,5 +1,6 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import multer from 'multer';
+import { PlatformRole } from '@prisma/client';
 import { AuthenticatedRequest } from '../middleware/rbac';
 import { authenticated, campaignMember, campaignDM, adminOnly } from '../middleware/compose';
 import { prisma } from '../config/database';
@@ -86,6 +87,10 @@ router.get('/', authenticated, async (req: AuthenticatedRequest, res: Response) 
 
     const campaigns = memberships.map((m) => ({
       ...m.campaign,
+      memberships: m.role === 'DM' ? m.campaign.memberships : m.campaign.memberships.map((member) => ({
+        ...member,
+        characterIds: member.userId === userId ? member.characterIds : [],
+      })),
       userRole: m.role,
       characterIds: m.characterIds,
     }));
@@ -260,9 +265,18 @@ router.get('/:campaignId', campaignMember, async (req: AuthenticatedRequest, res
 
     // Flatten sessions array → activeSession (first open session, or null)
     const { sessions: _sessions, ...campaignRest } = campaign;
+    const isDM = req.campaignMembership!.role === 'DM';
+    const userId = req.session.userId!;
+    const visibleIds = new Set(req.campaignMembership!.characterIds);
     return res.status(200).json({
       campaign: {
         ...campaignRest,
+        characters: isDM ? campaignRest.characters : campaignRest.characters.filter((character) =>
+          character.userId === userId || visibleIds.has(character.id)),
+        memberships: isDM ? campaignRest.memberships : campaignRest.memberships.map((member) => ({
+          ...member,
+          characterIds: member.userId === userId ? member.characterIds : [],
+        })),
         activeSession: (_sessions && _sessions.length > 0) ? _sessions[0] : null,
         userRole: req.campaignMembership!.role,
       },
@@ -320,9 +334,68 @@ function extractCharacterHp(
   }
 }
 
+/** Assign one campaign character to a player without changing its owner. */
+router.put('/:campaignId/characters/:characterId/controller', campaignDM, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { campaignId, characterId } = req.params;
+    const { userId } = req.body ?? {};
+    if (userId !== null && (typeof userId !== 'string' || !userId)) {
+      return res.status(400).json({ error: 'Validation Error', message: 'userId must be a player ID or null' });
+    }
+
+    const character = await prisma.character.findUnique({ where: { id: characterId }, select: { campaignId: true } });
+    if (!character || character.campaignId !== campaignId) {
+      return res.status(404).json({ error: 'Not Found', message: 'Character not found in this campaign' });
+    }
+
+    const result = await prisma.$transaction(async (tx) => {
+      const players = await tx.campaignMembership.findMany({ where: { campaignId, role: 'PLAYER' } });
+      const target = userId === null ? null : players.find((player) => player.userId === userId);
+      if (userId !== null && !target) return false;
+
+      for (const player of players) {
+        const nextIds = player.characterIds.filter((id) => id !== characterId);
+        if (player.userId === userId) nextIds.push(characterId);
+        if (nextIds.length !== player.characterIds.length || nextIds.some((id, index) => id !== player.characterIds[index])) {
+          await tx.campaignMembership.update({ where: { id: player.id }, data: { characterIds: nextIds } });
+        }
+      }
+      const maps = await tx.map.findMany({ where: { campaignId }, select: { id: true, tokens: true } });
+      for (const map of maps) {
+        if (!Array.isArray(map.tokens)) continue;
+        let changed = false;
+        const tokens = map.tokens.map((value) => {
+          if (!value || typeof value !== 'object' || Array.isArray(value) || value.characterId !== characterId) return value;
+          if (value.controlledBy === userId) return value;
+          changed = true;
+          return { ...value, controlledBy: userId };
+        });
+        if (changed) await tx.map.update({ where: { id: map.id }, data: { tokens } });
+      }
+      return true;
+    });
+    if (!result) {
+      return res.status(400).json({ error: 'Validation Error', message: 'Controller must be a player in this campaign' });
+    }
+
+    try {
+      broadcastToCampaign(campaignId, 'roster.updated', { action: 'character.controller.updated', characterId, userId });
+    } catch (error) {
+      logger.error('Failed to broadcast character controller update', { err: error });
+    }
+    return res.status(200).json({ characterId, controllerUserId: userId });
+  } catch (error) {
+    logger.error('Failed to update character controller', { err: error });
+    return res.status(500).json({ error: 'Internal Server Error', message: 'Failed to update character controller' });
+  }
+});
+
 router.get('/:campaignId/characters', campaignMember, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { campaignId } = req.params;
+    const isDM = req.campaignMembership!.role === 'DM';
+    const userId = req.session.userId!;
+    const visibleIds = new Set(req.campaignMembership!.characterIds);
 
     // Fetch all memberships with their character assignments
     const memberships = await prisma.campaignMembership.findMany({
@@ -345,6 +418,7 @@ router.get('/:campaignId/characters', campaignMember, async (req: AuthenticatedR
     const characters = await prisma.character.findMany({
       where: {
         id: { in: allCharacterIds },
+        campaignId,
       },
       select: {
         id: true,
@@ -356,10 +430,18 @@ router.get('/:campaignId/characters', campaignMember, async (req: AuthenticatedR
       },
     });
 
+    // Player assignments take display priority; DMs retain their complete
+    // characterIds for authorization without duplicating PCs in the roster.
+    const playerCharacterIds = new Set(
+      memberships.filter((membership) => membership.role === 'PLAYER').flatMap((membership) => membership.characterIds)
+    );
+
     // Build response — extract HP from character data, never expose raw data
     const roster = memberships.map((membership) => {
       const memberCharacters = characters
-        .filter((c) => membership.characterIds.includes(c.id))
+        .filter((c) => membership.characterIds.includes(c.id) &&
+          (membership.role !== 'DM' || !playerCharacterIds.has(c.id)) &&
+          (isDM || c.userId === userId || visibleIds.has(c.id)))
         .map(({ data, ...char }) => ({
           ...char,
           hp: extractCharacterHp(char.gameSystem, data),
@@ -778,21 +860,51 @@ router.post('/:campaignId/invite', campaignDM, async (req: AuthenticatedRequest,
  * DELETE /api/campaigns/:campaignId/members/:userId
  * Remove a member from the campaign
  * Requires: Campaign DM role
- * Cannot remove the DM
+ * Only the campaign owner or a platform admin can remove another DM
+ * The campaign owner cannot be removed
  */
-router.delete('/:campaignId/members/:userId', campaignDM, async (req: AuthenticatedRequest, res: Response) => {
+router.delete('/:campaignId/members/:userId', authenticated, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { campaignId, userId } = req.params;
+    const actorId = req.session.userId!;
+    const actorIsAdmin = req.session.platformRole === PlatformRole.ADMIN;
 
-    // Find the membership
-    const membership = await prisma.campaignMembership.findUnique({
-      where: {
-        userId_campaignId: {
-          userId,
-          campaignId,
+    const [campaign, actorMembership, membership] = await Promise.all([
+      prisma.campaign.findUnique({
+        where: { id: campaignId },
+        select: { ownerId: true },
+      }),
+      prisma.campaignMembership.findUnique({
+        where: {
+          userId_campaignId: {
+            userId: actorId,
+            campaignId,
+          },
         },
-      },
-    });
+      }),
+      prisma.campaignMembership.findUnique({
+        where: {
+          userId_campaignId: {
+            userId,
+            campaignId,
+          },
+        },
+      }),
+    ]);
+
+    if (!campaign) {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'Campaign not found',
+      });
+    }
+
+    if (!actorIsAdmin && actorMembership?.role !== 'DM') {
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'This action requires Dungeon Master (DM) role',
+      });
+    }
 
     if (!membership) {
       return res.status(404).json({
@@ -801,11 +913,19 @@ router.delete('/:campaignId/members/:userId', campaignDM, async (req: Authentica
       });
     }
 
-    // CRITICAL: Cannot remove the DM
-    if (membership.role === 'DM') {
+    const actorCanManageDmRoles = actorIsAdmin || campaign.ownerId === actorId;
+
+    if (membership.role === 'DM' && !actorCanManageDmRoles) {
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'Only the campaign owner or an administrator can manage Dungeon Master roles',
+      });
+    }
+
+    if (membership.userId === campaign.ownerId) {
       return res.status(400).json({
         error: 'Bad Request',
-        message: 'Cannot remove the Dungeon Master from the campaign',
+        message: 'The campaign owner cannot be removed',
       });
     }
 
@@ -835,12 +955,14 @@ router.delete('/:campaignId/members/:userId', campaignDM, async (req: Authentica
  * PUT /api/campaigns/:campaignId/members/:userId/role
  * Change a member's role in the campaign
  * Requires: Campaign DM role
- * Only ONE DM per campaign, cannot change DM's role
+ * Only the campaign owner or a platform admin can manage DM roles
  */
-router.put('/:campaignId/members/:userId/role', campaignDM, async (req: AuthenticatedRequest, res: Response) => {
+router.put('/:campaignId/members/:userId/role', authenticated, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { campaignId, userId } = req.params;
     const { role } = req.body;
+    const actorId = req.session.userId!;
+    const actorIsAdmin = req.session.platformRole === PlatformRole.ADMIN;
 
     // Validate role
     if (!role || !['DM', 'PLAYER', 'SPECTATOR'].includes(role)) {
@@ -850,15 +972,42 @@ router.put('/:campaignId/members/:userId/role', campaignDM, async (req: Authenti
       });
     }
 
-    // Find the membership
-    const membership = await prisma.campaignMembership.findUnique({
-      where: {
-        userId_campaignId: {
-          userId,
-          campaignId,
+    const [campaign, actorMembership, membership] = await Promise.all([
+      prisma.campaign.findUnique({
+        where: { id: campaignId },
+        select: { ownerId: true },
+      }),
+      prisma.campaignMembership.findUnique({
+        where: {
+          userId_campaignId: {
+            userId: actorId,
+            campaignId,
+          },
         },
-      },
-    });
+      }),
+      prisma.campaignMembership.findUnique({
+        where: {
+          userId_campaignId: {
+            userId,
+            campaignId,
+          },
+        },
+      }),
+    ]);
+
+    if (!campaign) {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'Campaign not found',
+      });
+    }
+
+    if (!actorIsAdmin && actorMembership?.role !== 'DM') {
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'This action requires Dungeon Master (DM) role',
+      });
+    }
 
     if (!membership) {
       return res.status(404).json({
@@ -867,30 +1016,21 @@ router.put('/:campaignId/members/:userId/role', campaignDM, async (req: Authenti
       });
     }
 
-    // CRITICAL: Cannot change the DM's role
-    if (membership.role === 'DM') {
-      return res.status(400).json({
-        error: 'Bad Request',
-        message: 'Cannot change the Dungeon Master\'s role',
+    const actorCanManageDmRoles = actorIsAdmin || campaign.ownerId === actorId;
+    const touchesDmRole = membership.role === 'DM' || role === 'DM';
+
+    if (touchesDmRole && !actorCanManageDmRoles) {
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'Only the campaign owner or an administrator can manage Dungeon Master roles',
       });
     }
 
-    // CRITICAL: Cannot promote to DM (only one DM allowed per campaign)
-    if (role === 'DM') {
-      // Check if a DM already exists
-      const existingDM = await prisma.campaignMembership.findFirst({
-        where: {
-          campaignId,
-          role: 'DM',
-        },
+    if (membership.userId === campaign.ownerId && role !== 'DM') {
+      return res.status(400).json({
+        error: 'Bad Request',
+        message: 'The campaign owner must remain a Dungeon Master',
       });
-
-      if (existingDM) {
-        return res.status(400).json({
-          error: 'Bad Request',
-          message: 'Campaign already has a Dungeon Master. Only one DM per campaign is allowed.',
-        });
-      }
     }
 
     // Update the role

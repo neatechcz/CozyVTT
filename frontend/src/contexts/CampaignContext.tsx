@@ -263,8 +263,8 @@ export function CampaignProvider({ children }: CampaignProviderProps) {
 
   // Seed HP cache from roster API response (called by CampaignRoster after fetchRoster)
   const seedCharacterHpCache = useCallback((entries: { id: string; hp: CharacterHpInfo | null }[]) => {
-    setCharacterHpCache((prev) => {
-      const next = { ...prev };
+    setCharacterHpCache(() => {
+      const next: Record<string, CharacterHpInfo> = {};
       for (const { id, hp } of entries) {
         if (hp) next[id] = hp;
       }
