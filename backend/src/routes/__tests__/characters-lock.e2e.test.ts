@@ -8,6 +8,8 @@
  * runs them against the real database and real Socket.IO clients to prove:
  * - no lost update between concurrent writers,
  * - compare-and-set conflicts (409, atomic, non-atomic) on real rows,
+ * - the whole-document PUT's `expectedUpdatedAt` precondition (409, nothing
+ *   written) is evaluated against the locked row,
  * - a writer really waits for a lock held elsewhere and then sees its commit,
  * - the delegated-control permission rules are re-evaluated under the lock,
  * - `character.updated` reaches only owner, campaign DMs and assigned player.
@@ -272,6 +274,89 @@ describe('PATCH /api/characters/:id/data on a real row', () => {
     expect(res.status).toBe(409);
     expect(res.body.conflicts[0].current).toBe('put wrote');
     expect((await readCharacter()).data.backstory).toBe('put wrote');
+  });
+});
+
+function get(cookie: string) {
+  return request(server.httpServer)
+    .get(`/api/characters/${characterId}`)
+    .set('Cookie', cookie)
+    .then((res) => res);
+}
+
+describe('whole-document PUT precondition (expectedUpdatedAt)', () => {
+  it('unchanged since the GET → 200, the PUT replaces the document', async () => {
+    const loaded = await get(ownerCookie);
+    expect(loaded.status).toBe(200);
+
+    const res = await put(ownerCookie, {
+      data: { ...baseData(), backstory: 'put wrote' },
+      expectedUpdatedAt: loaded.body.character.updatedAt,
+    });
+
+    expect(res.status).toBe(200);
+    expect((await readCharacter()).data.backstory).toBe('put wrote');
+  });
+
+  it("a PATCH between the fallback's GET and its PUT → PUT 409, the PATCH value survives", async () => {
+    // The live-sync fallback: GET (staleness check) … PUT with the GET's updatedAt
+    const loaded = await get(ownerCookie);
+    expect(loaded.status).toBe(200);
+    const patchRes = await patch(playerCookie, {
+      changes: [{ path: 'treasure', base: 'none', value: 'patched meanwhile' }],
+    });
+    expect(patchRes.status).toBe(200);
+    const afterPatch = await readCharacter();
+
+    const res = await put(ownerCookie, {
+      data: { ...(loaded.body.character.data as object), backstory: 'put wrote' },
+      expectedUpdatedAt: loaded.body.character.updatedAt,
+    });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('Conflict');
+    expect(res.body.message).toBe('Character changed since it was loaded');
+    expect(res.body.character.id).toBe(characterId);
+    expect(res.body.character.data.treasure).toBe('patched meanwhile');
+    expect(res.body.character.updatedAt).toBe(afterPatch.updatedAt.toISOString());
+    // Nothing written: the row is exactly the PATCH's result
+    expect(await readCharacter()).toEqual(afterPatch);
+  });
+
+  it('a write committed while the PUT waits for the row lock → 409, that write survives', async () => {
+    const loaded = await get(dmCookie);
+    const holder = holdRowLock(400, async (tx) => {
+      const row = await tx.character.findUniqueOrThrow({ where: { id: characterId } });
+      await tx.character.update({
+        where: { id: characterId },
+        data: { data: { ...(row.data as object), treasure: 'held tx wrote' } },
+      });
+    });
+    await holder.locked;
+    const pending = put(dmCookie, {
+      data: { ...(loaded.body.character.data as object), backstory: 'put wrote' },
+      expectedUpdatedAt: loaded.body.character.updatedAt,
+    });
+    await holder.done;
+    const res = await pending;
+
+    expect(res.status).toBe(409);
+    expect(res.body.character.data.treasure).toBe('held tx wrote');
+    const { data } = await readCharacter();
+    expect(data.treasure).toBe('held tx wrote');
+    expect(data.backstory).toBe('original');
+  });
+
+  it('without expectedUpdatedAt the PUT stays unconditional (backward compatible)', async () => {
+    const loaded = await get(ownerCookie);
+    await patch(playerCookie, { changes: [{ path: 'treasure', base: 'none', value: 'patched meanwhile' }] });
+
+    const res = await put(ownerCookie, { data: { ...(loaded.body.character.data as object), backstory: 'put wrote' } });
+
+    expect(res.status).toBe(200);
+    const { data } = await readCharacter();
+    expect(data.backstory).toBe('put wrote');
+    expect(data.treasure).toBe('none');
   });
 });
 

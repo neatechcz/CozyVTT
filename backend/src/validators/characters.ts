@@ -24,4 +24,11 @@ export const UpdateCharacterSchema = z.object({
   data: z.any().optional(),
   tokenImageUrl: z.string().nullish(),
   gameSystem: z.nativeEnum(GameSystem).nullish(),
+  /**
+   * Optional precondition: the `updatedAt` (ISO 8601) the client based this
+   * write on. When it differs from the row's `updatedAt` under the row lock,
+   * the route answers 409 with the current character and writes nothing.
+   * Absent → the write is unconditional (older clients, other game systems).
+   */
+  expectedUpdatedAt: z.iso.datetime({ offset: true }).optional(),
 });

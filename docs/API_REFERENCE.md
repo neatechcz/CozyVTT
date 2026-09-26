@@ -489,6 +489,8 @@ Save character data. Accepts partial data — only provided fields are updated.
 }
 ```
 
+Optional precondition: `"expectedUpdatedAt": "<ISO 8601>"` — the `updatedAt` the client based the write on. If the character's `updatedAt` differs (checked under the character row lock), nothing is written and the response is `409 { "error": "Conflict", "message": "Character changed since it was loaded", "character": { …current… } }`. Without it the write is unconditional.
+
 ---
 
 ### `DELETE /api/characters/:id`
