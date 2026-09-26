@@ -30,7 +30,8 @@ import api from '@/services/api';
 import type { CreatureTemplate, NpcStatBlock } from '@/types';
 import { TokenType, GameSystem, AssetType, AssetScope } from '@/types';
 import { StatBlockViewer } from './npc-stat-blocks';
-import { statBlockHpFromForm, tokenHpForCreature } from '@/utils/creatureHp';
+import { isPositiveNumber, parseStatBlockHpForm, tokenHpForCreature } from '@/utils/creatureHp';
+import { xpForChallengeRating } from '@/utils/creatureXp';
 import Button from '@/components/ui/Button';
 
 // ============================================
@@ -830,11 +831,14 @@ export function CreatureForm({ campaignId, gameSystem, editingCreature, onCreate
   const [name, setName] = useState(editingCreature?.name ?? '');
   const [creatureType, setCreatureType] = useState(editingCreature?.creatureType ?? sb?.creatureType ?? '');
   const [alignment, setAlignment] = useState(editingCreature?.alignment ?? sb?.alignment ?? '');
-  const [cr, setCr] = useState(editingCreature?.challengeRating ?? sb?.challengeRating ?? '');
+  const initialCr = editingCreature?.challengeRating ?? sb?.challengeRating ?? '';
+  const [cr, setCr] = useState(initialCr);
   const [ac, setAc] = useState(sb?.ac ?? 10);
   const [speed, setSpeed] = useState(sb?.speed ?? '30 ft.');
-  const [hpAverage, setHpAverage] = useState(sb?.hp ? String(sb.hp.average) : '');
-  const [hpFormula, setHpFormula] = useState(sb?.hp?.formula ?? '');
+  // Malformed hp (missing or non-positive average) counts as "no hit points".
+  const hadHp = isPositiveNumber(sb?.hp?.average);
+  const [hpAverage, setHpAverage] = useState(hadHp ? String(sb?.hp?.average) : '');
+  const [hpFormula, setHpFormula] = useState(typeof sb?.hp?.formula === 'string' ? sb.hp.formula : '');
   const [str, setStr] = useState(sb?.abilities?.str ?? 10);
   const [dex, setDex] = useState(sb?.abilities?.dex ?? 10);
   const [con, setCon] = useState(sb?.abilities?.con ?? 10);
@@ -904,6 +908,11 @@ export function CreatureForm({ campaignId, gameSystem, editingCreature, onCreate
       setFormError('Name is required');
       return;
     }
+    const hpResult = parseStatBlockHpForm(hpAverage, hpFormula, hadHp);
+    if (!hpResult.ok) {
+      setFormError(hpResult.error);
+      return;
+    }
     setIsSubmitting(true);
     setFormError(null);
 
@@ -911,28 +920,42 @@ export function CreatureForm({ campaignId, gameSystem, editingCreature, onCreate
     const filterPairs = (arr: Array<{ name: string; description: string }>) =>
       arr.filter((p) => p.name.trim() || p.description.trim());
 
-    const hp = statBlockHpFromForm(hpAverage, hpFormula);
-
+    // Start from the existing stat block so fields this form does not edit
+    // (savingThrows, skills, gameSystem, notes, … from an SRD copy) survive,
+    // then overwrite exactly the fields the form edits. An emptied form field
+    // is removed rather than stored empty.
     const statBlock: NpcStatBlock = {
+      ...sb,
       ac,
-      ...(hp && { hp }),
       speed,
-      abilities: { str, dex, con, int, wis, cha },
-      creatureType: creatureType || undefined,
-      alignment: alignment || undefined,
-      challengeRating: cr || undefined,
-      ...(filterPairs(traits).length > 0 && { traits: filterPairs(traits) }),
-      ...(filterPairs(actions).length > 0 && { actions: filterPairs(actions) }),
-      ...(filterPairs(bonusActions).length > 0 && { bonusActions: filterPairs(bonusActions) }),
-      ...(filterPairs(reactions).length > 0 && { reactions: filterPairs(reactions) }),
-      ...(filterPairs(legendaryActions).length > 0 && { legendaryActions: filterPairs(legendaryActions) }),
-      ...(damageVulnerabilities && { damageVulnerabilities }),
-      ...(damageResistances && { damageResistances }),
-      ...(damageImmunities && { damageImmunities }),
-      ...(conditionImmunities && { conditionImmunities }),
-      ...(senses && { senses }),
-      ...(languages && { languages }),
+      abilities: { ...sb?.abilities, str, dex, con, int, wis, cha },
     };
+    const setOrRemove = <K extends keyof NpcStatBlock>(key: K, value: NpcStatBlock[K] | undefined) => {
+      const empty = value === undefined || value === '' || (Array.isArray(value) && value.length === 0);
+      if (empty) delete statBlock[key];
+      else statBlock[key] = value;
+    };
+    setOrRemove('hp', hpResult.hp);
+    setOrRemove('creatureType', creatureType);
+    setOrRemove('alignment', alignment);
+    setOrRemove('challengeRating', cr);
+    setOrRemove('traits', filterPairs(traits));
+    setOrRemove('actions', filterPairs(actions));
+    setOrRemove('bonusActions', filterPairs(bonusActions));
+    setOrRemove('reactions', filterPairs(reactions));
+    setOrRemove('legendaryActions', filterPairs(legendaryActions));
+    setOrRemove('damageVulnerabilities', damageVulnerabilities);
+    setOrRemove('damageResistances', damageResistances);
+    setOrRemove('damageImmunities', damageImmunities);
+    setOrRemove('conditionImmunities', conditionImmunities);
+    setOrRemove('senses', senses);
+    setOrRemove('languages', languages);
+    // XP is derived from the challenge rating (Open5e seed): recompute it for a
+    // new creature or a changed CR — from the SRD table for D&D 5e, otherwise
+    // remove it rather than keep a stale value. An unchanged CR keeps its xp.
+    if (!isEdit || cr !== initialCr) {
+      setOrRemove('xp', gameSystem === GameSystem.DND_5E ? xpForChallengeRating(cr) : undefined);
+    }
 
     const payload = {
       name: name.trim(),
@@ -1080,8 +1103,8 @@ export function CreatureForm({ campaignId, gameSystem, editingCreature, onCreate
         <div>
           <label className="text-[10px] text-stone-gray block mb-0.5">HP</label>
           <input
-            type="number"
-            min={1}
+            type="text"
+            inputMode="numeric"
             value={hpAverage}
             onChange={(e) => setHpAverage(e.target.value)}
             placeholder="10"
