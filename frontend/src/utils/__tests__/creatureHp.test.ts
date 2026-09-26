@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { NpcStatBlock } from '@/types';
-import { DEFAULT_CREATURE_HP, parseStatBlockHpForm, tokenHpForCreature } from '../creatureHp';
+import { DEFAULT_CREATURE_HP, isPositiveNumber, parseStatBlockHpForm, tokenHpForCreature } from '../creatureHp';
 
 const base: NpcStatBlock = {
   ac: 15,
@@ -67,5 +67,16 @@ describe('parseStatBlockHpForm', () => {
 
   it('accepts an integer written with a trailing .0', () => {
     expect(parseStatBlockHpForm('7.0', '', false)).toEqual({ ok: true, hp: { average: 7 } });
+  });
+});
+
+describe('isPositiveNumber', () => {
+  it('accepts only finite numbers above zero', () => {
+    expect(isPositiveNumber(7)).toBe(true);
+    expect(isPositiveNumber(0)).toBe(false);
+    expect(isPositiveNumber(-1)).toBe(false);
+    expect(isPositiveNumber(Number.NaN)).toBe(false);
+    expect(isPositiveNumber('7')).toBe(false);
+    expect(isPositiveNumber(undefined)).toBe(false);
   });
 });

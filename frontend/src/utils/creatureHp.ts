@@ -8,7 +8,8 @@ import type { NpcStatBlock, TokenHp } from '@/types';
 /** HP given to a placed creature whose stat block has no hit points. */
 export const DEFAULT_CREATURE_HP = 10;
 
-function isPositiveNumber(value: unknown): value is number {
+/** A finite number above zero (a usable hit point value). */
+export function isPositiveNumber(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0;
 }
 
