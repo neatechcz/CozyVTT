@@ -19,6 +19,40 @@ export interface WallSegment {
   type: WallType;
 }
 
+// ── Wall Socket Events ───────────────────────────────────────────────────────
+
+/**
+ * Origin of a wall broadcast, so a receiving client can tell its own
+ * optimistic echo from a change made by another client (another DM socket,
+ * the AI narrator's MCP service account, or a player toggling an unlocked
+ * door). Both are absent on an older backend and on the `walls:request`
+ * reply (a sync, not a change).
+ */
+export interface WallEventOrigin {
+  changedBy?: string;      // socket.userId of the sender, mirrors token.moved's movedBy
+  sourceSocketId?: string; // socket.id of the sender
+}
+
+export interface WallAddedEvent extends WallEventOrigin {
+  mapId: string;
+  segment: WallSegment;
+}
+
+export interface WallRemovedEvent extends WallEventOrigin {
+  mapId: string;
+  segmentId: string;
+}
+
+export interface WallUpdatedEvent extends WallEventOrigin {
+  mapId: string;
+  segment: WallSegment;
+}
+
+export interface WallsReplacedEvent extends WallEventOrigin {
+  mapId: string;
+  segments: WallSegment[];
+}
+
 // ── Fog of War ────────────────────────────────────────────────────────────────
 
 /**
