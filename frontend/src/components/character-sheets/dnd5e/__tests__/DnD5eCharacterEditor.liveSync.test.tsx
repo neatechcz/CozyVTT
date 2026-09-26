@@ -1,7 +1,9 @@
 import { describe, it, expect, vi } from 'vitest';
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import type { Character } from '@/types';
 import { DnD5eCharacterEditor } from '../DnD5eCharacterEditor';
+import { buildDnd5eFormData } from '../dnd5eFormData';
+import { createCharacterFormStore } from '../../../../utils/characterFormStore';
 
 vi.mock('../../../../services/api', () => ({ api: { uploadAsset: vi.fn() } }));
 
@@ -37,95 +39,92 @@ const character: Character = {
   updatedAt: '2026-09-26T00:00:00.000Z',
 };
 
-function renderEditor(onLocalChange = vi.fn()) {
-  const props = { character, onSave: vi.fn(), onCancel: vi.fn(), onLocalChange };
-  const utils = render(<DnD5eCharacterEditor {...props} externalDataVersion={0} />);
-  const rerenderWith = (externalData: object | undefined, externalDataVersion: number) =>
-    utils.rerender(
-      <DnD5eCharacterEditor {...props} externalData={externalData} externalDataVersion={externalDataVersion} />,
-    );
-  return { ...utils, rerenderWith, onLocalChange };
-}
-
+const gm = { userId: 'gm', displayName: 'GM' };
+const newStore = () => createCharacterFormStore(data, { normalize: buildDnd5eFormData, updatedAt: character.updatedAt });
 const nameInput = () => screen.getByPlaceholderText('Character Name') as HTMLInputElement;
-const lastCall = (fn: ReturnType<typeof vi.fn>) => fn.mock.calls[fn.mock.calls.length - 1];
 
-describe('DnD5eCharacterEditor live sync', () => {
-  it('reports the initial form as a system change and typing as a user change', () => {
-    const { onLocalChange } = renderEditor();
-    expect(onLocalChange).toHaveBeenCalled();
-    expect(onLocalChange.mock.calls[0][1]).toBe('system');
-    expect(onLocalChange.mock.calls[0][0].characterName).toBe('Tomin');
-
+describe('DnD5eCharacterEditor form store', () => {
+  it('without a store it edits a private one initialized from the character (unchanged standalone behaviour)', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<DnD5eCharacterEditor character={character} onSave={onSave} onCancel={vi.fn()} />);
+    expect(nameInput().value).toBe('Tomin');
     fireEvent.change(nameInput(), { target: { value: 'Tomin the Bold' } });
+    expect(nameInput().value).toBe('Tomin the Bold');
 
-    const [reported, origin] = lastCall(onLocalChange);
-    expect(origin).toBe('user');
-    expect(reported.characterName).toBe('Tomin the Bold');
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^\s*Save\s*$/ }));
+    });
+    const saved = onSave.mock.calls[0][0];
+    expect(saved.characterName).toBe('Tomin the Bold');
+    expect(saved.themeColor).toBe('Classic Red');
+    expect(saved.featuresAndTraits).toEqual([]);
+    expect(saved.stats.dexterity.modifier).toBe(1);
   });
 
-  it('replaces the form when externalDataVersion changes, keeping the active tab', () => {
-    const { rerenderWith, onLocalChange } = renderEditor();
+  it('shows remote changes applied to the store at once, keeping the active tab', () => {
+    const store = newStore();
+    render(<DnD5eCharacterEditor character={character} onSave={vi.fn()} onCancel={vi.fn()} formStore={store} />);
 
     fireEvent.click(screen.getByRole('button', { name: /Combat/ }));
     const currentHp = () =>
       screen.getByText('Current').parentElement!.querySelector('input') as HTMLInputElement;
     expect(currentHp().value).toBe('8');
 
-    rerenderWith({ ...data, characterName: 'Remote', hp: { current: 2, maximum: 12, temporary: 0 } }, 1);
+    act(() => {
+      store.applyRemote({ ...data, characterName: 'Remote', hp: { current: 2, maximum: 12, temporary: 0 } }, gm);
+    });
 
-    // Still on the Combat tab, now showing the external values
     expect(currentHp().value).toBe('2');
+    expect(screen.getByRole('button', { name: /Combat/ })).toBeInTheDocument();
+  });
+
+  it('typing is a user edit in the store; derived values are not', () => {
+    const store = newStore();
+    render(<DnD5eCharacterEditor character={character} onSave={vi.fn()} onCancel={vi.fn()} formStore={store} />);
+    expect(store.getState().touched.size).toBe(0);
+
+    fireEvent.change(nameInput(), { target: { value: 'Tomin the Bold' } });
+    expect([...store.getState().touched]).toEqual(['characterName']);
+    expect(store.getState().form.characterName).toBe('Tomin the Bold');
+  });
+
+  it('a remounted editor shows the store, not the (stale) character prop', () => {
+    const store = newStore();
+    const first = render(<DnD5eCharacterEditor character={character} onSave={vi.fn()} onCancel={vi.fn()} formStore={store} />);
+    act(() => {
+      store.applyRemote({ ...data, characterName: 'Remote' }, gm);
+    });
+    first.unmount();
+    render(<DnD5eCharacterEditor character={character} onSave={vi.fn()} onCancel={vi.fn()} formStore={store} />);
     expect(nameInput().value).toBe('Remote');
-    const [reported, origin] = lastCall(onLocalChange);
-    expect(origin).toBe('system');
-    expect(reported.hp.current).toBe(2);
   });
 
-  it('does not re-apply external data for the same version', () => {
-    const { rerenderWith } = renderEditor();
-    const external = { ...data, characterName: 'Remote' };
-    rerenderWith(external, 1);
-    fireEvent.change(nameInput(), { target: { value: 'Typed after' } });
+  it('unmounting discards unsaved edits in the store (resets are kept)', () => {
+    const store = newStore();
+    const view = render(<DnD5eCharacterEditor character={character} onSave={vi.fn()} onCancel={vi.fn()} formStore={store} />);
+    fireEvent.change(nameInput(), { target: { value: 'Unsaved' } });
+    expect(store.getState().touched.size).toBe(1);
 
-    rerenderWith(external, 1);
-    expect(nameInput().value).toBe('Typed after');
+    view.unmount();
+
+    expect(store.getState().touched.size).toBe(0);
+    expect(store.getState().form.characterName).toBe('Tomin');
   });
 
-  it('a rebase over a form that differs only by system changes is not tagged as a user edit', () => {
-    const onLocalChange = vi.fn();
-    const props = { character, onSave: vi.fn(), onCancel: vi.fn(), onLocalChange };
-    const { rerender } = render(<DnD5eCharacterEditor {...props} externalDataVersion={0} />);
-    // The form differs from externalBase (e.g. a derived value not reported
-    // yet) but the user typed nothing.
-    const staleBase = { ...data, speed: 99 };
-    rerender(
-      <DnD5eCharacterEditor
-        {...props}
-        externalBase={staleBase}
-        externalData={{ ...staleBase, experiencePoints: 150 }}
-        externalDataVersion={1}
-      />,
-    );
-    const [reported, origin, resets, appliedVersion] = lastCall(onLocalChange);
-    expect(reported.experiencePoints).toBe(150);
-    expect(origin).toBe('system');
-    expect(resets).toBeUndefined();
-    expect(appliedVersion).toBe(1);
-  });
+  it('save hands over the store form with the stored shape (parsed lists) without touching user fields', async () => {
+    const store = newStore();
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<DnD5eCharacterEditor character={character} onSave={onSave} onCancel={vi.fn()} formStore={store} />);
+    fireEvent.click(screen.getByRole('button', { name: /Spells/ }));
+    const cantrips = screen.getByPlaceholderText(/Fire Bolt/i) as HTMLTextAreaElement;
+    fireEvent.change(cantrips, { target: { value: 'Light, Mage Hand' } });
 
-  it('ignores the external data present at mount (no stale overwrite on remount)', () => {
-    const onLocalChange = vi.fn();
-    render(
-      <DnD5eCharacterEditor
-        character={character}
-        onSave={vi.fn()}
-        onCancel={vi.fn()}
-        onLocalChange={onLocalChange}
-        externalData={{ ...data, characterName: 'Stale' }}
-        externalDataVersion={4}
-      />,
-    );
-    expect(nameInput().value).toBe('Tomin');
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^\s*Save\s*$/ }));
+    });
+
+    expect(onSave.mock.calls[0][0]).toBe(store.getState().form);
+    expect(store.getState().form.spellcasting.cantrips).toEqual(['Light', 'Mage Hand']);
+    expect([...store.getState().touched]).toEqual(['spellcasting.cantrips']);
   });
 });

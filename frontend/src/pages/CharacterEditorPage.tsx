@@ -16,6 +16,7 @@ import { canEditCharacter } from '@/services/permissions';
 import { CharacterSheetRouter } from '@/components/character-sheets/CharacterSheetRouter';
 import SheetResetPanel from '@/components/character/SheetResetPanel';
 import { useLiveCharacterSync } from '@/hooks/useLiveCharacterSync';
+import { buildDnd5eFormData } from '@/components/character-sheets/dnd5e/dnd5eFormData';
 import socketClient from '@/services/socket';
 import { GameSystem, type Character, type Campaign } from '@/types';
 import Button from '@/components/ui/Button';
@@ -51,6 +52,7 @@ export default function CharacterEditorPage() {
     socket: socketClient,
     isDnd5e,
     onServerCharacter: setCharacter,
+    normalizeForm: buildDnd5eFormData,
   });
   const unsavedChanges = isDnd5e ? liveSync.isDirty : hasUnsavedChanges;
 
@@ -143,8 +145,9 @@ export default function CharacterEditorPage() {
         setSaving(true);
 
         if (isDnd5e) {
-          // Field-level PATCH of the changed data; conflicts land in the panel
-          const outcome = await liveSync.save(data);
+          // Field-level PATCH of the live form (the store's atomic snapshot,
+          // not `data`); conflicts land in the panel
+          const outcome = await liveSync.save();
 
           // The token image is not part of `data` — persist it separately
           if (tokenImageUrl !== undefined) {
@@ -417,11 +420,7 @@ export default function CharacterEditorPage() {
           onCancel={handleCancel}
           {...(isDnd5e
             ? {
-                externalData: liveSync.externalData,
-                externalBase: liveSync.externalBase,
-                externalDataVersion: liveSync.externalDataVersion,
-                onLocalChange: liveSync.reportLocalChange,
-                onDiscardLocalChanges: liveSync.discardLocalChanges,
+                formStore: liveSync.formStore,
               }
             : {})}
         />

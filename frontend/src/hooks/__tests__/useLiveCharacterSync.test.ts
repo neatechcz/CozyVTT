@@ -2,6 +2,8 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, act } from '@testing-library/react';
 import type { Character } from '@/types';
 import { useLiveCharacterSync } from '../useLiveCharacterSync';
+import { diffPaths, getAtPath } from '@/utils/character-paths';
+import { getFormValue, type CharacterFormStore } from '@/utils/characterFormStore';
 
 const mocks = vi.hoisted(() => ({
   patchCharacterData: vi.fn(),
@@ -97,19 +99,54 @@ beforeEach(() => {
   mocks.updateCharacter.mockReset();
 });
 
+
+type Hook = ReturnType<typeof setup>['hook'];
+
+const storeOf = (hook: Hook): CharacterFormStore => {
+  const store = hook.result.current.formStore;
+  if (!store) throw new Error('no form store');
+  return store;
+};
+const formOf = (hook: Hook) => storeOf(hook).getState().form as Record<string, any>;
+
+/** The user edits the form, field by field, on the form as it is now. */
+function userEdits(hook: Hook, data: Record<string, unknown>) {
+  act(() => {
+    const store = storeOf(hook);
+    for (const path of diffPaths(store.getState().form, data)) {
+      store.edit(path, getFormValue(store.getState().form, path), getAtPath(data, path));
+    }
+  });
+}
+
 describe('useLiveCharacterSync', () => {
-  it('starts clean with no external data and no resets', () => {
+  it('starts clean: a store with the character data, no resets, subscribed once', () => {
     const { hook, socket } = setup();
-    expect(hook.result.current.externalDataVersion).toBe(0);
-    expect(hook.result.current.externalData).toBeUndefined();
+    expect(formOf(hook)).toEqual(baseData());
+    expect(storeOf(hook).getState().version).toBe(0);
     expect(hook.result.current.resets).toEqual([]);
     expect(hook.result.current.isDirty).toBe(false);
     expect(socket.count('character.updated')).toBe(1);
   });
 
   it('does nothing for non-D&D 5e characters', () => {
-    const { socket } = setup({ isDnd5e: false });
+    const { socket, hook } = setup({ isDnd5e: false });
     expect(socket.on).not.toHaveBeenCalled();
+    expect(hook.result.current.formStore).toBeNull();
+  });
+
+  it('normalizes the form with normalizeForm', () => {
+    const socket = createFakeSocket();
+    const hook = renderHook(() =>
+      useLiveCharacterSync({
+        character: makeCharacter(baseData()),
+        socket,
+        isDnd5e: true,
+        normalizeForm: (d) => ({ ...d, deathSaves: { successes: 0, failures: 0 } }),
+      }),
+    );
+    expect(hook.result.current.formStore!.getState().form.deathSaves).toEqual({ successes: 0, failures: 0 });
+    expect(hook.result.current.isDirty).toBe(false);
   });
 
   it('unsubscribes on unmount', () => {
@@ -124,8 +161,8 @@ describe('useLiveCharacterSync', () => {
 
     act(() => socket.emit('character.updated', remoteEvent(remote, ['experiencePoints'])));
 
-    expect(hook.result.current.externalDataVersion).toBe(1);
-    expect(hook.result.current.externalData).toEqual(remote);
+    expect(storeOf(hook).getState().version).toBe(1);
+    expect(formOf(hook)).toEqual(remote);
     expect(hook.result.current.resets).toEqual([]);
     expect(onServerCharacter).toHaveBeenCalledWith(expect.objectContaining({ id: 'char-1' }));
   });
@@ -135,45 +172,35 @@ describe('useLiveCharacterSync', () => {
     act(() =>
       socket.emit('character.updated', remoteEvent({ ...baseData(), experiencePoints: 1 }, ['experiencePoints'], 'other')),
     );
-    expect(hook.result.current.externalDataVersion).toBe(0);
-    expect(hook.result.current.externalData).toBeUndefined();
+    expect(storeOf(hook).getState().version).toBe(0);
+    expect(formOf(hook)).toEqual(baseData());
   });
 
-  it('merges a remote update into the latest local data, keeping local-only edits', () => {
+  it('merges a remote update into the form, keeping local-only edits', () => {
     const { hook, socket } = setup();
-    act(() => hook.result.current.reportLocalChange({ ...baseData(), characterName: 'Tomin the Bold' }));
+    userEdits(hook, { ...baseData(), characterName: 'Tomin the Bold' });
     expect(hook.result.current.isDirty).toBe(true);
 
     act(() =>
       socket.emit('character.updated', remoteEvent({ ...baseData(), experiencePoints: 150 }, ['experiencePoints'])),
     );
 
-    expect(hook.result.current.externalDataVersion).toBe(1);
-    expect(hook.result.current.externalData).toEqual({
-      ...baseData(),
-      characterName: 'Tomin the Bold',
-      experiencePoints: 150,
-    });
+    expect(formOf(hook)).toEqual({ ...baseData(), characterName: 'Tomin the Bold', experiencePoints: 150 });
     expect(hook.result.current.resets).toEqual([]);
     expect(hook.result.current.isDirty).toBe(true);
   });
 
   it('resets a field both sides changed and records it with the author', () => {
     const { hook, socket } = setup();
-    act(() => hook.result.current.reportLocalChange({ ...baseData(), hp: { current: 5, maximum: 10, temporary: 0 } }));
+    userEdits(hook, { ...baseData(), hp: { current: 5, maximum: 10, temporary: 0 } });
 
     act(() =>
       socket.emit('character.updated', remoteEvent({ ...baseData(), hp: { current: 3, maximum: 10, temporary: 0 } }, ['hp.current'])),
     );
 
-    expect(hook.result.current.externalData).toEqual({ ...baseData(), hp: { current: 3, maximum: 10, temporary: 0 } });
+    expect(formOf(hook)).toEqual({ ...baseData(), hp: { current: 3, maximum: 10, temporary: 0 } });
     expect(hook.result.current.resets).toEqual([
-      expect.objectContaining({
-        path: 'hp.current',
-        mine: 5,
-        theirs: 3,
-        author: { userId: 'gm', displayName: 'Pán jeskyně' },
-      }),
+      expect.objectContaining({ path: 'hp.current', mine: 5, theirs: 3, author: gm }),
     ]);
     // The reset field now equals the server, so nothing is left dirty.
     expect(hook.result.current.isDirty).toBe(false);
@@ -181,7 +208,7 @@ describe('useLiveCharacterSync', () => {
 
   it('accumulates resets across events until dismissed', () => {
     const { hook, socket } = setup();
-    act(() => hook.result.current.reportLocalChange({ ...baseData(), experiencePoints: 110, conditions: ['prone'] }));
+    userEdits(hook, { ...baseData(), experiencePoints: 110, conditions: ['prone'] });
     act(() =>
       socket.emit('character.updated', remoteEvent({ ...baseData(), experiencePoints: 200 }, ['experiencePoints'])),
     );
@@ -193,20 +220,14 @@ describe('useLiveCharacterSync', () => {
     );
 
     expect(hook.result.current.resets.map((r) => r.path)).toEqual(['experiencePoints', 'conditions']);
-    expect(hook.result.current.externalDataVersion).toBe(2);
 
     act(() => hook.result.current.dismissResets());
     expect(hook.result.current.resets).toEqual([]);
   });
 
-  it('does not report resets for system (non-user) local changes such as editor defaults', () => {
+  it('does not report resets for derived (non-user) form changes such as editor defaults', () => {
     const { hook, socket } = setup();
-    act(() =>
-      hook.result.current.reportLocalChange(
-        { ...baseData(), deathSaves: { successes: 0, failures: 0 } },
-        'system',
-      ),
-    );
+    act(() => storeOf(hook).derive((f) => ({ ...f, deathSaves: { successes: 0, failures: 0 } })));
     expect(hook.result.current.isDirty).toBe(false);
 
     act(() =>
@@ -217,13 +238,13 @@ describe('useLiveCharacterSync', () => {
     );
 
     expect(hook.result.current.resets).toEqual([]);
-    expect(hook.result.current.externalData).toEqual({ ...baseData(), deathSaves: { successes: 1, failures: 0 } });
+    expect(formOf(hook)).toEqual({ ...baseData(), deathSaves: { successes: 1, failures: 0 } });
   });
 
-  it('save() sends only the changed fields and adopts the saved server state', async () => {
+  it('save() sends only the changed fields of the store snapshot and adopts the saved server state', async () => {
     const { hook, onServerCharacter } = setup();
     const local = { ...baseData(), experiencePoints: 175, conditions: ['prone'] };
-    act(() => hook.result.current.reportLocalChange(local));
+    userEdits(hook, local);
     const saved = makeCharacter(local, { updatedAt: '2026-09-26T01:00:00.000Z' });
     mocks.patchCharacterData.mockResolvedValue({
       character: saved,
@@ -234,7 +255,8 @@ describe('useLiveCharacterSync', () => {
 
     let outcome: Awaited<ReturnType<typeof hook.result.current.save>> | undefined;
     await act(async () => {
-      outcome = await hook.result.current.save(local);
+      // Whatever a caller passes is ignored: the store is the source of truth.
+      outcome = await hook.result.current.save({ stale: true });
     });
 
     expect(mocks.patchCharacterData).toHaveBeenCalledTimes(1);
@@ -252,13 +274,14 @@ describe('useLiveCharacterSync', () => {
     expect(hook.result.current.resets).toEqual([]);
     expect(hook.result.current.isDirty).toBe(false);
     expect(onServerCharacter).toHaveBeenCalledWith(saved);
+    expect(storeOf(hook).getState().base).toEqual(local);
   });
 
   it('save() with nothing changed does not call the API', async () => {
     const { hook } = setup();
     let outcome: Awaited<ReturnType<typeof hook.result.current.save>> | undefined;
     await act(async () => {
-      outcome = await hook.result.current.save(baseData());
+      outcome = await hook.result.current.save();
     });
     expect(mocks.patchCharacterData).not.toHaveBeenCalled();
     expect(outcome?.status).toBe('unchanged');
@@ -267,7 +290,7 @@ describe('useLiveCharacterSync', () => {
   it('the echo of the own save produces no resets', async () => {
     const { hook, socket } = setup();
     const local = { ...baseData(), experiencePoints: 175 };
-    act(() => hook.result.current.reportLocalChange(local));
+    userEdits(hook, local);
     mocks.patchCharacterData.mockResolvedValue({
       character: makeCharacter(local),
       applied: ['experiencePoints'],
@@ -275,7 +298,7 @@ describe('useLiveCharacterSync', () => {
       status: 200,
     });
     await act(async () => {
-      await hook.result.current.save(local);
+      await hook.result.current.save();
     });
 
     act(() => socket.emit('character.updated', remoteEvent(local, ['experiencePoints'])));
@@ -287,14 +310,14 @@ describe('useLiveCharacterSync', () => {
   it('the echo arriving before the PATCH response produces no resets', async () => {
     const { hook, socket } = setup();
     const local = { ...baseData(), experiencePoints: 175, inventory: [{ name: 'Rope' }, { name: 'Lute' }] };
-    act(() => hook.result.current.reportLocalChange(local));
+    userEdits(hook, local);
 
     let resolvePatch!: (value: unknown) => void;
     mocks.patchCharacterData.mockReturnValue(new Promise((resolve) => (resolvePatch = resolve)));
 
     let savePromise!: Promise<unknown>;
     act(() => {
-      savePromise = hook.result.current.save(local);
+      savePromise = hook.result.current.save();
     });
     act(() => socket.emit('character.updated', remoteEvent(local, ['experiencePoints', 'inventory'])));
     await act(async () => {
@@ -309,7 +332,7 @@ describe('useLiveCharacterSync', () => {
   it('save() conflicts: re-fetches, merges and records the conflicting field', async () => {
     const { hook } = setup();
     const local = { ...baseData(), experiencePoints: 175, hp: { current: 5, maximum: 10, temporary: 0 } };
-    act(() => hook.result.current.reportLocalChange(local));
+    userEdits(hook, local);
 
     const current = { ...baseData(), experiencePoints: 175, hp: { current: 2, maximum: 10, temporary: 0 } };
     mocks.patchCharacterData.mockResolvedValue({
@@ -318,16 +341,18 @@ describe('useLiveCharacterSync', () => {
       conflicts: [{ path: 'hp.current', base: 8, current: 2, attempted: 5 }],
       status: 200,
     });
-    mocks.getCharacter.mockResolvedValue({ character: makeCharacter(current) });
+    mocks.getCharacter.mockResolvedValue({
+      character: makeCharacter(current, { updatedAt: '2026-09-26T00:00:03.000Z' }),
+    });
 
     let outcome: Awaited<ReturnType<typeof hook.result.current.save>> | undefined;
     await act(async () => {
-      outcome = await hook.result.current.save(local);
+      outcome = await hook.result.current.save();
     });
 
     expect(mocks.getCharacter).toHaveBeenCalledWith('char-1');
     expect(outcome?.status).toBe('conflicts');
-    expect(hook.result.current.externalData).toEqual(current);
+    expect(formOf(hook)).toEqual(current);
     expect(hook.result.current.resets).toEqual([
       expect.objectContaining({ path: 'hp.current', mine: 5, theirs: 2 }),
     ]);
@@ -337,7 +362,7 @@ describe('useLiveCharacterSync', () => {
   it('save() conflicts on a change whose broadcast was never received get an unknown author (409)', async () => {
     const { hook, socket } = setup();
     // A remote event the user did not collide with (different field) is seen first.
-    act(() => hook.result.current.reportLocalChange({ ...baseData(), hp: { current: 5, maximum: 10, temporary: 0 } }));
+    userEdits(hook, { ...baseData(), hp: { current: 5, maximum: 10, temporary: 0 } });
     const mid = { ...baseData(), experiencePoints: 120 };
     act(() => socket.emit('character.updated', remoteEvent(mid, ['experiencePoints'])));
 
@@ -352,7 +377,7 @@ describe('useLiveCharacterSync', () => {
 
     // hp.current was changed by someone whose broadcast we never received.
     await act(async () => {
-      await hook.result.current.save({ ...mid, hp: { current: 5, maximum: 10, temporary: 0 } });
+      await hook.result.current.save();
     });
 
     expect(hook.result.current.resets).toEqual([
@@ -363,28 +388,29 @@ describe('useLiveCharacterSync', () => {
   it('keeps edits made while the save was in flight', async () => {
     const { hook } = setup();
     const local = { ...baseData(), experiencePoints: 175 };
-    act(() => hook.result.current.reportLocalChange(local));
+    userEdits(hook, local);
 
     let resolvePatch!: (value: unknown) => void;
     mocks.patchCharacterData.mockReturnValue(new Promise((resolve) => (resolvePatch = resolve)));
     let savePromise!: Promise<unknown>;
     act(() => {
-      savePromise = hook.result.current.save(local);
+      savePromise = hook.result.current.save();
     });
-    act(() => hook.result.current.reportLocalChange({ ...local, characterName: 'Typing…' }));
+    userEdits(hook, { ...local, characterName: 'Typing…' });
     await act(async () => {
       resolvePatch({ character: makeCharacter(local), applied: ['experiencePoints'], conflicts: [], status: 200 });
       await savePromise;
     });
 
-    expect(hook.result.current.externalData).toEqual({ ...local, characterName: 'Typing…' });
+    expect(mocks.patchCharacterData.mock.calls[0][1]).toEqual([{ path: 'experiencePoints', base: 100, value: 175 }]);
+    expect(formOf(hook)).toEqual({ ...local, characterName: 'Typing…' });
     expect(hook.result.current.isDirty).toBe(true);
   });
 
   it('save() conflicts whose path runs through a non-object (inventory.0, current undefined) merge like any other', async () => {
     const { hook } = setup();
     const local = { ...baseData(), inventory: [{ name: 'Rope' }, { name: 'Lute' }] };
-    act(() => hook.result.current.reportLocalChange(local));
+    userEdits(hook, local);
 
     const current = { ...baseData(), inventory: [] as unknown[] };
     mocks.patchCharacterData.mockResolvedValue({
@@ -397,11 +423,11 @@ describe('useLiveCharacterSync', () => {
 
     let outcome: Awaited<ReturnType<typeof hook.result.current.save>> | undefined;
     await act(async () => {
-      outcome = await hook.result.current.save(local);
+      outcome = await hook.result.current.save();
     });
 
     expect(outcome?.status).toBe('conflicts');
-    expect(hook.result.current.externalData).toEqual(current);
+    expect(formOf(hook)).toEqual(current);
     expect(hook.result.current.resets).toEqual([
       expect.objectContaining({ path: 'inventory', mine: local.inventory, theirs: [] }),
     ]);
@@ -409,9 +435,9 @@ describe('useLiveCharacterSync', () => {
 
   it('handles events whose changedPaths is [""] (whole document)', () => {
     const { hook, socket } = setup();
-    act(() => hook.result.current.reportLocalChange({ ...baseData(), characterName: 'Mine' }));
+    userEdits(hook, { ...baseData(), characterName: 'Mine' });
     act(() => socket.emit('character.updated', remoteEvent({ ...baseData(), experiencePoints: 5 }, [''])));
-    expect(hook.result.current.externalData).toEqual({ ...baseData(), characterName: 'Mine', experiencePoints: 5 });
+    expect(formOf(hook)).toEqual({ ...baseData(), characterName: 'Mine', experiencePoints: 5 });
     expect(hook.result.current.resets).toEqual([]);
   });
 
@@ -419,7 +445,7 @@ describe('useLiveCharacterSync', () => {
     const odd = { ...baseData(), 'bad-key': 1 };
     const { hook, onServerCharacter } = setup({ data: odd });
     const local = { ...odd, 'bad-key': 2, experiencePoints: 101 };
-    act(() => hook.result.current.reportLocalChange(local));
+    userEdits(hook, local);
     expect(hook.result.current.isDirty).toBe(true);
 
     const saved = makeCharacter(local);
@@ -427,7 +453,7 @@ describe('useLiveCharacterSync', () => {
 
     let outcome: Awaited<ReturnType<typeof hook.result.current.save>> | undefined;
     await act(async () => {
-      outcome = await hook.result.current.save(local);
+      outcome = await hook.result.current.save();
     });
 
     expect(mocks.patchCharacterData).not.toHaveBeenCalled();
@@ -437,17 +463,17 @@ describe('useLiveCharacterSync', () => {
     expect(onServerCharacter).toHaveBeenCalledWith(saved);
   });
 
-  it('discardLocalChanges() drops local edits (not dirty, no later false resets) and keeps resets', () => {
+  it('discard() drops local edits (not dirty, no later false resets) and keeps resets', () => {
     const { hook, socket } = setup();
-    act(() => hook.result.current.reportLocalChange({ ...baseData(), experiencePoints: 110 }));
+    userEdits(hook, { ...baseData(), experiencePoints: 110 });
     act(() =>
       socket.emit('character.updated', remoteEvent({ ...baseData(), experiencePoints: 200 }, ['experiencePoints'])),
     );
-    act(() => hook.result.current.reportLocalChange({ ...baseData(), experiencePoints: 200, hp: { current: 1, maximum: 10, temporary: 0 } }));
+    userEdits(hook, { ...baseData(), experiencePoints: 200, hp: { current: 1, maximum: 10, temporary: 0 } });
     expect(hook.result.current.isDirty).toBe(true);
     expect(hook.result.current.resets).toHaveLength(1);
 
-    act(() => hook.result.current.discardLocalChanges());
+    act(() => storeOf(hook).discard());
     expect(hook.result.current.isDirty).toBe(false);
     expect(hook.result.current.resets).toHaveLength(1);
 
@@ -459,31 +485,19 @@ describe('useLiveCharacterSync', () => {
       ),
     );
     expect(hook.result.current.resets).toHaveLength(1);
-    expect(hook.result.current.externalData).toEqual({
-      ...baseData(),
-      experiencePoints: 200,
-      hp: { current: 9, maximum: 10, temporary: 0 },
-    });
-  });
-
-  it('exposes the local data each external push was merged against (externalBase)', () => {
-    const { hook, socket } = setup();
-    const local = { ...baseData(), characterName: 'Mine' };
-    act(() => hook.result.current.reportLocalChange(local));
-    act(() => socket.emit('character.updated', remoteEvent({ ...baseData(), experiencePoints: 5 }, ['experiencePoints'])));
-    expect(hook.result.current.externalBase).toEqual(local);
+    expect(formOf(hook)).toEqual({ ...baseData(), experiencePoints: 200, hp: { current: 9, maximum: 10, temporary: 0 } });
   });
 
   it('a save response older than an already adopted broadcast does not move base backwards', async () => {
     const { hook, socket } = setup();
     const local = { ...baseData(), experiencePoints: 175 };
-    act(() => hook.result.current.reportLocalChange(local));
+    userEdits(hook, local);
 
     let resolvePatch!: (value: unknown) => void;
     mocks.patchCharacterData.mockReturnValue(new Promise((resolve) => (resolvePatch = resolve)));
     let savePromise!: Promise<unknown>;
     act(() => {
-      savePromise = hook.result.current.save(local);
+      savePromise = hook.result.current.save();
     });
 
     // Someone else wrote after our save; their broadcast (T2) arrives first.
@@ -504,13 +518,13 @@ describe('useLiveCharacterSync', () => {
       await savePromise;
     });
 
-    expect(hook.result.current.externalData).toEqual(newer);
+    expect(formOf(hook)).toEqual(newer);
     expect(hook.result.current.isDirty).toBe(false);
 
     // Base is still T2: saving the same data changes nothing.
     let outcome: Awaited<ReturnType<typeof hook.result.current.save>> | undefined;
     await act(async () => {
-      outcome = await hook.result.current.save(newer);
+      outcome = await hook.result.current.save();
     });
     expect(outcome?.status).toBe('unchanged');
     expect(mocks.patchCharacterData).toHaveBeenCalledTimes(1);
@@ -521,12 +535,12 @@ describe('useLiveCharacterSync', () => {
     for (let i = 0; i < 201; i++) many[`f${i}`] = 0;
     const { hook } = setup({ data: many });
     const local = Object.fromEntries(Object.keys(many).map((key) => [key, 1]));
-    act(() => hook.result.current.reportLocalChange(local));
+    userEdits(hook, local);
     mocks.updateCharacter.mockResolvedValue({ message: 'ok', character: makeCharacter(local) });
 
     let outcome: Awaited<ReturnType<typeof hook.result.current.save>> | undefined;
     await act(async () => {
-      outcome = await hook.result.current.save(local);
+      outcome = await hook.result.current.save();
     });
 
     expect(mocks.patchCharacterData).not.toHaveBeenCalled();
@@ -534,178 +548,96 @@ describe('useLiveCharacterSync', () => {
     expect(outcome?.status).toBe('saved');
   });
 
-  it('switching to another character resets resets, isDirty and the external version', () => {
+  it('switching to another character gives a fresh store: no resets, not dirty', () => {
     const socket = createFakeSocket();
     const first = makeCharacter(baseData());
     const second = makeCharacter({ ...baseData(), characterName: 'Mich' }, { id: 'char-2' });
     const hook = renderHook(({ character }) => useLiveCharacterSync({ character, socket, isDnd5e: true }), {
       initialProps: { character: first },
     });
-    act(() => hook.result.current.reportLocalChange({ ...baseData(), experiencePoints: 1 }));
+    userEdits(hook as unknown as Hook, { ...baseData(), experiencePoints: 1 });
     act(() => socket.emit('character.updated', remoteEvent({ ...baseData(), experiencePoints: 2 }, ['experiencePoints'])));
     expect(hook.result.current.resets).toHaveLength(1);
-    act(() => hook.result.current.reportLocalChange({ ...baseData(), experiencePoints: 2, conditions: ['x'] }));
+    userEdits(hook as unknown as Hook, { ...baseData(), experiencePoints: 2, conditions: ['x'] });
     expect(hook.result.current.isDirty).toBe(true);
+    const firstStore = hook.result.current.formStore;
 
     hook.rerender({ character: second });
 
+    expect(hook.result.current.formStore).not.toBe(firstStore);
     expect(hook.result.current.resets).toEqual([]);
     expect(hook.result.current.isDirty).toBe(false);
-    expect(hook.result.current.externalDataVersion).toBe(0);
-    expect(hook.result.current.externalData).toBeUndefined();
+    expect(hook.result.current.formStore!.getState().form.characterName).toBe('Mich');
+    // The old character's events no longer reach anything.
+    act(() => socket.emit('character.updated', remoteEvent({ ...baseData(), experiencePoints: 3 }, ['experiencePoints'])));
+    expect(hook.result.current.formStore!.getState().version).toBe(0);
   });
 
-  it('a stale report (form without the latest push) is merged onto the pending push, not diffed against local', () => {
-    const { hook, socket } = setup();
-    // Push v1: remote changed hp.current; the editor has not applied it yet.
-    act(() =>
-      socket.emit('character.updated', remoteEvent({ ...baseData(), hp: { current: 3, maximum: 10, temporary: 0 } }, ['hp.current'])),
-    );
-    expect(hook.result.current.externalDataVersion).toBe(1);
-
-    // The user typed in two fields on the pre-push form: one the remote also changed.
-    act(() =>
-      hook.result.current.reportLocalChange(
-        { ...baseData(), characterName: 'Typed', hp: { current: 6, maximum: 10, temporary: 0 } },
-        'user',
-        undefined,
-        0,
-      ),
-    );
-
-    expect(hook.result.current.resets).toEqual([
-      expect.objectContaining({ path: 'hp.current', mine: 6, theirs: 3, author: gm }),
-    ]);
-    expect(hook.result.current.isDirty).toBe(true);
-
-    // The editor applies v1 and reports the same reset — listed only once.
-    act(() =>
-      hook.result.current.reportLocalChange(
-        { ...baseData(), characterName: 'Typed', hp: { current: 3, maximum: 10, temporary: 0 } },
-        'user',
-        [{ path: 'hp.current', mine: 6, theirs: 3 }],
-        1,
-      ),
-    );
-    expect(hook.result.current.resets).toHaveLength(1);
-  });
-
-  it('rebase resets reported by the editor are recorded with the author of that push', () => {
-    const { hook, socket } = setup();
-    act(() =>
-      socket.emit('character.updated', remoteEvent({ ...baseData(), experiencePoints: 150 }, ['experiencePoints'])),
-    );
-    act(() =>
-      hook.result.current.reportLocalChange(
-        { ...baseData(), experiencePoints: 150 },
-        'user',
-        [{ path: 'experiencePoints', mine: 120, theirs: 150 }],
-        1,
-      ),
-    );
-    expect(hook.result.current.resets).toEqual([
-      expect.objectContaining({ path: 'experiencePoints', mine: 120, theirs: 150, author: gm }),
-    ]);
-  });
-
-  it('remote 1 → stale keystroke report → remote 2: save never reverts either remote change (deterministic)', async () => {
+  it('remote 1 → stale keystrokes → remote 2: the lost one is reported, save never reverts either remote change', async () => {
     const { hook, socket } = setup();
     const L0 = baseData();
     const r1 = { ...L0, hp: { current: 3, maximum: 10, temporary: 0 } };
     act(() => socket.emit('character.updated', remoteEvent(r1, ['hp.current'])));
-    expect(hook.result.current.externalDataVersion).toBe(1);
 
-    // The editor reports a keystroke on a form that does not include v1 yet.
-    act(() => hook.result.current.reportLocalChange({ ...L0, characterName: 'X' }, 'user', undefined, 0));
+    // The user acted on a form that did not show remote 1 yet.
+    act(() => {
+      storeOf(hook).edit('characterName', 'Tomin', 'X');
+      storeOf(hook).edit('hp.current', 8, 6);
+    });
+    expect(hook.result.current.resets).toEqual([
+      expect.objectContaining({ path: 'hp.current', mine: 6, theirs: 3, author: gm }),
+    ]);
 
     const r2 = { ...r1, experiencePoints: 400 };
     act(() => socket.emit('character.updated', remoteEvent(r2, ['experiencePoints'])));
-    expect(hook.result.current.externalDataVersion).toBe(2);
+    expect(formOf(hook)).toEqual({ ...r2, characterName: 'X' });
 
-    const merged = { ...r2, characterName: 'X' };
-    act(() => hook.result.current.reportLocalChange(merged, 'system', undefined, 2));
-
-    mocks.patchCharacterData.mockResolvedValue({ character: makeCharacter(merged), applied: ['characterName'], conflicts: [], status: 200 });
-    await act(async () => {
-      await hook.result.current.save(merged);
+    mocks.patchCharacterData.mockResolvedValue({
+      character: makeCharacter({ ...r2, characterName: 'X' }),
+      applied: ['characterName'],
+      conflicts: [],
+      status: 200,
     });
-    const changes = mocks.patchCharacterData.mock.calls[0][1] as { path: string }[];
-    expect(changes).toEqual([{ path: 'characterName', base: 'Tomin', value: 'X' }]);
-    expect(hook.result.current.resets).toEqual([]);
-  });
-
-  it('stale report: only the fields the editor says the user edited count, derived changes never produce resets', () => {
-    const { hook, socket } = setup();
-    // Push v1 changes hp.current; the editor has not applied it.
-    act(() =>
-      socket.emit('character.updated', remoteEvent({ ...baseData(), hp: { current: 3, maximum: 10, temporary: 0 } }, ['hp.current'])),
-    );
-    // The stale user report contains the keystroke (characterName) and a
-    // derived hp.current change the user did not make.
-    act(() =>
-      hook.result.current.reportLocalChange(
-        { ...baseData(), characterName: 'Typed', hp: { current: 9, maximum: 10, temporary: 0 } },
-        'user',
-        undefined,
-        0,
-        ['characterName'],
-      ),
-    );
-    expect(hook.result.current.resets).toEqual([]);
-    expect(hook.result.current.isDirty).toBe(true);
-  });
-
-  it('a later stale input on the same field for the same push updates the entry instead of adding one', () => {
-    const { hook, socket } = setup();
-    act(() =>
-      socket.emit('character.updated', remoteEvent({ ...baseData(), experiencePoints: 150 }, ['experiencePoints'])),
-    );
-    act(() => hook.result.current.reportLocalChange({ ...baseData(), experiencePoints: 12 }, 'user', undefined, 0));
-    act(() => hook.result.current.reportLocalChange({ ...baseData(), experiencePoints: 120 }, 'user', undefined, 0));
-    expect(hook.result.current.resets).toEqual([
-      expect.objectContaining({ path: 'experiencePoints', mine: 120, theirs: 150, author: gm, version: 1 }),
-    ]);
+    await act(async () => {
+      await hook.result.current.save();
+    });
+    expect(mocks.patchCharacterData.mock.calls[0][1]).toEqual([{ path: 'characterName', base: 'Tomin', value: 'X' }]);
+    expect(hook.result.current.resets).toHaveLength(1);
   });
 
   it('resets caused by the server answer to the own save are labelled "server"', async () => {
     const { hook } = setup();
     const local = { ...baseData(), experiencePoints: 175 };
-    act(() => hook.result.current.reportLocalChange(local));
+    userEdits(hook, local);
     let resolvePatch!: (value: unknown) => void;
     mocks.patchCharacterData.mockReturnValue(new Promise((resolve) => (resolvePatch = resolve)));
     let savePromise!: Promise<unknown>;
     act(() => {
-      savePromise = hook.result.current.save(local);
+      savePromise = hook.result.current.save();
     });
+    // Typed into the same field while the save was in flight; the server
+    // normalised the saved value.
+    userEdits(hook, { ...local, experiencePoints: 180 });
     await act(async () => {
       resolvePatch({ character: makeCharacter({ ...local, experiencePoints: 170 }), applied: ['experiencePoints'], conflicts: [], status: 200 });
       await savePromise;
     });
-    // The editor applies the save push; a keystroke on the same field that
-    // the server normalised is reported as lost to "server".
-    act(() =>
-      hook.result.current.reportLocalChange(
-        { ...local, experiencePoints: 170 },
-        'user',
-        [{ path: 'experiencePoints', mine: 180, theirs: 170 }],
-        hook.result.current.externalDataVersion,
-      ),
-    );
+    expect(formOf(hook).experiencePoints).toBe(170);
     expect(hook.result.current.resets).toEqual([
-      expect.objectContaining({ path: 'experiencePoints', author: { userId: null, displayName: 'server' } }),
+      expect.objectContaining({ path: 'experiencePoints', mine: 180, theirs: 170, author: { userId: null, displayName: 'server' } }),
     ]);
   });
 
   it('propagates validation errors from save()', async () => {
     const { hook } = setup();
     const local = { ...baseData(), experiencePoints: -5 };
-    act(() => hook.result.current.reportLocalChange(local));
+    userEdits(hook, local);
     const error = Object.assign(new Error('Validation'), { response: { status: 400, data: { validationErrors: [] } } });
     mocks.patchCharacterData.mockRejectedValue(error);
 
     await expect(
       act(async () => {
-        await hook.result.current.save(local);
+        await hook.result.current.save();
       }),
     ).rejects.toBe(error);
     expect(hook.result.current.isDirty).toBe(true);

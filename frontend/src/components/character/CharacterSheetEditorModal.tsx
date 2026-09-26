@@ -12,6 +12,7 @@ import { api } from '@/services/api';
 import { GameSystem, type Character } from '@/types';
 import ConfirmDialog from '@/components/common/ConfirmDialog';
 import SheetResetPanel from './SheetResetPanel';
+import { buildDnd5eFormData } from '../character-sheets/dnd5e/dnd5eFormData';
 
 // Import editor components
 import DnD5eCharacterEditor from '../character-sheets/dnd5e/DnD5eCharacterEditor';
@@ -38,7 +39,7 @@ export default function CharacterSheetEditorModal({
   // Live sync (D&D 5e only): other people's changes flow into the open
   // editor; saving sends only the changed fields.
   const isDnd5e = character.gameSystem === GameSystem.DND_5E;
-  const liveSync = useLiveCharacterSync({ character, socket, isDnd5e });
+  const liveSync = useLiveCharacterSync({ character, socket, isDnd5e, normalizeForm: buildDnd5eFormData });
 
   // Handle save. The editors pass a freshly-uploaded token image URL as the
   // third argument — forward it so the character's token actually updates.
@@ -49,7 +50,7 @@ export default function CharacterSheetEditorModal({
       setSaving(true);
 
       if (isDnd5e) {
-        const outcome = await liveSync.save(data);
+        const outcome = await liveSync.save();
 
         // The token image is not part of `data` — persist it separately
         if (tokenImageUrl !== undefined) {
@@ -121,11 +122,7 @@ export default function CharacterSheetEditorModal({
               character={character}
               onSave={handleSave}
               onCancel={handleCancel}
-              externalData={liveSync.externalData}
-              externalBase={liveSync.externalBase}
-              externalDataVersion={liveSync.externalDataVersion}
-              onLocalChange={liveSync.reportLocalChange}
-              onDiscardLocalChanges={liveSync.discardLocalChanges}
+              formStore={liveSync.formStore}
             />
           </>
         );

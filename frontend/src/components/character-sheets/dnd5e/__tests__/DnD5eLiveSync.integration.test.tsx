@@ -2,13 +2,14 @@
  * Editor + wrapper + hook together: the handshake between
  * useLiveCharacterSync and DnD5eCharacterEditor.
  */
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useState, useSyncExternalStore, type ReactNode } from 'react';
 import { describe, it, expect, vi } from 'vitest';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import type { Character } from '@/types';
 import { useLiveCharacterSync } from '@/hooks/useLiveCharacterSync';
 import { api } from '@/services/api';
 import { DnD5eCharacterSheet } from '../DnD5eCharacterSheet';
+import { buildDnd5eFormData } from '../dnd5eFormData';
 
 vi.mock('@/services/api', () => {
   const api = { patchCharacterData: vi.fn(), getCharacter: vi.fn(), updateCharacter: vi.fn(), uploadAsset: vi.fn() };
@@ -66,17 +67,27 @@ type Sync = ReturnType<typeof useLiveCharacterSync>;
 
 function Harness({
   socket,
-  afterReport,
   before,
+  after,
+  initialData = data,
 }: {
   socket: ReturnType<typeof createFakeSocket>;
-  /** Runs after each local report reaches the hook (e.g. to inject a remote event) */
-  afterReport?: (origin: string, appliedVersion: number | undefined) => void;
   /** Rendered before the sheet, so its passive effects run before the editor's */
-  before?: (sync: Sync) => ReactNode;
+  before?: (sync: Sync, version: number) => ReactNode;
+  /** Rendered after the sheet, so its passive effects run after the editor committed */
+  after?: (sync: Sync, version: number) => ReactNode;
+  initialData?: object;
 }) {
-  const [character, setCharacter] = useState(() => makeCharacter(data));
-  const sync = useLiveCharacterSync({ character, socket, isDnd5e: true, onServerCharacter: setCharacter });
+  const [character, setCharacter] = useState(() => makeCharacter(initialData));
+  const sync = useLiveCharacterSync({
+    character,
+    socket,
+    isDnd5e: true,
+    onServerCharacter: setCharacter,
+    normalizeForm: buildDnd5eFormData,
+  });
+  const store = sync.formStore!;
+  const version = useSyncExternalStore(store.subscribe, () => store.getState().version);
   return (
     <>
       <span data-testid="dirty">{String(sync.isDirty)}</span>
@@ -85,22 +96,16 @@ function Harness({
           <li key={`${r.path}-${r.at}`}>{`${r.path}|${JSON.stringify(r.mine)}|${JSON.stringify(r.theirs)}|${r.author.displayName}`}</li>
         ))}
       </ul>
-      {before?.(sync)}
+      {before?.(sync, version)}
       <DnD5eCharacterSheet
         character={character}
         mode="edit"
-        onSave={async (saveData) => {
-          await sync.save(saveData);
+        onSave={async () => {
+          await sync.save();
         }}
-        externalData={sync.externalData}
-        externalBase={sync.externalBase}
-        externalDataVersion={sync.externalDataVersion}
-        onLocalChange={(formData, origin, resets, appliedVersion, userPaths) => {
-          sync.reportLocalChange(formData, origin, resets, appliedVersion, userPaths);
-          afterReport?.(origin, appliedVersion);
-        }}
-        onDiscardLocalChanges={sync.discardLocalChanges}
+        formStore={store}
       />
+      {after?.(sync, version)}
     </>
   );
 }
@@ -127,61 +132,129 @@ function remote(characterData: object, updatedAt = '2026-09-26T00:00:05.000Z') {
   };
 }
 
-describe('D&D 5e live sync (editor + hook)', () => {
-  // Kept first: earlier tests in this file change React's scheduling state
-  // enough that the pre-fix bug did not reproduce after them.
-  it('(b) remote 1 → keystroke → remote 2 before remote 1 is rendered: saving never reverts remote 1', async () => {
+/** A PATCH mock that applies the changes onto `serverData` (like the server). */
+function mockPatch(serverData: object) {
+  const patch = vi.mocked(api.patchCharacterData);
+  patch.mockReset();
+  patch.mockImplementation(async (_id, changes) => {
+    const next: any = JSON.parse(JSON.stringify(serverData));
+    for (const change of changes) {
+      const keys = change.path.split('.');
+      let target = next;
+      for (const key of keys.slice(0, -1)) target = target[key] ??= {};
+      target[keys[keys.length - 1]] = change.value;
+    }
+    return { character: makeCharacter(next), applied: changes.map((c) => c.path), conflicts: [], status: 200 };
+  });
+  return patch;
+}
+
+async function clickSave() {
+  await act(async () => {
+    fireEvent.click(screen.getByRole('button', { name: /^\s*Save\s*$/ }));
+  });
+}
+
+type Change = { path: string; base?: unknown; value?: unknown };
+
+/**
+ * The screen, the panel and the next save tell the same story about a field
+ * the user typed into while someone else changed it: either the user's value
+ * is on screen and saved on top of the remote one, or the remote value is on
+ * screen, the user's value is in the panel and the save leaves the field alone.
+ */
+function expectConsistent(opts: {
+  path: string;
+  shown: string;
+  mine: unknown;
+  theirs: unknown;
+  changes: Change[];
+}) {
+  const reset = resetLines().find((line) => line?.startsWith(`${opts.path}|`));
+  const sent = opts.changes.find((c) => c.path === opts.path);
+  if (reset) {
+    expect(reset).toBe(`${opts.path}|${JSON.stringify(opts.mine)}|${JSON.stringify(opts.theirs)}|GM`);
+    expect(opts.shown).toBe(String(opts.theirs));
+    expect(sent).toBeUndefined();
+  } else {
+    expect(opts.shown).toBe(String(opts.mine));
+    // Saved on top of the remote value — never as a revert of it.
+    expect(sent).toEqual({ path: opts.path, base: opts.theirs, value: opts.mine });
+  }
+}
+
+describe('D&D 5e live sync (editor + store + hook)', () => {
+  it('window C: a keystroke landing right after the rebase is queued: form, panel and save agree; the GM change is never reverted', async () => {
     const socket = createFakeSocket();
-    let injected = false;
-    let firstUserReportVersion: number | undefined = -1;
+    function KeystrokeAfterRebase({ version }: { version: number }) {
+      useEffect(() => {
+        if (version !== 1) return; // only the remote update, not the discard after save
+        fireEvent.change(xpInput(), { target: { value: '120' } });
+      }, [version]);
+      return null;
+    }
+    render(<Harness socket={socket} after={(_sync, version) => <KeystrokeAfterRebase version={version} />} />);
+
+    act(() => socket.emit(remote({ ...data, experiencePoints: 150 })));
+
+    // The remote change was in the store (and on screen) before the user
+    // typed: a normal edit on top of the remote value, nothing reset.
+    expect(xpInput().value).toBe('120');
+    expect(resetLines()).toEqual([]);
+    expect(dirty()).toBe('true');
+
+    const patch = mockPatch({ ...data, experiencePoints: 150 });
+    await clickSave();
+    const changes = patch.mock.calls[0][1];
+    expect(changes).toContainEqual({ path: 'experiencePoints', base: 150, value: 120 });
+    expectConsistent({ path: 'experiencePoints', shown: '120', mine: 120, theirs: 150, changes });
+  });
+
+  it('(a) a keystroke on a stale form into a field the remote just changed: remote value on screen, the loss in the panel, save leaves it alone', async () => {
+    const socket = createFakeSocket();
+    render(<Harness socket={socket} />);
+
+    act(() => {
+      socket.emit(remote({ ...data, experiencePoints: 150 }));
+      fireEvent.change(xpInput(), { target: { value: '120' } });
+    });
+
+    expect(xpInput().value).toBe('150');
+    expect(resetLines()).toEqual(['experiencePoints|120|150|GM']);
+    expect(dirty()).toBe('false');
+    const shown = xpInput().value;
+
+    const patch = mockPatch({ ...data, experiencePoints: 150 });
+    await clickSave();
+    const changes = patch.mock.calls[0][1];
+    expectConsistent({ path: 'experiencePoints', shown, mine: 120, theirs: 150, changes });
+  });
+
+  it('(b) remote 1 → keystroke → remote 2 before remote 1 is rendered: saving never reverts either remote change', async () => {
+    const socket = createFakeSocket();
     const remote1 = { ...data, hp: { current: 3, maximum: 12, temporary: 0 } };
     const remote2 = { ...remote1, experiencePoints: 400 };
-    render(
-      <Harness
-        socket={socket}
-        afterReport={(origin, appliedVersion) => {
-          // The keystroke's report arrives before the editor rendered remote 1;
-          // remote 2 lands right then.
-          if (origin === 'user' && !injected) {
-            injected = true;
-            firstUserReportVersion = appliedVersion;
-            socket.emit(remote(remote2, '2026-09-26T00:00:06.000Z'));
-          }
-        }}
-      />,
-    );
+    render(<Harness socket={socket} />);
 
     act(() => {
       socket.emit(remote(remote1));
       fireEvent.change(nameInput(), { target: { value: 'Tomin the Bold' } });
+      socket.emit(remote(remote2, '2026-09-26T00:00:06.000Z'));
     });
-    expect(injected).toBe(true);
-    // The scenario really happened: the hook was at version 1 (remote 1) and
-    // the keystroke's report did not include it yet. If scheduling changes,
-    // this fails loudly instead of the test passing vacuously.
-    expect(firstUserReportVersion).toBe(0);
 
     expect(nameInput().value).toBe('Tomin the Bold');
     expect(xpInput().value).toBe('400');
     expect(resetLines()).toEqual([]);
 
-    const patch = vi.mocked(api.patchCharacterData);
-    patch.mockReset();
-    patch.mockImplementation(async (_id, changes) => ({
-      character: makeCharacter({ ...remote2, characterName: 'Tomin the Bold' }),
-      applied: changes.map((c) => c.path),
-      conflicts: [],
-      status: 200,
-    }));
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /^\s*Save\s*$/ }));
-    });
+    const patch = mockPatch(remote2);
+    await clickSave();
 
     expect(patch).toHaveBeenCalledTimes(1);
     const changes = patch.mock.calls[0][1];
     expect(changes).toContainEqual({ path: 'characterName', base: 'Tomin', value: 'Tomin the Bold' });
     const paths = changes.map((c) => c.path);
     expect(paths).not.toContain('hp.current');
+    expect(paths).not.toContain('hp');
     expect(paths).not.toContain('experiencePoints');
   });
 
@@ -205,29 +278,12 @@ describe('D&D 5e live sync (editor + hook)', () => {
     expect(dirty()).toBe('true');
   });
 
-  it('(a) typing into a field a simultaneous remote update changed shows the remote value and a reset entry', () => {
-    const socket = createFakeSocket();
-    render(<Harness socket={socket} />);
-
-    act(() => {
-      socket.emit(remote({ ...data, experiencePoints: 150 }));
-      fireEvent.change(xpInput(), { target: { value: '120' } });
-    });
-
-    expect(xpInput().value).toBe('150');
-    expect(resetLines()).toEqual(['experiencePoints|120|150|GM']);
-    expect(dirty()).toBe('false');
-  });
-
-  it('a derived-value update in the same render as a rebase never overwrites the remote change', async () => {
+  it('a derived-value update in the same render as a remote update never overwrites the remote change', async () => {
     const socket = createFakeSocket();
     render(<Harness socket={socket} />);
     const scoreInput = (ability: string) =>
       screen.getByText(ability).parentElement!.querySelector('input') as HTMLInputElement;
 
-    // Remote raises strength; in the same (default-lane) render the user's
-    // dexterity edit makes the modifier effect queue a derived update after
-    // the editor's rebase.
     const remoteData = { ...data, stats: { ...data.stats, strength: ability(18) } };
     act(() => {
       socket.emit(remote(remoteData));
@@ -237,61 +293,145 @@ describe('D&D 5e live sync (editor + hook)', () => {
     expect(scoreInput('str').value).toBe('18');
     expect(scoreInput('dex').value).toBe('16');
 
-    const patch = vi.mocked(api.patchCharacterData);
-    patch.mockReset();
-    patch.mockImplementation(async (_id, changes) => ({
-      character: makeCharacter(remoteData),
-      applied: changes.map((c) => c.path),
-      conflicts: [],
-      status: 200,
-    }));
-    await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /^\s*Save\s*$/ }));
-    });
+    const patch = mockPatch(remoteData);
+    await clickSave();
     const changes = patch.mock.calls[0][1];
     const paths = changes.map((c) => c.path);
     expect(paths).not.toContain('stats.strength.score');
     expect(paths).not.toContain('stats.strength.modifier');
     expect(changes).toContainEqual({ path: 'stats.dexterity.score', base: 12, value: 16 });
+    expect(changes).toContainEqual({ path: 'stats.dexterity.modifier', base: 1, value: 3 });
   });
 
   it.each([
     ['a different field is kept', 'name', undefined],
     ['the same field is reported as a reset', 'xp', 'experiencePoints|120|150|GM'],
-  ])('(c) window B: a keystroke queued before the rebase runs — %s', (_label, field, expectedReset) => {
+  ])('(c) window B: a keystroke queued before the rebase renders — %s', (_label, field, expectedReset) => {
     const socket = createFakeSocket();
     function KeystrokeWhenVersionChanges({ version }: { version: number }) {
       useEffect(() => {
-        if (version === 0) return;
-        // Queued in the same (default) lane just before the editor's
-        // adoption effect queues its rebase — processed together.
+        if (version !== 1) return;
         if (field === 'name') callReactOnChange(nameInput(), 'Typed');
         else callReactOnChange(xpInput(), '120');
       }, [version]);
       return null;
     }
-    render(
-      <Harness socket={socket} before={(sync) => <KeystrokeWhenVersionChanges version={sync.externalDataVersion} />} />,
-    );
+    render(<Harness socket={socket} before={(_sync, version) => <KeystrokeWhenVersionChanges version={version} />} />);
 
     act(() => socket.emit(remote({ ...data, experiencePoints: 150 })));
 
-    expect(xpInput().value).toBe('150');
     if (field === 'name') {
+      expect(xpInput().value).toBe('150');
       expect(nameInput().value).toBe('Typed');
       expect(dirty()).toBe('true');
       expect(resetLines()).toEqual([]);
     } else {
-      expect(resetLines()).toEqual([expectedReset]);
+      // Whatever React's scheduling did, screen and panel agree.
+      const shown = xpInput().value;
+      if (resetLines().length > 0) {
+        expect(resetLines()).toEqual([expectedReset]);
+        expect(shown).toBe('150');
+      } else {
+        expect(shown).toBe('120');
+      }
     }
   });
 
-  it('a user form committed in the same render as a version bump stays tagged as the user\'s', () => {
+  it('array race: the GM adds an item while the user removes another on a stale form — both changes survive', async () => {
+    const socket = createFakeSocket();
+    const initial = { ...data, inventory: [{ name: 'Rope' }, { name: 'Lute' }] };
+    render(<Harness socket={socket} initialData={initial} />);
+    fireEvent.click(screen.getByRole('button', { name: /Inventory/ }));
+    const removeButton = (name: string) =>
+      screen.getAllByPlaceholderText('Item Name').find((input) => (input as HTMLInputElement).value === name)!
+        .parentElement!.querySelector('button') as HTMLButtonElement;
+    const itemNames = () => screen.getAllByPlaceholderText('Item Name').map((input) => (input as HTMLInputElement).value);
+
+    const gmData = { ...initial, inventory: [...initial.inventory, { name: 'Gem' }] };
+    act(() => {
+      socket.emit(remote(gmData));
+      // The click handler still closes over the form without the Gem.
+      fireEvent.click(removeButton('Lute'));
+    });
+
+    expect(itemNames()).toEqual(['Rope', 'Gem']);
+    expect(resetLines()).toEqual([]);
+    expect(dirty()).toBe('true');
+
+    const patch = mockPatch(gmData);
+    await clickSave();
+    const changes = patch.mock.calls[0][1];
+    expect(changes).toContainEqual({
+      path: 'inventory',
+      base: gmData.inventory,
+      value: [{ name: 'Rope' }, { name: 'Gem' }],
+    });
+  });
+
+  it('array race: removing an item the GM changed meanwhile loses and is reported, never silently', async () => {
+    const socket = createFakeSocket();
+    const initial = { ...data, inventory: [{ name: 'Rope' }, { name: 'Lute' }] };
+    render(<Harness socket={socket} initialData={initial} />);
+    fireEvent.click(screen.getByRole('button', { name: /Inventory/ }));
+    const lute = screen.getAllByPlaceholderText('Item Name')[1];
+    const removeLute = lute.parentElement!.querySelector('button') as HTMLButtonElement;
+
+    const gmData = { ...initial, inventory: [{ name: 'Rope' }, { name: 'Lute', quantity: 2 }] };
+    act(() => {
+      socket.emit(remote(gmData));
+      fireEvent.click(removeLute);
+    });
+
+    expect(screen.getAllByPlaceholderText('Item Name')).toHaveLength(2);
+    expect(resetLines()).toEqual([
+      `inventory|${JSON.stringify([{ name: 'Rope' }])}|${JSON.stringify(gmData.inventory)}|GM`,
+    ]);
+
+    const patch = mockPatch(gmData);
+    await clickSave();
+    const paths = patch.mock.calls[0][1].map((c) => c.path);
+    expect(paths).not.toContain('inventory');
+  });
+
+  it('array race: the user adds an item on a stale form while the GM adds one — both are kept', () => {
+    const socket = createFakeSocket();
+    const initial = { ...data, inventory: [{ name: 'Rope' }] };
+    render(<Harness socket={socket} initialData={initial} />);
+    fireEvent.click(screen.getByRole('button', { name: /Inventory/ }));
+
+    act(() => {
+      socket.emit(remote({ ...initial, inventory: [{ name: 'Rope' }, { name: 'Gem' }] }));
+      fireEvent.click(screen.getByRole('button', { name: /Add Item/ }));
+    });
+
+    const names = screen.getAllByPlaceholderText('Item Name').map((input) => (input as HTMLInputElement).value);
+    expect(names).toEqual(['Rope', 'Gem', '']);
+    expect(resetLines()).toEqual([]);
+  });
+
+  it('typing into an item of an array the GM changed meanwhile is reported, not written into the wrong item', () => {
+    const socket = createFakeSocket();
+    const initial = { ...data, inventory: [{ name: 'Rope' }, { name: 'Lute' }] };
+    render(<Harness socket={socket} initialData={initial} />);
+    fireEvent.click(screen.getByRole('button', { name: /Inventory/ }));
+    const luteInput = screen.getAllByPlaceholderText('Item Name')[1];
+
+    const gmData = { ...initial, inventory: [{ name: 'Gem' }, { name: 'Rope' }, { name: 'Lute' }] };
+    act(() => {
+      socket.emit(remote(gmData));
+      fireEvent.change(luteInput, { target: { value: 'Lute of Charm' } });
+    });
+
+    const names = screen.getAllByPlaceholderText('Item Name').map((input) => (input as HTMLInputElement).value);
+    expect(names).toEqual(['Gem', 'Rope', 'Lute']);
+    expect(resetLines()).toHaveLength(1);
+    expect(resetLines()[0]).toMatch(/^inventory\|/);
+  });
+
+  it('a user edit committed in the same render as a remote update stays the user\'s', () => {
     const socket = createFakeSocket();
     render(<Harness socket={socket} />);
 
-    // Keystroke and remote update land in the same (default-lane) render, so
-    // the editor's rebase updater may run eagerly before that form is reported.
     act(() => {
       socket.emit(remote({ ...data, experiencePoints: 150 }));
       callReactOnChange(nameInput(), 'Typed');
@@ -301,9 +441,9 @@ describe('D&D 5e live sync (editor + hook)', () => {
     expect(xpInput().value).toBe('150');
     expect(dirty()).toBe('true');
 
-    // Proof it is tracked as the user's: a later remote change of the same
-    // field is listed in the panel instead of silently replacing it.
+    // A later remote change of the same field is listed in the panel.
     act(() => socket.emit(remote({ ...data, experiencePoints: 150, characterName: 'GM name' }, '2026-09-26T00:00:07.000Z')));
+    expect(nameInput().value).toBe('GM name');
     expect(resetLines()).toEqual(['characterName|"Typed"|"GM name"|GM']);
   });
 
@@ -317,6 +457,13 @@ describe('D&D 5e live sync (editor + hook)', () => {
     expect(dirty()).toBe('true');
   });
 
+  it('opening the editor (normalization, derived values) is not dirty', () => {
+    const socket = createFakeSocket();
+    render(<Harness socket={socket} />);
+    expect(nameInput().value).toBe('Tomin');
+    expect(dirty()).toBe('false');
+  });
+
   it('cancel discards the edits: not dirty any more', () => {
     const socket = createFakeSocket();
     render(<Harness socket={socket} />);
@@ -327,5 +474,18 @@ describe('D&D 5e live sync (editor + hook)', () => {
 
     expect(screen.queryByPlaceholderText('Character Name')).not.toBeInTheDocument();
     expect(dirty()).toBe('false');
+  });
+
+  it('a colour picked in the editor is saved as a field edit; the GM\'s colour change is shown, not reverted', async () => {
+    const socket = createFakeSocket();
+    render(<Harness socket={socket} />);
+    act(() => socket.emit(remote({ ...data, themeColor: '#123456' })));
+    fireEvent.change(nameInput(), { target: { value: 'Tomin the Bold' } });
+
+    const patch = mockPatch({ ...data, themeColor: '#123456' });
+    await clickSave();
+    const paths = patch.mock.calls[0][1].map((c) => c.path);
+    expect(paths).toContain('characterName');
+    expect(paths).not.toContain('themeColor');
   });
 });
