@@ -1,6 +1,8 @@
 import { Server } from 'socket.io';
 import { prisma } from '../config/database';
 import logger from '../utils/logger';
+import { filterTokensByRole, getSpiritVisibilityBatch } from '../utils/spirit-layer';
+import type { AuthenticatedSocket } from './auth';
 
 /**
  * WebSocket Utility Functions
@@ -46,6 +48,74 @@ export function broadcastToCampaign(campaignId: string, event: string, data: any
 export function broadcastToUser(userId: string, event: string, data: any): void {
   const io = getSocketInstance();
   io.to(userId).emit(event, data);
+}
+
+/** A token as stored in a map's `tokens` JSON array (only `id` is read directly). */
+type StoredToken = { id: string };
+
+/**
+ * Broadcast a token add / update / remove made through the REST routes.
+ *
+ * Pass the token as it was before the write (`null` when it was just
+ * created) and as it is after the write (`null` when it was deleted). Each
+ * socket in the campaign room receives the event that turns its view of the
+ * token from "before" into "after", using the same rules as the map GET
+ * (filterTokensByRole):
+ * - DM sockets see every token: `token.added` / `token.updated` / `token.removed`.
+ * - Other sockets only see tokens that pass filterTokensByRole (visible, on
+ *   the plane they currently see, DM-only `notes` stripped). A token that
+ *   becomes hidden from them arrives as `token.removed`; one that becomes
+ *   visible arrives as `token.added`; a token they never see sends nothing.
+ *
+ * Payloads: `token.added|token.updated { mapId, token }`,
+ * `token.removed { mapId, tokenId }`.
+ *
+ * Never throws — a failed broadcast is logged and must not fail the REST
+ * request whose database write already succeeded.
+ */
+export async function broadcastTokenEvent(
+  campaignId: string,
+  mapId: string,
+  before: StoredToken | null,
+  after: StoredToken | null
+): Promise<void> {
+  try {
+    const tokenId = after?.id ?? before?.id;
+    if (!tokenId) return;
+
+    const io = getSocketInstance();
+    const campaignSockets = await io.in(campaignId).fetchSockets();
+    const authedSockets = campaignSockets.map((s) => s as unknown as AuthenticatedSocket);
+
+    const needsSpiritVisibility = authedSockets.some((s) => s.role !== 'DM' && s.userId);
+    const visibility = needsSpiritVisibility
+      ? await getSpiritVisibilityBatch(
+          campaignId,
+          authedSockets.map((s) => s.userId).filter((id): id is string => !!id)
+        )
+      : new Map<string, boolean>();
+
+    for (const s of campaignSockets) {
+      const authedSocket = s as unknown as AuthenticatedSocket;
+      let seenBefore: unknown = before;
+      let seenAfter: unknown = after;
+
+      if (authedSocket.role !== 'DM') {
+        const role = authedSocket.role ?? 'SPECTATOR';
+        const spiritVisible = !!(authedSocket.userId && visibility.get(authedSocket.userId));
+        seenBefore = before ? filterTokensByRole([before], role, spiritVisible)[0] ?? null : null;
+        seenAfter = after ? filterTokensByRole([after], role, spiritVisible)[0] ?? null : null;
+      }
+
+      if (seenAfter) {
+        s.emit(seenBefore ? 'token.updated' : 'token.added', { mapId, token: seenAfter });
+      } else if (seenBefore) {
+        s.emit('token.removed', { mapId, tokenId });
+      }
+    }
+  } catch (error) {
+    logger.error('Token broadcast failed', { err: error, campaignId, mapId });
+  }
 }
 
 /**

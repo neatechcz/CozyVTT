@@ -7,7 +7,7 @@ import { AuthenticatedRequest } from '../middleware/rbac';
 import { campaignMember, campaignDM } from '../middleware/compose';
 import { prisma } from '../config/database';
 import { filterMapData, getSpiritVisibility } from '../utils/spirit-layer';
-import { broadcastToCampaign } from '../websocket/utils';
+import { broadcastToCampaign, broadcastTokenEvent } from '../websocket/utils';
 import { normalizeAssetUrl } from '../utils/asset-urls';
 import { WallSegmentSchema, WallSegmentsArraySchema, FogOperationSchema, LightSourceSchema, LightSourcesArraySchema, LightSourceUpdateSchema } from '../validators/walls';
 import type { WallSegment, FogState, LightSource } from '../types/walls';
@@ -869,6 +869,9 @@ router.post('/:id/tokens', campaignDM, async (req: AuthenticatedRequest, res: Re
       data: { tokens: updatedTokens as any },
     });
 
+    // Live update for every client viewing this map (hidden tokens: DM only)
+    await broadcastTokenEvent(campaignId, mapId, null, newToken);
+
     return res.status(201).json({
       message: 'Token added successfully',
       token: newToken,
@@ -1050,6 +1053,9 @@ router.put('/:id/tokens/:tokenId', campaignMember, async (req: AuthenticatedRequ
       data: { tokens: updatedTokens as any },
     });
 
+    // Live update; players get token.added / token.removed when visibility flips
+    await broadcastTokenEvent(campaignId, mapId, existingToken, updatedToken);
+
     return res.status(200).json({
       message: 'Token updated successfully',
       token: updatedToken,
@@ -1106,6 +1112,7 @@ router.delete('/:id/tokens/:tokenId', campaignDM, async (req: AuthenticatedReque
     }
 
     // Remove the token
+    const removedToken = tokensArray[tokenIndex];
     const updatedTokens = tokensArray.filter((t) => t.id !== tokenId);
 
     // Update the map
@@ -1113,6 +1120,9 @@ router.delete('/:id/tokens/:tokenId', campaignDM, async (req: AuthenticatedReque
       where: { id: mapId },
       data: { tokens: updatedTokens as any },
     });
+
+    // Live update (removal of a hidden token reaches DMs only)
+    await broadcastTokenEvent(campaignId, mapId, removedToken, null);
 
     return res.status(200).json({
       message: 'Token removed successfully',

@@ -29,6 +29,7 @@ import type {
   InitiativeRollEvent,
   InitiativeReorderEvent,
 } from '@/types';
+import type { TokenAddedPayload, TokenUpdatedPayload, TokenRemovedPayload } from '@/utils/tokenEvents';
 
 // ============================================
 // WebSocket Client Configuration
@@ -245,6 +246,33 @@ class SocketClient {
 
   onTokenMoved(callback: EventCallback<TokenMovedEvent>) {
     this.socket?.on('token.moved', callback);
+  }
+
+  // Token add / update / remove made through the REST API (DM or MCP).
+  // The server filters per recipient; hidden tokens reach DMs only.
+
+  onTokenAdded(callback: EventCallback<TokenAddedPayload>) {
+    this.socket?.on('token.added', callback);
+  }
+
+  offTokenAdded(callback: EventCallback<TokenAddedPayload>) {
+    this.socket?.off('token.added', callback);
+  }
+
+  onTokenUpdated(callback: EventCallback<TokenUpdatedPayload>) {
+    this.socket?.on('token.updated', callback);
+  }
+
+  offTokenUpdated(callback: EventCallback<TokenUpdatedPayload>) {
+    this.socket?.off('token.updated', callback);
+  }
+
+  onTokenRemoved(callback: EventCallback<TokenRemovedPayload>) {
+    this.socket?.on('token.removed', callback);
+  }
+
+  offTokenRemoved(callback: EventCallback<TokenRemovedPayload>) {
+    this.socket?.off('token.removed', callback);
   }
 
   // ============================================

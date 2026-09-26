@@ -26,6 +26,13 @@ import { TokenLayer, TokenType } from '@/types';
 import type { WallSegment, FogState, WallType, LightSource } from '@/types/walls';
 import { douglasPeucker, edgeSnapPoints } from '@/utils/geometry';
 import {
+  applyTokenEvent,
+  type TokenEvent,
+  type TokenAddedPayload,
+  type TokenUpdatedPayload,
+  type TokenRemovedPayload,
+} from '@/utils/tokenEvents';
+import {
   drawMapImage,
   drawSpiritLayer,
   drawGrid,
@@ -788,6 +795,40 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
       }
     };
   }, [socket]); // handler reads/writes via the store, no reactive deps needed
+
+  /**
+   * Listen for token.added / token.updated / token.removed — tokens changed
+   * through the REST API (DM toolbar, AI game master via MCP). The server has
+   * already filtered hidden tokens out for players, so events are applied as
+   * they come; only events for a map other than the displayed one are dropped.
+   */
+  const currentMapId = currentMap?.id;
+  useEffect(() => {
+    if (!socket) return;
+
+    const applyEvent = (event: TokenEvent) => {
+      if (!currentMapId || event.mapId !== currentMapId) return;
+      // Read the live list from the store at event time (never a render
+      // closure copy) so rapid events build on each other.
+      const store = useGameStore.getState();
+      const current = store.tokenOrder.map((id) => store.tokens[id]).filter((t): t is Token => !!t);
+      store.setTokens(applyTokenEvent(current, event));
+    };
+
+    const handleTokenAdded = (payload: TokenAddedPayload) => applyEvent({ type: 'token.added', ...payload });
+    const handleTokenUpdated = (payload: TokenUpdatedPayload) => applyEvent({ type: 'token.updated', ...payload });
+    const handleTokenRemoved = (payload: TokenRemovedPayload) => applyEvent({ type: 'token.removed', ...payload });
+
+    socket.onTokenAdded(handleTokenAdded);
+    socket.onTokenUpdated(handleTokenUpdated);
+    socket.onTokenRemoved(handleTokenRemoved);
+
+    return () => {
+      socket.offTokenAdded(handleTokenAdded);
+      socket.offTokenUpdated(handleTokenUpdated);
+      socket.offTokenRemoved(handleTokenRemoved);
+    };
+  }, [socket, currentMapId]);
 
   // ============================================
   // Map Change
