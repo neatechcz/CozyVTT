@@ -64,8 +64,8 @@ describe('SocketClient manager reconnect listeners', () => {
     expect(socket.listenerCount('reconnect_attempt')).toBe(0);
     expect(socket.listenerCount('reconnect')).toBe(0);
     expect(socket.listenerCount('reconnect_failed')).toBe(0);
-    expect(manager.listenerCount('reconnect_attempt')).toBe(1);
-    expect(manager.listenerCount('reconnect')).toBe(1);
+    // Only exhaustion needs the client itself; socket.io's successful
+    // reconnect is followed by the backend's 'connected' and a re-authenticate
     expect(manager.listenerCount('reconnect_failed')).toBe(1);
 
     const connectionError = expect(connection).rejects.toThrow(

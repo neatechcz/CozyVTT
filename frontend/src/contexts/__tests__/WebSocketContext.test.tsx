@@ -14,8 +14,14 @@ const socketClientMock = vi.hoisted(() => ({
   startHeartbeat: vi.fn(),
 }));
 
+type LifecycleListener = (event: string, detail?: { error?: string }) => void;
+
 /** Client-level lifecycle listeners (socketClient.onLifecycle) of the rendered provider */
-const lifecycleListeners = new Set<(event: string) => void>();
+const lifecycleListeners = new Set<LifecycleListener>();
+
+function signal(event: string, detail?: { error?: string }) {
+  act(() => lifecycleListeners.forEach((listener) => listener(event, detail)));
+}
 
 vi.mock('@/services/socket', () => ({ default: socketClientMock }));
 vi.mock('@/services/api', () => ({ default: { pingSession: vi.fn() } }));
@@ -78,7 +84,7 @@ function renderCampaign(socketOrSockets: Socket | Socket[], onRefresh: () => voi
   socketClientMock.startHeartbeat.mockReturnValue(vi.fn());
   socketClientMock.getCampaignId.mockReturnValue('c1');
   lifecycleListeners.clear();
-  socketClientMock.onLifecycle.mockImplementation((listener: (event: string) => void) => {
+  socketClientMock.onLifecycle.mockImplementation((listener: LifecycleListener) => {
     lifecycleListeners.add(listener);
     return () => lifecycleListeners.delete(listener);
   });
@@ -298,5 +304,131 @@ describe('WebSocketProvider automatic reconnection', () => {
 
     expect((foreign as unknown as FakeEmitter).listenerCount('authenticated')).toBe(0);
     expect((socket as unknown as FakeEmitter).listenerCount('authenticated')).toBe(1);
+  });
+});
+
+describe('WebSocketProvider reconnect lifecycle on the Manager', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it('listens for reconnect_* on the Manager (not the socket) and drives the badge and reconnectCount from it', async () => {
+    const socket = createSocket();
+    const socketEvents = socket as unknown as FakeEmitter;
+    const manager = socket.io as unknown as FakeEmitter;
+    const onRefresh = vi.fn();
+    renderCampaign(socket, onRefresh);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('connection-status')).toHaveTextContent('connected');
+    });
+    for (const event of ['reconnect_attempt', 'reconnect', 'reconnect_failed']) {
+      expect(socketEvents.listenerCount(event)).toBe(0);
+      expect(manager.listenerCount(event)).toBe(1);
+    }
+
+    act(() => socket.emit('disconnect', 'transport close'));
+    act(() => manager.emit('reconnect_attempt', 1));
+    expect(screen.getByText('Connecting...')).toBeInTheDocument();
+    act(() => manager.emit('reconnect', 1));
+    act(() => socket.emit('authenticated', { campaignId: 'c1' }));
+
+    await waitFor(() => {
+      expect(screen.getByText('Connected')).toBeInTheDocument();
+      expect(screen.getByTestId('reconnect-count')).toHaveTextContent('1');
+      expect(onRefresh).toHaveBeenCalledTimes(1);
+    });
+  });
+});
+
+describe('WebSocketProvider when the socket client gives up', () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+  });
+
+  it('shows the failure (not a stuck spinner) when the replacement socket of a server-forced reconnect times out, and Retry recovers', async () => {
+    const socket = createSocket();
+    const replacement = createSocket();
+    const retrySocket = createSocket();
+    const onRefresh = vi.fn();
+    renderCampaign(socket, onRefresh);
+
+    await waitFor(() => {
+      expect(screen.getByTestId('connection-status')).toHaveTextContent('connected');
+    });
+
+    act(() => socket.emit('disconnect', 'io server disconnect'));
+    socketClientMock.getSocket.mockReturnValue(replacement);
+    signal('replaced');
+    act(() => replacement.emit('connect'));
+    expect(screen.getByTestId('connection-status')).toHaveTextContent('connecting');
+
+    // No `authenticated` within 10 s: the client tears the socket down
+    socketClientMock.getSocket.mockReturnValue(null);
+    signal('failed', { error: 'Connection timeout - server did not respond' });
+
+    expect(screen.getByTestId('connection-status')).toHaveTextContent('error');
+    expect(screen.getByText('Connection Error')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Retry' })).toHaveAttribute(
+      'title',
+      'Connection timeout - server did not respond'
+    );
+    expect(screen.getByTestId('reconnect-count')).toHaveTextContent('0');
+    expect(onRefresh).not.toHaveBeenCalled();
+
+    socketClientMock.getSocket.mockReturnValue(retrySocket);
+    await userEvent.click(screen.getByRole('button', { name: 'Retry' }));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('connection-status')).toHaveTextContent('connected');
+      expect(screen.getByTestId('reconnect-count')).toHaveTextContent('1');
+      expect(onRefresh).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  it('surfaces the server error when the client stops retrying an unauthenticated connection', async () => {
+    const socket = createSocket();
+    renderCampaign(socket, vi.fn());
+
+    await waitFor(() => {
+      expect(screen.getByTestId('connection-status')).toHaveTextContent('connected');
+    });
+
+    act(() => socket.emit('disconnect', 'io server disconnect'));
+    signal('failed', { error: 'Unauthorized' });
+
+    expect(screen.getByTestId('connection-status')).toHaveTextContent('error');
+    expect(screen.getByRole('button', { name: 'Retry' })).toHaveAttribute('title', 'Unauthorized');
+  });
+
+  it('uses the generic message when the failure has no detail', async () => {
+    const socket = createSocket();
+    renderCampaign(socket, vi.fn());
+
+    await waitFor(() => {
+      expect(screen.getByTestId('connection-status')).toHaveTextContent('connected');
+    });
+
+    signal('failed');
+
+    expect(screen.getByTestId('connection-status')).toHaveTextContent('error');
+    expect(screen.getByRole('button', { name: 'Retry' })).toHaveAttribute(
+      'title',
+      'Connection lost. Click Retry to try again.'
+    );
+  });
+
+  it('ignores a failure of a connection to another campaign', async () => {
+    const socket = createSocket();
+    renderCampaign(socket, vi.fn());
+
+    await waitFor(() => {
+      expect(screen.getByTestId('connection-status')).toHaveTextContent('connected');
+    });
+
+    socketClientMock.getCampaignId.mockReturnValue('other-campaign');
+    signal('failed', { error: 'Unauthorized' });
+
+    expect(screen.getByTestId('connection-status')).toHaveTextContent('connected');
   });
 });
