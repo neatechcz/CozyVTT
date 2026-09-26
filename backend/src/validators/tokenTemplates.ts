@@ -18,8 +18,14 @@ const NameDescPairSchema = z.object({
   description: z.string().max(5000),
 });
 
+const NpcStatBlockHpSchema = z.object({
+  average: z.number().int().min(0).max(100000),
+  formula: z.string().max(100).optional(),
+});
+
 const NpcStatBlockSchema = z.object({
   ac: z.number().int().min(0).max(99),
+  hp: NpcStatBlockHpSchema.optional(),
   speed: z.string().max(200),
   abilities: z.object({
     str: z.number().int().min(0).max(30),
