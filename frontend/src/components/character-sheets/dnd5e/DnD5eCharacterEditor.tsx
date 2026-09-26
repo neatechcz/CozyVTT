@@ -5,7 +5,7 @@
  * color customization, and token upload functionality.
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useSyncExternalStore } from 'react';
 import {
   Swords,
   Package,
@@ -20,11 +20,23 @@ import {
 } from 'lucide-react';
 import { Character } from '../../../types';
 import { api } from '../../../services/api';
+import {
+  createCharacterFormStore,
+  getFormValue,
+  type CharacterFormStore,
+} from '../../../utils/characterFormStore';
+import { buildDnd5eFormData, prepareDnd5eFormForSave, saveFormInputsOf } from './dnd5eFormData';
 
 interface DnD5eCharacterEditorProps {
   character: Character;
   onSave: (data: any, showToast?: boolean, tokenImageUrl?: string) => Promise<void>;
   onCancel: () => void;
+  /**
+   * Live sync: the form store owned by `useLiveCharacterSync`. The editor
+   * reads and edits the form through it (remote changes appear at once);
+   * without it the editor keeps a private store of its own.
+   */
+  formStore?: CharacterFormStore | null;
 }
 
 type TabId = 'stats' | 'combat' | 'spells' | 'inventory' | 'features' | 'bio';
@@ -101,6 +113,7 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
   character,
   onSave,
   onCancel,
+  formStore,
 }) => {
   const [activeTab, setActiveTab] = useState<TabId>('stats');
   const [isSaving, setIsSaving] = useState(false);
@@ -110,39 +123,32 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
   // Type assertion for D&D 5e character data
   const data = character.data as any;
 
-  // Form state - initialize with character data
-  const [formData, setFormData] = useState<any>(() => ({
-    ...data,
-    // Ensure nested objects exist
-    stats: data.stats || {},
-    savingThrows: data.savingThrows || {},
-    skills: data.skills || {},
-    hp: data.hp || { maximum: 0, current: 0, temporary: 0 },
-    deathSaves: data.deathSaves || { successes: 0, failures: 0 },
-    spellcasting: data.spellcasting || {
-      ability: '',
-      spellSaveDC: 0,
-      spellAttackBonus: 0,
-      cantrips: [],
-      slots: {},
-      spells: [],
-    },
-    currency: data.currency || { cp: 0, sp: 0, ep: 0, gp: 0, pp: 0 },
-    inventory: data.inventory || [],
-    attacks: data.attacks || [],
-    hitDice: data.hitDice || [],
-    conditions: data.conditions || [],
-    proficienciesAndLanguages: data.proficienciesAndLanguages || [],
-    // Always use a structured object for proficiencies so the textarea fields work correctly.
-    // If legacy data stored proficiencies as an array, ignore it and start with empty strings.
-    proficiencies: (data.proficiencies && !Array.isArray(data.proficiencies))
-      ? { armor: '', weapons: '', tools: '', languages: '', ...data.proficiencies }
-      : { armor: '', weapons: '', tools: '', languages: '' },
-    featuresAndTraits: data.featuresAndTraits || [],
-    appearance: data.appearance || {},
-    personality: data.personality || {},
-    alliesAndOrganizations: data.alliesAndOrganizations || { name: '', description: '' },
-  }));
+  // Form state lives in a synchronous store: the live-sync store when one is
+  // given, otherwise a private one initialized with the character data.
+  const ownStoreRef = useRef<CharacterFormStore | null>(null);
+  if (!formStore && !ownStoreRef.current) {
+    ownStoreRef.current = createCharacterFormStore(data, { normalize: buildDnd5eFormData });
+  }
+  const store = formStore ?? ownStoreRef.current!;
+  const formData: any = useSyncExternalStore(store.subscribe, () => store.getState().form);
+
+  /**
+   * Derived values (modifiers, bonuses, defaults) are always computed from the
+   * store's current form, never from a render closure, and are not user edits.
+   * `compute` returns the new form, or null for "nothing to change".
+   * `inputsOf(path)` names what a derived path is computed from: it is saved
+   * only when the user edited one of those inputs, so recalculating on open
+   * never overwrites a value someone else set.
+   */
+  const setDerivedFormData = (compute: (prev: any) => any | null, inputsOf?: (path: string) => string[]) => {
+    store.derive(compute, inputsOf);
+  };
+
+  // Unsaved edits die with the editor (cancel, close, back to view mode).
+  useEffect(() => {
+    if (!formStore) return;
+    return () => formStore.discard();
+  }, [formStore]);
 
   // Token image state (file will be uploaded on save)
   const [tokenImageFile, setTokenImageFile] = useState<File | null>(null);
@@ -155,25 +161,27 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
   const [customColorHex, setCustomColorHex] = useState('');
   const [isCustomColor, setIsCustomColor] = useState(false);
 
-  // Load saved color preference from character metadata
+  // Load saved color preference from the form (follows live updates too)
+  const themeColor = formData.themeColor;
   useEffect(() => {
-    if (data.themeColor) {
-      const savedColor = COLOR_PRESETS.find(c => c.name === data.themeColor);
+    if (typeof themeColor === 'string' && themeColor) {
+      const savedColor = COLOR_PRESETS.find(c => c.name === themeColor);
       if (savedColor) {
         setSelectedColor(savedColor);
         setIsCustomColor(false);
-      } else if (data.themeColor.startsWith('#')) {
+      } else if (themeColor.startsWith('#')) {
         // Custom hex color
-        setCustomColorHex(data.themeColor);
+        setCustomColorHex(themeColor);
         setIsCustomColor(true);
       }
     }
-  }, [data.themeColor]);
+  }, [themeColor]);
 
-  // Handle custom color change
+  // Handle custom color change (a field edit like any other)
   const handleCustomColorChange = (hex: string) => {
     setCustomColorHex(hex);
     setIsCustomColor(true);
+    updateField('themeColor', hex);
   };
 
   // Handle preset color selection
@@ -181,27 +189,32 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
     setSelectedColor(color);
     setIsCustomColor(false);
     setShowColorPicker(false);
+    updateField('themeColor', color.name);
   };
 
   // Auto-calculate modifiers when ability scores change
   useEffect(() => {
-    if (formData.stats) {
-      const updatedStats = { ...formData.stats };
+    setDerivedFormData((prev: any) => {
+      if (!prev.stats) return null;
+      const updatedStats = { ...prev.stats };
       let hasChanges = false;
 
       Object.keys(updatedStats).forEach(ability => {
-        const score = updatedStats[ability].score;
-        const newModifier = calculateModifier(score);
-        if (updatedStats[ability].modifier !== newModifier) {
-          updatedStats[ability].modifier = newModifier;
+        const current = updatedStats[ability];
+        if (!current) return;
+        const newModifier = calculateModifier(current.score);
+        if (current.modifier !== newModifier) {
+          updatedStats[ability] = { ...current, modifier: newModifier };
           hasChanges = true;
         }
       });
 
-      if (hasChanges) {
-        setFormData((prev: any) => ({ ...prev, stats: updatedStats }));
-      }
-    }
+      return hasChanges ? { ...prev, stats: updatedStats } : null;
+    }, (path) => {
+      // stats.<ability>.modifier ← stats.<ability>.score
+      const [, ability] = path.split('.');
+      return ability ? [`stats.${ability}.score`] : [];
+    });
   }, [
     formData.stats?.strength?.score,
     formData.stats?.dexterity?.score,
@@ -213,25 +226,31 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
 
   // Auto-calculate saving throws when proficiency or stats change
   useEffect(() => {
-    if (formData.stats && formData.savingThrows && formData.proficiencyBonus !== undefined) {
-      const updatedSavingThrows = { ...formData.savingThrows };
+    setDerivedFormData((prev: any) => {
+      if (!(prev.stats && prev.savingThrows && prev.proficiencyBonus !== undefined)) return null;
+      const updatedSavingThrows = { ...prev.savingThrows };
       let hasChanges = false;
 
       Object.keys(updatedSavingThrows).forEach(ability => {
-        const abilityMod = formData.stats[ability]?.modifier || 0;
-        const proficient = updatedSavingThrows[ability].proficient;
-        const newBonus = abilityMod + (proficient ? formData.proficiencyBonus : 0);
+        const current = updatedSavingThrows[ability];
+        if (!current) return;
+        const abilityMod = prev.stats[ability]?.modifier || 0;
+        const newBonus = abilityMod + (current.proficient ? prev.proficiencyBonus : 0);
 
-        if (updatedSavingThrows[ability].bonus !== newBonus) {
-          updatedSavingThrows[ability].bonus = newBonus;
+        if (current.bonus !== newBonus) {
+          updatedSavingThrows[ability] = { ...current, bonus: newBonus };
           hasChanges = true;
         }
       });
 
-      if (hasChanges) {
-        setFormData((prev: any) => ({ ...prev, savingThrows: updatedSavingThrows }));
-      }
-    }
+      return hasChanges ? { ...prev, savingThrows: updatedSavingThrows } : null;
+    }, (path) => {
+      // savingThrows.<ability>.bonus ← ability modifier, proficiency
+      const [, ability] = path.split('.');
+      return ability
+        ? [`stats.${ability}.modifier`, `savingThrows.${ability}.proficient`, 'proficiencyBonus']
+        : [];
+    });
   }, [
     formData.proficiencyBonus,
     formData.stats?.strength?.modifier,
@@ -272,8 +291,9 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
 
   // Initialize skills if they don't exist
   useEffect(() => {
-    if (formData.skills) {
-      const updatedSkills = { ...formData.skills };
+    setDerivedFormData((prev: any) => {
+      if (!prev.skills) return null;
+      const updatedSkills = { ...prev.skills };
       let needsUpdate = false;
 
       Object.keys(skillAbilities).forEach((skill) => {
@@ -283,41 +303,49 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
         }
       });
 
-      if (needsUpdate) {
-        setFormData((prev: any) => ({ ...prev, skills: updatedSkills }));
-      }
-    }
+      return needsUpdate ? { ...prev, skills: updatedSkills } : null;
+    });
   }, []); // Run once on mount
 
   // Auto-calculate skill bonuses when ability scores, proficiency, or expertise change
   useEffect(() => {
-    if (formData.stats && formData.skills && formData.proficiencyBonus !== undefined) {
-      const updatedSkills = { ...formData.skills };
+    setDerivedFormData((prev: any) => {
+      if (!(prev.stats && prev.skills && prev.proficiencyBonus !== undefined)) return null;
+      const updatedSkills = { ...prev.skills };
       let hasChanges = false;
 
       Object.keys(updatedSkills).forEach(skill => {
+        const current = updatedSkills[skill];
+        if (!current) return;
         const ability = skillAbilities[skill];
-        const abilityMod = formData.stats[ability]?.modifier || 0;
-        const proficient = updatedSkills[skill].proficient;
-        const expertise = updatedSkills[skill].expertise;
+        const abilityMod = prev.stats[ability]?.modifier || 0;
 
         let newBonus = abilityMod;
-        if (expertise) {
-          newBonus += formData.proficiencyBonus * 2; // Expertise = double proficiency
-        } else if (proficient) {
-          newBonus += formData.proficiencyBonus;
+        if (current.expertise) {
+          newBonus += prev.proficiencyBonus * 2; // Expertise = double proficiency
+        } else if (current.proficient) {
+          newBonus += prev.proficiencyBonus;
         }
 
-        if (updatedSkills[skill].bonus !== newBonus) {
-          updatedSkills[skill].bonus = newBonus;
+        if (current.bonus !== newBonus) {
+          updatedSkills[skill] = { ...current, bonus: newBonus };
           hasChanges = true;
         }
       });
 
-      if (hasChanges) {
-        setFormData((prev: any) => ({ ...prev, skills: updatedSkills }));
-      }
-    }
+      return hasChanges ? { ...prev, skills: updatedSkills } : null;
+    }, (path) => {
+      // skills.<skill>.bonus ← ability modifier, proficiency, expertise
+      const [, skill] = path.split('.');
+      return skill && skillAbilities[skill]
+        ? [
+            `stats.${skillAbilities[skill]}.modifier`,
+            `skills.${skill}.proficient`,
+            `skills.${skill}.expertise`,
+            'proficiencyBonus',
+          ]
+        : [];
+    });
   }, [
     formData.proficiencyBonus,
     formData.stats?.strength?.modifier,
@@ -385,13 +413,6 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
     return Object.keys(newErrors).length === 0;
   };
 
-  // Parse comma-separated string into array
-  const parseCommaSeparated = (value: string | string[] | undefined): string[] => {
-    if (Array.isArray(value)) return value;
-    if (!value || typeof value !== 'string') return [];
-    return value.split(',').map(i => i.trim()).filter(i => i);
-  };
-
   // Handle form submission
   const handleSubmit = async () => {
     if (!validateForm()) {
@@ -400,37 +421,6 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
 
     setIsSaving(true);
     try {
-      // Include color customization in saved data
-      const updatedData = {
-        ...formData,
-        themeColor: isCustomColor ? customColorHex : selectedColor.name,
-      };
-
-      // Parse comma-separated strings into arrays for storage
-      // Proficiencies
-      if (updatedData.proficiencies && typeof updatedData.proficiencies === 'object') {
-        const armorArray = parseCommaSeparated(updatedData.proficiencies.armor);
-        const weaponsArray = parseCommaSeparated(updatedData.proficiencies.weapons);
-        const toolsArray = parseCommaSeparated(updatedData.proficiencies.tools);
-        const languagesArray = parseCommaSeparated(updatedData.proficiencies.languages);
-
-        // Flatten to backwards-compatible array
-        updatedData.proficienciesAndLanguages = [
-          ...armorArray,
-          ...weaponsArray,
-          ...toolsArray,
-          ...languagesArray,
-        ];
-      }
-
-      // Features & Traits
-      updatedData.featuresAndTraits = parseCommaSeparated(updatedData.featuresAndTraits);
-
-      // Cantrips
-      if (updatedData.spellcasting) {
-        updatedData.spellcasting.cantrips = parseCommaSeparated(updatedData.spellcasting.cantrips);
-      }
-
       // Upload token image if a new one was selected
       let newTokenImageUrl: string | undefined = undefined;
       if (tokenImageFile) {
@@ -459,8 +449,13 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
         }
       }
 
+      // Store the form as saved: parsed lists, theme colour (not user edits;
+      // applied to the current form, so nothing typed meanwhile is lost)
+      const defaultThemeColor = isCustomColor ? customColorHex : selectedColor.name;
+      store.derive((form) => prepareDnd5eFormForSave(form, defaultThemeColor), saveFormInputsOf);
+
       // Pass the tokenImageUrl as a separate parameter if it was uploaded
-      await onSave(updatedData, true, newTokenImageUrl);
+      await onSave(store.getState().form, true, newTokenImageUrl);
     } catch (error) {
       console.error('Error saving character:', error);
       setErrors({ ...errors, submit: 'Failed to save character. Please try again.' });
@@ -469,26 +464,21 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
     }
   };
 
-  // Update form field
+  // Update form field. `formData` is the form the user saw when acting: if a
+  // remote change landed on this field since, the remote value stays and the
+  // user's value is listed in the reset panel (never dropped silently).
   const updateField = (path: string, value: any) => {
-    setFormData((prev: any) => {
-      const newData = { ...prev };
-      const keys = path.split('.');
-      let current = newData;
-      for (let i = 0; i < keys.length - 1; i++) {
-        // CRITICAL: Preserve array types when cloning nested structures
-        if (Array.isArray(current[keys[i]])) {
-          current[keys[i]] = [...current[keys[i]]];
-        } else if (typeof current[keys[i]] === 'object' && current[keys[i]] !== null) {
-          current[keys[i]] = { ...current[keys[i]] };
-        } else {
-          current[keys[i]] = {};
-        }
-        current = current[keys[i]];
-      }
-      current[keys[keys.length - 1]] = value;
-      return newData;
-    });
+    store.editIn(formData, path, value);
+  };
+
+  // Append to an array field (keeps items someone else added meanwhile)
+  const appendToArray = (path: string, item: any) => {
+    store.editWith(path, (current: any) => [...(Array.isArray(current) ? current : []), item]);
+  };
+
+  // Remove the item the user saw at `index` (by identity, not position)
+  const removeArrayItem = (path: string, index: number) => {
+    store.removeFromArray(path, getFormValue(formData, path), index);
   };
 
   // Render character header with token upload and color picker
@@ -521,7 +511,8 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
           </button>
           <button
             onClick={onCancel}
-            className="px-4 py-2 bg-red-600/80 hover:bg-red-600 text-white rounded-lg transition-colors flex items-center space-x-2 font-medium shadow-lg"
+            disabled={isSaving}
+            className="px-4 py-2 bg-red-600/80 hover:bg-red-600 text-white rounded-lg transition-colors flex items-center space-x-2 font-medium shadow-lg disabled:opacity-50"
           >
             <X className="w-4 h-4" />
             <span>Cancel</span>
@@ -1042,11 +1033,7 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
           <h3 className="text-lg font-semibold text-stone-800">Hit Dice</h3>
           <button
             onClick={() => {
-              const newHitDice = [
-                ...(formData.hitDice || []),
-                { class: '', total: '1d6', remaining: 1 },
-              ];
-              updateField('hitDice', newHitDice);
+              appendToArray('hitDice', { class: '', total: '1d6', remaining: 1 });
             }}
             className="px-3 py-1 text-sm font-medium text-white bg-red-700 hover:bg-red-800 rounded-lg transition-colors"
           >
@@ -1080,8 +1067,7 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
               />
               <button
                 onClick={() => {
-                  const newHitDice = formData.hitDice.filter((_: any, i: number) => i !== index);
-                  updateField('hitDice', newHitDice);
+                  removeArrayItem('hitDice', index);
                 }}
                 className="px-2 py-1 text-red-600 hover:text-red-800 font-bold"
               >
@@ -1152,12 +1138,13 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
                 type="checkbox"
                 checked={(formData.conditions || []).includes(condition.toLowerCase())}
                 onChange={(e) => {
-                  const currentConditions = formData.conditions || [];
-                  if (e.target.checked) {
-                    updateField('conditions', [...currentConditions, condition.toLowerCase()]);
-                  } else {
-                    updateField('conditions', currentConditions.filter((c: string) => c !== condition.toLowerCase()));
-                  }
+                  const value = condition.toLowerCase();
+                  const checked = e.target.checked;
+                  store.editWith('conditions', (current: any) => {
+                    const list: string[] = Array.isArray(current) ? current : [];
+                    if (checked) return list.includes(value) ? list : [...list, value];
+                    return list.filter((c: string) => c !== value);
+                  });
                 }}
                 className="w-4 h-4 text-red-700 border-stone-300 rounded focus:ring-2 focus:ring-red-500"
               />
@@ -1173,11 +1160,7 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
           <h3 className="text-lg font-semibold text-stone-800">Attacks & Spellcasting</h3>
           <button
             onClick={() => {
-              const newAttacks = [
-                ...(formData.attacks || []),
-                { name: '', attackBonus: 0, damageRoll: '', damageType: '', range: 0, properties: [], notes: '' },
-              ];
-              updateField('attacks', newAttacks);
+              appendToArray('attacks', { name: '', attackBonus: 0, damageRoll: '', damageType: '', range: 0, properties: [], notes: '' });
             }}
             className="px-3 py-1 text-sm font-medium text-white bg-red-700 hover:bg-red-800 rounded-lg transition-colors"
           >
@@ -1197,8 +1180,7 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
                 />
                 <button
                   onClick={() => {
-                    const newAttacks = formData.attacks.filter((_: any, i: number) => i !== index);
-                    updateField('attacks', newAttacks);
+                    removeArrayItem('attacks', index);
                   }}
                   className="ml-2 px-2 py-1 text-red-600 hover:text-red-800 font-bold"
                 >
@@ -1359,11 +1341,7 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
           <h3 className="text-lg font-semibold text-stone-800">Spells</h3>
           <button
             onClick={() => {
-              const newSpells = [
-                ...(formData.spellcasting?.spells || []),
-                { level: 1, name: '', prepared: false, ritual: false, concentration: false },
-              ];
-              updateField('spellcasting.spells', newSpells);
+              appendToArray('spellcasting.spells', { level: 1, name: '', prepared: false, ritual: false, concentration: false });
             }}
             className="px-3 py-1 text-sm font-medium text-white bg-red-700 hover:bg-red-800 rounded-lg transition-colors"
           >
@@ -1418,8 +1396,7 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
               </label>
               <button
                 onClick={() => {
-                  const newSpells = formData.spellcasting.spells.filter((_: any, i: number) => i !== index);
-                  updateField('spellcasting.spells', newSpells);
+                  removeArrayItem('spellcasting.spells', index);
                 }}
                 className="px-2 py-1 text-red-600 hover:text-red-800 font-bold"
               >
@@ -1471,21 +1448,17 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
           <h3 className="text-lg font-semibold text-stone-800">Inventory</h3>
           <button
             onClick={() => {
-              const newInventory = [
-                ...(formData.inventory || []),
-                {
-                  name: '',
-                  quantity: 1,
-                  weight: 0,
-                  notes: '',
-                  equippable: false,
-                  equipped: false,
-                  requiresAttunement: false,
-                  attuned: false,
-                  value: 0,
-                },
-              ];
-              updateField('inventory', newInventory);
+              appendToArray('inventory', {
+                name: '',
+                quantity: 1,
+                weight: 0,
+                notes: '',
+                equippable: false,
+                equipped: false,
+                requiresAttunement: false,
+                attuned: false,
+                value: 0,
+              });
             }}
             className="px-3 py-1 text-sm font-medium text-white bg-red-700 hover:bg-red-800 rounded-lg transition-colors"
           >
@@ -1505,8 +1478,7 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
                 />
                 <button
                   onClick={() => {
-                    const newInventory = formData.inventory.filter((_: any, i: number) => i !== index);
-                    updateField('inventory', newInventory);
+                    removeArrayItem('inventory', index);
                   }}
                   className="ml-2 px-2 py-1 text-red-600 hover:text-red-800 font-bold"
                 >
@@ -1888,16 +1860,20 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
 
   return (
     <div className="bg-white border-2 border-stone-200 rounded-lg overflow-hidden shadow-lg">
-      {renderHeader()}
-      {renderTabs()}
-      <div className="p-6">
-        {activeTab === 'stats' && renderStatsTab()}
-        {activeTab === 'combat' && renderCombatTab()}
-        {activeTab === 'spells' && renderSpellsTab()}
-        {activeTab === 'inventory' && renderInventoryTab()}
-        {activeTab === 'features' && renderFeaturesTab()}
-        {activeTab === 'bio' && renderBiographyTab()}
-      </div>
+      {/* While saving, the form is read-only: nothing typed can be lost when
+          the sheet closes or flips to view after the save. */}
+      <fieldset disabled={isSaving} className="m-0 min-w-0 border-0 p-0">
+        {renderHeader()}
+        {renderTabs()}
+        <div className="p-6">
+          {activeTab === 'stats' && renderStatsTab()}
+          {activeTab === 'combat' && renderCombatTab()}
+          {activeTab === 'spells' && renderSpellsTab()}
+          {activeTab === 'inventory' && renderInventoryTab()}
+          {activeTab === 'features' && renderFeaturesTab()}
+          {activeTab === 'bio' && renderBiographyTab()}
+        </div>
+      </fieldset>
       {errors.submit && (
         <div className="px-6 pb-4 text-sm text-red-600">{errors.submit}</div>
       )}

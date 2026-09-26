@@ -14,7 +14,11 @@ import characterService from '@/services/character.service';
 import campaignService from '@/services/campaign.service';
 import { canEditCharacter } from '@/services/permissions';
 import { CharacterSheetRouter } from '@/components/character-sheets/CharacterSheetRouter';
-import type { Character, Campaign } from '@/types';
+import SheetResetPanel from '@/components/character/SheetResetPanel';
+import { useLiveCharacterSync } from '@/hooks/useLiveCharacterSync';
+import { buildDnd5eFormData } from '@/components/character-sheets/dnd5e/dnd5eFormData';
+import socketClient from '@/services/socket';
+import { GameSystem, type Character, type Campaign } from '@/types';
 import Button from '@/components/ui/Button';
 
 export default function CharacterEditorPage() {
@@ -37,6 +41,20 @@ export default function CharacterEditorPage() {
   // Auto-save timer ref
   const autoSaveTimerRef = useRef<number | null>(null);
   const pendingDataRef = useRef<any>(null);
+
+  // Live sync (D&D 5e only): remote changes flow into the open editor, saves
+  // send only the changed fields. This page is outside the campaign's
+  // WebSocketProvider, so it uses the shared socket client directly — events
+  // arrive only while that client is connected to the character's campaign.
+  const isDnd5e = character?.gameSystem === GameSystem.DND_5E;
+  const liveSync = useLiveCharacterSync({
+    character,
+    socket: socketClient,
+    isDnd5e,
+    onServerCharacter: setCharacter,
+    normalizeForm: buildDnd5eFormData,
+  });
+  const unsavedChanges = isDnd5e ? liveSync.isDirty : hasUnsavedChanges;
 
   // ============================================
   // Fetch Character & Check Permissions
@@ -126,6 +144,28 @@ export default function CharacterEditorPage() {
       try {
         setSaving(true);
 
+        if (isDnd5e) {
+          // Field-level PATCH of the live form (the store's atomic snapshot,
+          // not `data`); conflicts land in the panel
+          const outcome = await liveSync.save();
+
+          // The token image is not part of `data` — persist it separately
+          if (tokenImageUrl !== undefined) {
+            const updated = await characterService.updateCharacter(character.id, { tokenImageUrl });
+            setCharacter(updated);
+          }
+
+          setLastSaved(new Date());
+          pendingDataRef.current = null;
+
+          if (outcome.status === 'conflicts') {
+            showToast('Některé změny kolidovaly — viz panel', 'warning');
+          } else if (doShowToast) {
+            showToast('Character saved!', 'success');
+          }
+          return;
+        }
+
         // Update character via API
         // Use the new tokenImageUrl if provided, otherwise keep the existing one
         const updated = await characterService.updateCharacter(character.id, {
@@ -160,7 +200,7 @@ export default function CharacterEditorPage() {
         setSaving(false);
       }
     },
-    [character]
+    [character, isDnd5e, liveSync.save]
   );
 
   // ============================================
@@ -176,10 +216,13 @@ export default function CharacterEditorPage() {
       // Pass tokenImageUrl through so token images are persisted
       await handleSave(data, showToast ?? true, tokenImageUrl);
 
-      // Store for top save button reference
-      pendingDataRef.current = data;
+      // Store for top save button reference. Not for D&D 5e: live sync keeps
+      // the form current, so replaying this snapshot could PATCH old values back.
+      if (!isDnd5e) {
+        pendingDataRef.current = data;
+      }
     },
-    [handleSave]
+    [handleSave, isDnd5e]
   );
 
   // ============================================
@@ -201,7 +244,7 @@ export default function CharacterEditorPage() {
   // Warn user before closing/refreshing page
   useEffect(() => {
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
-      if (hasUnsavedChanges) {
+      if (unsavedChanges) {
         e.preventDefault();
         e.returnValue = '';
       }
@@ -209,14 +252,14 @@ export default function CharacterEditorPage() {
 
     window.addEventListener('beforeunload', handleBeforeUnload);
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-  }, [hasUnsavedChanges]);
+  }, [unsavedChanges]);
 
   // ============================================
   // Navigation Handlers
   // ============================================
 
   const handleBack = () => {
-    if (hasUnsavedChanges) {
+    if (unsavedChanges) {
       setConfirmLeave(true);
       return;
     }
@@ -232,7 +275,7 @@ export default function CharacterEditorPage() {
   // ============================================
 
   const handleManualSave = async () => {
-    if (pendingDataRef.current) {
+    if (!isDnd5e && pendingDataRef.current) {
       await handleSave(pendingDataRef.current, true);
     }
   };
@@ -325,7 +368,7 @@ export default function CharacterEditorPage() {
 
           <div className="flex items-center gap-3">
             {/* Save Status */}
-            {hasUnsavedChanges && (
+            {unsavedChanges && (
               <span className="text-sm text-sunset-orange">Unsaved changes</span>
             )}
             {saving && (
@@ -334,21 +377,23 @@ export default function CharacterEditorPage() {
                 Saving...
               </span>
             )}
-            {lastSaved && !hasUnsavedChanges && (
+            {lastSaved && !unsavedChanges && (
               <span className="text-sm text-stone-gray">
                 Saved {lastSaved.toLocaleTimeString()}
               </span>
             )}
 
-            {/* Manual Save Button */}
-            <Button
-              onClick={handleManualSave}
-              disabled={!hasUnsavedChanges || saving}
-              className="flex items-center gap-2"
-            >
-              <Save className="w-4 h-4" />
-              Save
-            </Button>
+            {/* Manual Save Button (D&D 5e saves from the sheet itself) */}
+            {!isDnd5e && (
+              <Button
+                onClick={handleManualSave}
+                disabled={!hasUnsavedChanges || saving}
+                className="flex items-center gap-2"
+              >
+                <Save className="w-4 h-4" />
+                Save
+              </Button>
+            )}
 
             {/* Export Button */}
             <Button
@@ -365,11 +410,19 @@ export default function CharacterEditorPage() {
 
       {/* Character Sheet Editor */}
       <div className="p-4">
+        {isDnd5e && (
+          <SheetResetPanel resets={liveSync.resets} onDismiss={liveSync.dismissResets} />
+        )}
         <CharacterSheetRouter
           character={character}
           mode="edit"
           onSave={handleSheetSave}
           onCancel={handleCancel}
+          {...(isDnd5e
+            ? {
+                formStore: liveSync.formStore,
+              }
+            : {})}
         />
       </div>
     </div>

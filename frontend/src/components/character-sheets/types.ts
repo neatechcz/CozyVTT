@@ -27,4 +27,10 @@ export interface CharacterSheetProps {
 
   /** Callback when edit mode is cancelled */
   onCancel?: () => void;
+
+  /**
+   * Live sync (D&D 5e editor only; other systems ignore it): the form store
+   * owned by `useLiveCharacterSync` that the editor reads and edits.
+   */
+  formStore?: import('../../utils/characterFormStore').CharacterFormStore | null;
 }
