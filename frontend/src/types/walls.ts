@@ -51,6 +51,14 @@ export interface WallUpdatedEvent extends WallEventOrigin {
 export interface WallsReplacedEvent extends WallEventOrigin {
   mapId: string;
   segments: WallSegment[];
+  /**
+   * True only on the `walls:request` reply: an authoritative resync (e.g.
+   * after this client reconnects and may have missed broadcasts while
+   * offline), not a live change. Carries no `changedBy`/`sourceSocketId` —
+   * unlike an origin-less *live* broadcast (an older backend), a DM must
+   * still apply this instead of skipping it as "probably my own edit".
+   */
+  sync?: boolean;
 }
 
 // ── Fog of War ────────────────────────────────────────────────────────────────
