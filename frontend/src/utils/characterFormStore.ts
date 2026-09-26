@@ -10,13 +10,19 @@
 //   value at `path` is no longer what the user saw when acting (a remote
 //   change landed in between), the remote value stays and the user's value is
 //   reported as a reset; nothing is dropped silently.
-// - `applyRemote` three-way merges a server update into the form; fields the
-//   user edited and someone else changed are reset and reported.
-// - `snapshotForSave` / `adoptSaved` bracket a save; edits made while the
-//   request is in flight survive, and `base` never moves backwards.
+// - Only OWNED paths are ever the user's: paths the user edited (`touched`)
+//   and derived values whose inputs the user edited (`derived`). Server
+//   updates replace everything else, and a save sends only owned paths — a
+//   derived value recalculated on mount never overwrites someone's change.
+// - `applyRemote` three-way merges a server update into the owned paths;
+//   fields the user edited and someone else changed are reset and reported.
+// - `snapshotForSave` / `adoptSaved` bracket a save. While it is in flight,
+//   a server value equal to what we sent is our own write (e.g. the echo that
+//   arrives before the response), never someone else's change. `base` never
+//   moves backwards.
 // ============================================
 
-import { deepEqual, diffPaths, getAtPath, pathsOverlap } from './character-paths';
+import { deepEqual, diffPaths, getAtPath, pathsOverlap, setAtPath } from './character-paths';
 import { cloneData, mergeRemoteUpdate, type CharacterDataObject, type ResetField } from './characterMerge';
 
 export interface SheetResetAuthor {
@@ -43,12 +49,24 @@ export interface CharacterFormState {
   baseUpdatedAt?: string;
   /** What the user sees and edits */
   form: CharacterDataObject;
-  /** Paths the user edited that still differ from `base` */
+  /** Paths the user edited that still differ from `base` (or from an in-flight save) */
   touched: ReadonlySet<string>;
+  /** Derived paths whose derivation inputs the user edited (saved with the edit) */
+  derived: ReadonlySet<string>;
   /** User values that lost to someone else's change, until dismissed */
   resets: SheetReset[];
   /** Bumped by every server state adopted (remote, save, discard) */
   version: number;
+}
+
+export interface SaveSnapshot {
+  /** Server state the save is based on */
+  base: CharacterDataObject;
+  /** The whole form at that instant */
+  form: CharacterDataObject;
+  /** What the server should hold after the save: `base` + the owned paths of `form` */
+  sent: CharacterDataObject;
+  baseUpdatedAt?: string;
 }
 
 export interface CharacterFormStore {
@@ -74,14 +92,27 @@ export interface CharacterFormStore {
    * rendered any more, the removal loses and is reported.
    */
   removeFromArray(path: string, renderedArray: unknown, index: number): boolean;
-  /** Derived values (modifiers, defaults): computed from the current form, never touched */
-  derive(compute: (form: CharacterDataObject) => CharacterDataObject | null | undefined): void;
+  /**
+   * Derived values (modifiers, defaults): computed from the current form,
+   * never user edits. A changed path is saved only if `inputsOf(path)` names
+   * an input the user edited (or a derived value that is saved); otherwise
+   * it is display-only and the server value wins.
+   */
+  derive(
+    compute: (form: CharacterDataObject) => CharacterDataObject | null | undefined,
+    inputsOf?: (path: string) => string[],
+  ): void;
   /** A newer server state from someone else. Returns false if it was older than `base`. */
   applyRemote(serverData: CharacterDataObject, author: SheetResetAuthor, updatedAt?: string): boolean;
-  /** Atomic copy of what a save sends */
-  snapshotForSave(): { base: CharacterDataObject; form: CharacterDataObject; baseUpdatedAt?: string };
-  /** The server's answer to our save of `sentForm`; rebases edits typed meanwhile */
-  adoptSaved(serverData: CharacterDataObject, updatedAt: string | undefined, sentForm: CharacterDataObject): void;
+  /** Atomic snapshot of what a save sends; marks the save as in flight */
+  snapshotForSave(): SaveSnapshot;
+  /**
+   * The server's answer to the in-flight save; rebases edits typed meanwhile.
+   * Returns false (and keeps `base`) when the answer is older than `base`.
+   */
+  adoptSaved(serverData: CharacterDataObject, updatedAt: string | undefined): boolean;
+  /** The in-flight save ended without `adoptSaved` (conflicts, error, nothing to send) */
+  endSave(): void;
   /** Forget the user's unsaved edits (cancel, close); resets are kept */
   discard(): void;
   dismissResets(): void;
@@ -165,20 +196,34 @@ export function editPathFor(view: unknown, path: string): string {
   return path;
 }
 
-/** Keep only touched paths whose form value still differs from `base`. */
-function pruneTouched(touched: ReadonlySet<string>, base: CharacterDataObject, form: CharacterDataObject) {
-  const next = new Set<string>();
-  for (const path of touched) {
-    if (!deepEqual(getAtPath(base, path), getAtPath(form, path))) next.add(path);
-  }
-  return next;
-}
-
-function isTouched(touched: ReadonlySet<string>, path: string): boolean {
+function isTouched(touched: Iterable<string>, path: string): boolean {
   for (const touchedPath of touched) {
     if (pathsOverlap(touchedPath, path)) return true;
   }
   return false;
+}
+
+/** `path` of `value` written into `target` (`""` = the whole document). */
+function writePath(target: CharacterDataObject, path: string, value: unknown): CharacterDataObject {
+  return path === '' ? (cloneData(value) as CharacterDataObject) : setAtPath(target, path, cloneData(value));
+}
+
+/**
+ * `from` with the form's values at the owned paths only: the user's side of
+ * a merge. Everything the user does not own takes `from`'s value.
+ */
+function ownedView(from: CharacterDataObject, form: CharacterDataObject, owned: Iterable<string>): CharacterDataObject {
+  const ownedPaths = [...owned];
+  let out = cloneData(from);
+  for (const path of diffPaths(from, form)) {
+    if (isTouched(ownedPaths, path)) out = writePath(out, path, getAtPath(form, path));
+  }
+  return out;
+}
+
+interface InFlightSave {
+  base: CharacterDataObject;
+  sent: CharacterDataObject;
 }
 
 export function createCharacterFormStore(
@@ -193,22 +238,46 @@ export function createCharacterFormStore(
     baseUpdatedAt: options.updatedAt,
     form: normalize(cloneData(initialBase)),
     touched: new Set(),
+    derived: new Set(),
     resets: [],
     version: 0,
   };
   const listeners = new Set<() => void>();
   /** Who last changed each server path (most recent last) — authors of CAS losses */
   const authors = new Map<string, SheetResetAuthor>();
+  /** The save whose answer has not been adopted yet */
+  let inFlight: InFlightSave | null = null;
 
   const commit = (next: CharacterFormState) => {
     state = next;
     listeners.forEach((listener) => listener());
   };
 
-  const rememberAuthors = (from: CharacterDataObject, to: CharacterDataObject, author: SheetResetAuthor) => {
+  /**
+   * Keep a path while the form differs from `base` there — or from what an
+   * in-flight save sent (the user retyped the old value during the save).
+   */
+  const prune = (paths: ReadonlySet<string>, base: CharacterDataObject, form: CharacterDataObject) => {
+    const next = new Set<string>();
+    for (const path of paths) {
+      const value = getAtPath(form, path);
+      if (!deepEqual(getAtPath(base, path), value) || (inFlight && !deepEqual(getAtPath(inFlight.sent, path), value))) {
+        next.add(path);
+      }
+    }
+    return next;
+  };
+
+  const owned = () => [...state.touched, ...state.derived];
+
+  const rememberAuthors = (
+    from: CharacterDataObject,
+    to: CharacterDataObject,
+    authorOf: (path: string) => SheetResetAuthor,
+  ) => {
     for (const path of diffPaths(from, to)) {
       authors.delete(path);
-      authors.set(path, author);
+      authors.set(path, authorOf(path));
     }
   };
 
@@ -245,11 +314,42 @@ export function createCharacterFormStore(
     return next;
   };
 
+  /**
+   * Move to a new server state: `from` is the state the owned form values
+   * are relative to. Untouched paths take the server value; owned paths keep
+   * the user's value unless the server changed them too (then the server
+   * wins and a touched path is reported).
+   */
+  const rebase = (
+    from: CharacterDataObject,
+    server: CharacterDataObject,
+    updatedAt: string | undefined,
+    authorOf: (path: string) => SheetResetAuthor,
+  ) => {
+    const { data, resetFields } = mergeRemoteUpdate(from, ownedView(from, state.form, owned()), server);
+    const form = normalize(data);
+    const version = state.version + 1;
+    commit({
+      base: server,
+      baseUpdatedAt: updatedAt ?? state.baseUpdatedAt,
+      form,
+      touched: prune(state.touched, server, form),
+      derived: prune(state.derived, server, form),
+      resets: withResets(
+        state.resets,
+        resetFields.filter((reset) => isTouched(state.touched, reset.path)),
+        version,
+        authorOf,
+      ),
+      version,
+    });
+  };
+
   const setUserValue = (path: string, nextValue: unknown) => {
     const form = path === '' ? cloneData(nextValue as CharacterDataObject) : setFormValue(state.form, path, cloneData(nextValue));
     const touched = new Set(state.touched);
     touched.add(path);
-    commit({ ...state, form, touched: pruneTouched(touched, state.base, form) });
+    commit({ ...state, form, touched: prune(touched, state.base, form) });
   };
 
   const edit: CharacterFormStore['edit'] = (path, preEditValue, nextValue) => {
@@ -266,6 +366,16 @@ export function createCharacterFormStore(
     }
     if (!deepEqual(current, nextValue)) setUserValue(path, nextValue);
     return true;
+  };
+
+  const endSave = () => {
+    if (!inFlight) return;
+    inFlight = null;
+    const touched = prune(state.touched, state.base, state.form);
+    const derived = prune(state.derived, state.base, state.form);
+    if (touched.size !== state.touched.size || derived.size !== state.derived.size) {
+      commit({ ...state, touched, derived });
+    }
   };
 
   const store: CharacterFormStore = {
@@ -309,78 +419,82 @@ export function createCharacterFormStore(
       return edit(path, rendered, rendered.filter((_, i) => i !== index));
     },
 
-    derive(compute) {
+    derive(compute, inputsOf) {
       const next = compute(state.form);
       if (!next || next === state.form || deepEqual(next, state.form)) return;
-      commit({ ...state, form: next, touched: pruneTouched(state.touched, state.base, next) });
+      const derived = new Set(state.derived);
+      const ownedNow = owned();
+      for (const path of diffPaths(state.form, next)) {
+        if (isTouched(state.touched, path)) continue; // the user's own field stays theirs
+        const inputs = inputsOf?.(path) ?? [];
+        if (inputs.some((input) => isTouched(ownedNow, input))) derived.add(path);
+        else derived.delete(path);
+      }
+      commit({
+        ...state,
+        form: next,
+        touched: prune(state.touched, state.base, next),
+        derived: prune(derived, state.base, next),
+      });
     },
 
     applyRemote(serverData, author, updatedAt) {
       if (isOlder(updatedAt, state.baseUpdatedAt)) return false;
       const server = cloneData(serverData ?? {});
       if (deepEqual(server, state.base)) {
-        // Our own save echoed back, or a change outside `data`.
+        // Our own save echoed back after its answer, or a change outside `data`.
         state = { ...state, baseUpdatedAt: updatedAt ?? state.baseUpdatedAt };
         return true;
       }
-      rememberAuthors(state.base, server, author);
-      const { data, resetFields } = mergeRemoteUpdate(state.base, state.form, server);
-      const form = normalize(data);
-      const version = state.version + 1;
-      commit({
-        base: server,
-        baseUpdatedAt: updatedAt ?? state.baseUpdatedAt,
-        form,
-        touched: pruneTouched(state.touched, server, form),
-        resets: withResets(
-          state.resets,
-          resetFields.filter((reset) => isTouched(state.touched, reset.path)),
-          version,
-          () => author,
-        ),
-        version,
-      });
+      // While a save is in flight, a server value equal to what we sent is
+      // our own write (its echo may come before the answer): relative to it,
+      // the user's value is still a local edit, not a conflict.
+      let from = state.base;
+      if (inFlight) {
+        for (const path of diffPaths(inFlight.base, inFlight.sent)) {
+          const sent = getAtPath(inFlight.sent, path);
+          if (deepEqual(getAtPath(server, path), sent)) from = writePath(from, path, sent);
+        }
+      }
+      rememberAuthors(from, server, () => author);
+      rebase(from, server, updatedAt, () => author);
       return true;
     },
 
     snapshotForSave() {
-      return { base: cloneData(state.base), form: cloneData(state.form), baseUpdatedAt: state.baseUpdatedAt };
+      const sent = ownedView(state.base, state.form, owned());
+      inFlight = { base: cloneData(state.base), sent: cloneData(sent) };
+      return { base: cloneData(state.base), form: cloneData(state.form), sent, baseUpdatedAt: state.baseUpdatedAt };
     },
 
-    adoptSaved(serverData, updatedAt, sentForm) {
+    adoptSaved(serverData, updatedAt) {
+      const flight = inFlight;
       if (isOlder(updatedAt, state.baseUpdatedAt)) {
         // A newer server state (written after our save, so it contains it)
         // was adopted while the request was in flight — keep that base.
-        const touched = pruneTouched(state.touched, state.base, state.form);
-        if (touched.size !== state.touched.size) commit({ ...state, touched });
-        return;
+        endSave();
+        return false;
       }
+      inFlight = null;
+      const sent = flight?.sent ?? state.base;
+      const sentPaths = flight ? diffPaths(flight.base, flight.sent) : [];
+      // The server changing a value we sent is normalisation of our own
+      // write; anything else it answers with is someone else's change.
+      const authorOf = (path: string) => (isTouched(sentPaths, path) ? SERVER_AUTHOR : UNKNOWN_AUTHOR);
       const server = cloneData(serverData ?? {});
-      rememberAuthors(sentForm, server, SERVER_AUTHOR);
-      // Rebase edits typed while the request was in flight onto the answer.
-      const { data, resetFields } = mergeRemoteUpdate(sentForm, state.form, server);
-      const form = normalize(data);
-      const version = state.version + 1;
-      commit({
-        base: server,
-        baseUpdatedAt: updatedAt ?? state.baseUpdatedAt,
-        form,
-        touched: pruneTouched(state.touched, server, form),
-        resets: withResets(
-          state.resets,
-          resetFields.filter((reset) => isTouched(state.touched, reset.path)),
-          version,
-          () => SERVER_AUTHOR,
-        ),
-        version,
-      });
+      rememberAuthors(sent, server, authorOf);
+      rebase(sent, server, updatedAt, authorOf);
+      return true;
     },
+
+    endSave,
 
     discard() {
       commit({
         ...state,
         form: normalize(cloneData(state.base)),
         touched: new Set(),
+        derived: new Set(),
         version: state.version + 1,
       });
     },

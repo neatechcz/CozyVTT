@@ -1,4 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
+import { diffPaths, getAtPath } from '../character-paths';
 import {
   createCharacterFormStore,
   editPathFor,
@@ -282,9 +283,9 @@ describe('createCharacterFormStore', () => {
     it('adoptSaved moves base to the answer and keeps edits typed during the save', () => {
       const { store, form } = setup();
       store.edit('experiencePoints', 100, 175);
-      const snap = store.snapshotForSave();
+      store.snapshotForSave();
       store.edit('characterName', 'Tomin', 'Typing…');
-      store.adoptSaved({ ...server(), experiencePoints: 175 }, T1, snap.form);
+      store.adoptSaved({ ...server(), experiencePoints: 175 }, T1);
       expect(store.getState().base.experiencePoints).toBe(175);
       expect(form().characterName).toBe('Typing…');
       expect([...store.getState().touched]).toEqual(['characterName']);
@@ -293,9 +294,9 @@ describe('createCharacterFormStore', () => {
     it('adoptSaved: a server-normalized field the user edited during the save is reported as "server"', () => {
       const { store, form } = setup();
       store.edit('experiencePoints', 100, 175);
-      const snap = store.snapshotForSave();
+      store.snapshotForSave();
       store.edit('experiencePoints', 175, 180);
-      store.adoptSaved({ ...server(), experiencePoints: 170 }, T1, snap.form);
+      store.adoptSaved({ ...server(), experiencePoints: 170 }, T1);
       expect(form().experiencePoints).toBe(170);
       expect(store.getState().resets).toEqual([
         expect.objectContaining({ path: 'experiencePoints', mine: 180, theirs: 170, author: SERVER_AUTHOR }),
@@ -305,10 +306,10 @@ describe('createCharacterFormStore', () => {
     it('adoptSaved never moves base backwards past a newer adopted broadcast', () => {
       const { store, form } = setup();
       store.edit('experiencePoints', 100, 175);
-      const snap = store.snapshotForSave();
+      store.snapshotForSave();
       const newer = { ...server(), experiencePoints: 175, conditions: ['prone'] };
       store.applyRemote(newer, gm, T2);
-      store.adoptSaved({ ...server(), experiencePoints: 175 }, T1, snap.form);
+      expect(store.adoptSaved({ ...server(), experiencePoints: 175 }, T1)).toBe(false);
       expect(store.getState().base).toEqual(newer);
       expect(store.getState().baseUpdatedAt).toBe(T2);
       expect(form().conditions).toEqual(['prone']);
@@ -334,5 +335,147 @@ describe('createCharacterFormStore', () => {
     unsubscribe();
     store.edit('experiencePoints', 100, 1);
     expect(listener).not.toHaveBeenCalled();
+  });
+});
+
+describe('round 5: owned paths, in-flight saves', () => {
+  const changesOf = (store: ReturnType<typeof createCharacterFormStore>) => {
+    const snap = store.snapshotForSave();
+    store.endSave();
+    return diffPaths(snap.base, snap.sent).map((path) => ({
+      path,
+      base: getAtPath(snap.base, path),
+      value: getAtPath(snap.sent, path),
+    }));
+  };
+
+  it('cancel (discard) during an in-flight save: the answer is adopted as is, the next save sends nothing for it', () => {
+    const normalize = (d: any) => ({ ...d, extra: true });
+    const { store, form } = setup({ updatedAt: T0, normalize });
+    store.edit('experiencePoints', 100, 120);
+    store.snapshotForSave();
+    store.discard();
+    store.adoptSaved({ ...server(), experiencePoints: 120 }, T1);
+    expect(form()).toEqual(normalize({ ...server(), experiencePoints: 120 }));
+    store.applyRemote({ ...server(), experiencePoints: 120 }, gm, T1); // late echo
+    store.edit('characterName', 'Tomin', 'Tomin the Bold');
+    expect(changesOf(store)).toEqual([{ path: 'characterName', base: 'Tomin', value: 'Tomin the Bold' }]);
+  });
+
+  it('the echo of the own save before its answer, while the user retypes that field: no reset, the typed value stays', () => {
+    const { store, form } = setup();
+    store.edit('experiencePoints', 100, 120);
+    store.snapshotForSave();
+    store.edit('experiencePoints', 120, 130); // typing during the save
+    store.applyRemote({ ...server(), experiencePoints: 120 }, gm, T1); // echo first
+    expect(form().experiencePoints).toBe(130);
+    expect(store.getState().resets).toEqual([]);
+    store.adoptSaved({ ...server(), experiencePoints: 120 }, T1);
+    expect(form().experiencePoints).toBe(130);
+    expect(store.getState().resets).toEqual([]);
+    expect(changesOf(store)).toEqual([{ path: 'experiencePoints', base: 120, value: 130 }]);
+  });
+
+  it('the echo before the answer without retyping: clean afterwards', () => {
+    const { store, form } = setup();
+    store.edit('experiencePoints', 100, 120);
+    store.snapshotForSave();
+    store.applyRemote({ ...server(), experiencePoints: 120 }, gm, T1);
+    store.adoptSaved({ ...server(), experiencePoints: 120 }, T1);
+    expect(form().experiencePoints).toBe(120);
+    expect(store.getState().touched.size).toBe(0);
+    expect(store.getState().resets).toEqual([]);
+  });
+
+  it('retyping the pre-save value during the save is still a user edit after the echo', () => {
+    const { store, form } = setup();
+    store.edit('experiencePoints', 100, 120);
+    store.snapshotForSave();
+    store.edit('experiencePoints', 120, 100);
+    store.applyRemote({ ...server(), experiencePoints: 120 }, gm, T1);
+    store.adoptSaved({ ...server(), experiencePoints: 120 }, T1);
+    expect(form().experiencePoints).toBe(100);
+    expect(changesOf(store)).toEqual([{ path: 'experiencePoints', base: 120, value: 100 }]);
+  });
+
+  it('conflict re-fetch during the save: applied fields are our own write, the conflicting one resets', () => {
+    const { store, form } = setup();
+    store.edit('experiencePoints', 100, 120);
+    store.edit('hp.current', 8, 5);
+    store.snapshotForSave();
+    store.edit('experiencePoints', 120, 125);
+    // experiencePoints applied, hp.current conflicted (someone set 2)
+    store.applyRemote(
+      { ...server(), experiencePoints: 120, hp: { current: 2, maximum: 10, temporary: 0 } },
+      UNKNOWN_AUTHOR,
+      T1,
+    );
+    store.endSave();
+    expect(form().experiencePoints).toBe(125);
+    expect(form().hp.current).toBe(2);
+    expect(store.getState().resets).toEqual([
+      expect.objectContaining({ path: 'hp.current', mine: 5, theirs: 2, author: UNKNOWN_AUTHOR }),
+    ]);
+  });
+
+  it('adoptSaved credits a change to a field the user did not send to someone else, not "server"', () => {
+    const { store } = setup();
+    store.edit('experiencePoints', 100, 120);
+    store.snapshotForSave();
+    store.edit('characterName', 'Tomin', 'Typed'); // typed during the save, not sent
+    store.adoptSaved({ ...server(), experiencePoints: 120, characterName: 'Other' }, T1);
+    expect(store.getState().resets).toEqual([
+      expect.objectContaining({ path: 'characterName', mine: 'Typed', theirs: 'Other', author: UNKNOWN_AUTHOR }),
+    ]);
+  });
+
+  it('derived values are saved only when their inputs were edited (recalculation on open is display-only)', () => {
+    const { store, form } = setup();
+    const inputsOf = (path: string) => (path === 'stats.strength.modifier' ? ['stats.strength.score'] : []);
+    store.derive((f: any) => ({ ...f, stats: { strength: { score: 15, modifier: 9 } } }), inputsOf);
+    expect(changesOf(store)).toEqual([]);
+    store.edit('stats.strength.score', 15, 18);
+    store.derive((f: any) => ({ ...f, stats: { strength: { ...f.stats.strength, modifier: 4 } } }), inputsOf);
+    expect(store.getState().derived.has('stats.strength.modifier')).toBe(true);
+    expect(changesOf(store)).toEqual([
+      { path: 'stats.strength.score', base: 15, value: 18 },
+      { path: 'stats.strength.modifier', base: 2, value: 4 },
+    ]);
+    expect(form().stats.strength.modifier).toBe(4);
+  });
+
+  it('a display-only derived value takes the server value on the next update', () => {
+    const { store, form } = setup();
+    store.derive((f: any) => ({ ...f, stats: { strength: { score: 15, modifier: 9 } } }));
+    store.applyRemote({ ...server(), experiencePoints: 150 }, gm, T1);
+    expect(form().stats.strength.modifier).toBe(2);
+  });
+
+  it('derived values chain through derived inputs (modifier → saving throw)', () => {
+    const { store } = setup();
+    const inputsOf = (path: string) =>
+      path.startsWith('stats.') ? ['stats.strength.score'] : path.startsWith('savingThrows') ? ['stats.strength.modifier'] : [];
+    store.edit('stats.strength.score', 15, 18);
+    store.derive((f: any) => ({ ...f, stats: { strength: { score: 18, modifier: 4 } } }), inputsOf);
+    store.derive((f: any) => ({ ...f, savingThrows: { strength: { bonus: 4 } } }), inputsOf);
+    expect(changesOf(store).map((c) => c.path)).toEqual(['stats.strength.score', 'stats.strength.modifier', 'savingThrows']);
+  });
+
+  it('snapshotForSave sends only owned paths; normalisation is not sent', () => {
+    const { store } = setup({ updatedAt: T0, normalize: (d) => ({ ...d, deathSaves: { successes: 0, failures: 0 } }) });
+    store.edit('characterName', 'Tomin', 'X');
+    const snap = store.snapshotForSave();
+    expect(snap.sent).toEqual({ ...server(), characterName: 'X' });
+    expect(snap.form.deathSaves).toEqual({ successes: 0, failures: 0 });
+  });
+
+  it('endSave after a failed save: pruning compares with base again', () => {
+    const { store } = setup();
+    store.edit('experiencePoints', 100, 120);
+    store.snapshotForSave();
+    store.edit('experiencePoints', 120, 100); // back to base while in flight: still pending
+    expect(store.getState().touched.size).toBe(1);
+    store.endSave();
+    expect(store.getState().touched.size).toBe(0);
   });
 });

@@ -52,6 +52,16 @@ export const parseCommaSeparated = (value: string | string[] | undefined): strin
 };
 
 /**
+ * Inputs of the values `prepareDnd5eFormForSave` derives: the flat
+ * proficiency list is saved only when the user edited the proficiencies.
+ */
+export const saveFormInputsOf = (path: string): string[] => {
+  if (path === 'proficienciesAndLanguages') return ['proficiencies'];
+  if (path === 'featuresAndTraits' || path === 'spellcasting.cantrips') return [path];
+  return [];
+};
+
+/**
  * The form as it is stored: comma-separated text fields become arrays, the
  * flat proficiency list is rebuilt, and a theme colour is recorded if the
  * form has none. Returns a new object; the input is never mutated.

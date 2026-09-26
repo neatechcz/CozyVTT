@@ -16,6 +16,7 @@ import type { Character } from '@/types';
 import { buildChanges, needsFullDocumentSave, type CharacterDataObject } from '@/utils/characterMerge';
 import {
   createCharacterFormStore,
+  isOlder,
   UNKNOWN_AUTHOR,
   type CharacterFormStore,
   type SheetReset,
@@ -120,6 +121,8 @@ export function useLiveCharacterSync({
       if (!payload || payload.characterId !== trackedIdRef.current || !payload.character) return;
       const target = storeRef.current;
       if (!target) return;
+      // Older than what we already have (e.g. our own save's answer came first)
+      if (isOlder(payload.character.updatedAt, target.getState().baseUpdatedAt)) return;
 
       onServerCharacterRef.current?.(payload.character);
 
@@ -146,56 +149,64 @@ export function useLiveCharacterSync({
       throw new Error('useLiveCharacterSync: no D&D 5e character to save');
     }
 
-    // Base and form of one instant: what is sent is exactly what the user
-    // had on screen on top of the server state the form is based on.
+    // Base and form of one instant: what is sent is exactly the user's
+    // fields (and values derived from them) on top of the server state the
+    // form is based on. The store treats the save as in flight until
+    // adoptSaved/endSave, so its own echo is never mistaken for a remote change.
     const snapshot = target.snapshotForSave();
+    const current = () => storeRef.current === target;
 
     const adoptSaved = (saved: Character): LiveSaveOutcome => {
-      if (storeRef.current === target) {
-        target.adoptSaved((saved.data ?? {}) as CharacterDataObject, saved.updatedAt, snapshot.form);
-      }
-      onServerCharacterRef.current?.(saved);
+      const adopted = current() && target.adoptSaved((saved.data ?? {}) as CharacterDataObject, saved.updatedAt);
+      // An answer older than an already adopted broadcast is not news.
+      if (adopted) onServerCharacterRef.current?.(saved);
       return { status: 'saved', character: saved };
     };
 
     const saveWholeDocument = async (): Promise<LiveSaveOutcome> => {
-      const { character: saved } = await api.updateCharacter(id, { data: snapshot.form as Character['data'] });
+      const { character: saved } = await api.updateCharacter(id, { data: snapshot.sent as Character['data'] });
       return adoptSaved(saved);
     };
 
-    if (needsFullDocumentSave(snapshot.base, snapshot.form)) {
-      // The data is not path-addressable (the root has a key outside the
-      // shared path rules), so field-level changes cannot express it: fall
-      // back to the full-document PUT for this save (last write wins).
-      return saveWholeDocument();
-    }
+    try {
+      if (needsFullDocumentSave(snapshot.base, snapshot.sent)) {
+        // The data is not path-addressable (the root has a key outside the
+        // shared path rules), so field-level changes cannot express it: fall
+        // back to the full-document PUT for this save (last write wins).
+        return await saveWholeDocument();
+      }
 
-    const changes = buildChanges(snapshot.base, snapshot.form);
-    if (changes.length === 0) {
-      return { status: 'unchanged' };
-    }
-    if (changes.length > MAX_PATCH_CHANGES) {
-      // The PATCH endpoint rejects more than 200 changes (e.g. a first save
-      // of an old sheet the editor normalised heavily): use the full PUT.
-      return saveWholeDocument();
-    }
+      const changes = buildChanges(snapshot.base, snapshot.sent);
+      if (changes.length === 0) {
+        target.endSave();
+        return { status: 'unchanged' };
+      }
+      if (changes.length > MAX_PATCH_CHANGES) {
+        // The PATCH endpoint rejects more than 200 changes: use the full PUT.
+        return await saveWholeDocument();
+      }
 
-    const result = await api.patchCharacterData(id, changes);
+      const result = await api.patchCharacterData(id, changes);
 
-    if (result.conflicts.length === 0) {
-      return adoptSaved(result.character);
-    }
+      if (result.conflicts.length === 0) {
+        return adoptSaved(result.character);
+      }
 
-    // Someone changed some of the same fields first: load the current state
-    // and merge it — our applied fields match, the conflicting ones reset.
-    // Conflict paths/values are not inspected (a path may run through a
-    // non-object, `current` may be undefined); the merge works from data.
-    const { character: fresh } = await api.getCharacter(id);
-    onServerCharacterRef.current?.(fresh);
-    if (storeRef.current === target) {
-      target.applyRemote((fresh.data ?? {}) as CharacterDataObject, UNKNOWN_AUTHOR, fresh.updatedAt);
+      // Someone changed some of the same fields first: load the current state
+      // and merge it — our applied fields match what we sent (so they are our
+      // own write, not someone else's), the conflicting ones reset.
+      // Conflict paths/values are not inspected (a path may run through a
+      // non-object, `current` may be undefined); the merge works from data.
+      const { character: fresh } = await api.getCharacter(id);
+      if (current() && target.applyRemote((fresh.data ?? {}) as CharacterDataObject, UNKNOWN_AUTHOR, fresh.updatedAt)) {
+        onServerCharacterRef.current?.(fresh);
+      }
+      target.endSave();
+      return { status: 'conflicts', character: fresh, conflicts: result.conflicts };
+    } catch (error) {
+      target.endSave();
+      throw error;
     }
-    return { status: 'conflicts', character: fresh, conflicts: result.conflicts };
   }, []);
 
   const dismissResets = useCallback(() => storeRef.current?.dismissResets(), []);

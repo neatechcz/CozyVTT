@@ -25,7 +25,7 @@ import {
   getFormValue,
   type CharacterFormStore,
 } from '../../../utils/characterFormStore';
-import { buildDnd5eFormData, prepareDnd5eFormForSave } from './dnd5eFormData';
+import { buildDnd5eFormData, prepareDnd5eFormForSave, saveFormInputsOf } from './dnd5eFormData';
 
 interface DnD5eCharacterEditorProps {
   character: Character;
@@ -136,9 +136,12 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
    * Derived values (modifiers, bonuses, defaults) are always computed from the
    * store's current form, never from a render closure, and are not user edits.
    * `compute` returns the new form, or null for "nothing to change".
+   * `inputsOf(path)` names what a derived path is computed from: it is saved
+   * only when the user edited one of those inputs, so recalculating on open
+   * never overwrites a value someone else set.
    */
-  const setDerivedFormData = (compute: (prev: any) => any | null) => {
-    store.derive(compute);
+  const setDerivedFormData = (compute: (prev: any) => any | null, inputsOf?: (path: string) => string[]) => {
+    store.derive(compute, inputsOf);
   };
 
   // Unsaved edits die with the editor (cancel, close, back to view mode).
@@ -207,6 +210,10 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
       });
 
       return hasChanges ? { ...prev, stats: updatedStats } : null;
+    }, (path) => {
+      // stats.<ability>.modifier ← stats.<ability>.score
+      const [, ability] = path.split('.');
+      return ability ? [`stats.${ability}.score`] : [];
     });
   }, [
     formData.stats?.strength?.score,
@@ -237,6 +244,12 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
       });
 
       return hasChanges ? { ...prev, savingThrows: updatedSavingThrows } : null;
+    }, (path) => {
+      // savingThrows.<ability>.bonus ← ability modifier, proficiency
+      const [, ability] = path.split('.');
+      return ability
+        ? [`stats.${ability}.modifier`, `savingThrows.${ability}.proficient`, 'proficiencyBonus']
+        : [];
     });
   }, [
     formData.proficiencyBonus,
@@ -321,6 +334,17 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
       });
 
       return hasChanges ? { ...prev, skills: updatedSkills } : null;
+    }, (path) => {
+      // skills.<skill>.bonus ← ability modifier, proficiency, expertise
+      const [, skill] = path.split('.');
+      return skill && skillAbilities[skill]
+        ? [
+            `stats.${skillAbilities[skill]}.modifier`,
+            `skills.${skill}.proficient`,
+            `skills.${skill}.expertise`,
+            'proficiencyBonus',
+          ]
+        : [];
     });
   }, [
     formData.proficiencyBonus,
@@ -428,7 +452,7 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
       // Store the form as saved: parsed lists, theme colour (not user edits;
       // applied to the current form, so nothing typed meanwhile is lost)
       const defaultThemeColor = isCustomColor ? customColorHex : selectedColor.name;
-      store.derive((form) => prepareDnd5eFormForSave(form, defaultThemeColor));
+      store.derive((form) => prepareDnd5eFormForSave(form, defaultThemeColor), saveFormInputsOf);
 
       // Pass the tokenImageUrl as a separate parameter if it was uploaded
       await onSave(store.getState().form, true, newTokenImageUrl);
@@ -487,7 +511,8 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
           </button>
           <button
             onClick={onCancel}
-            className="px-4 py-2 bg-red-600/80 hover:bg-red-600 text-white rounded-lg transition-colors flex items-center space-x-2 font-medium shadow-lg"
+            disabled={isSaving}
+            className="px-4 py-2 bg-red-600/80 hover:bg-red-600 text-white rounded-lg transition-colors flex items-center space-x-2 font-medium shadow-lg disabled:opacity-50"
           >
             <X className="w-4 h-4" />
             <span>Cancel</span>
@@ -1835,16 +1860,20 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
 
   return (
     <div className="bg-white border-2 border-stone-200 rounded-lg overflow-hidden shadow-lg">
-      {renderHeader()}
-      {renderTabs()}
-      <div className="p-6">
-        {activeTab === 'stats' && renderStatsTab()}
-        {activeTab === 'combat' && renderCombatTab()}
-        {activeTab === 'spells' && renderSpellsTab()}
-        {activeTab === 'inventory' && renderInventoryTab()}
-        {activeTab === 'features' && renderFeaturesTab()}
-        {activeTab === 'bio' && renderBiographyTab()}
-      </div>
+      {/* While saving, the form is read-only: nothing typed can be lost when
+          the sheet closes or flips to view after the save. */}
+      <fieldset disabled={isSaving} className="m-0 min-w-0 border-0 p-0">
+        {renderHeader()}
+        {renderTabs()}
+        <div className="p-6">
+          {activeTab === 'stats' && renderStatsTab()}
+          {activeTab === 'combat' && renderCombatTab()}
+          {activeTab === 'spells' && renderSpellsTab()}
+          {activeTab === 'inventory' && renderInventoryTab()}
+          {activeTab === 'features' && renderFeaturesTab()}
+          {activeTab === 'bio' && renderBiographyTab()}
+        </div>
+      </fieldset>
       {errors.submit && (
         <div className="px-6 pb-4 text-sm text-red-600">{errors.submit}</div>
       )}

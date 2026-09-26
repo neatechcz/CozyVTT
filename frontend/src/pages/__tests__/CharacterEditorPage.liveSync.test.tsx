@@ -63,7 +63,10 @@ const character: Character = {
 
 function renderPage() {
   return render(
-    <MemoryRouter initialEntries={['/characters/char-1/edit']}>
+    <MemoryRouter
+      initialEntries={['/characters/char-1/edit']}
+      future={{ v7_startTransition: true, v7_relativeSplatPath: true }}
+    >
       <Routes>
         <Route path="/characters/:id/edit" element={<CharacterEditorPage />} />
         <Route path="/characters" element={<div>Characters list</div>} />

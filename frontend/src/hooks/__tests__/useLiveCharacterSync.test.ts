@@ -643,3 +643,142 @@ describe('useLiveCharacterSync', () => {
     expect(hook.result.current.isDirty).toBe(true);
   });
 });
+
+describe('useLiveCharacterSync — round 5', () => {
+  function pendingPatch() {
+    let resolvePatch!: (value: unknown) => void;
+    mocks.patchCharacterData.mockReturnValue(new Promise((resolve) => (resolvePatch = resolve)));
+    return (value: unknown) => resolvePatch(value);
+  }
+
+  it('cancel (discard) while the save is in flight: the answer is adopted, the next save sends nothing for that field', async () => {
+    const { hook } = setup();
+    userEdits(hook, { ...baseData(), experiencePoints: 120 });
+    const resolve = pendingPatch();
+    let savePromise!: Promise<unknown>;
+    act(() => {
+      savePromise = hook.result.current.save();
+    });
+    act(() => storeOf(hook).discard());
+    await act(async () => {
+      resolve({ character: makeCharacter({ ...baseData(), experiencePoints: 120 }, { updatedAt: '2026-09-26T00:00:01.000Z' }), applied: ['experiencePoints'], conflicts: [], status: 200 });
+      await savePromise;
+    });
+    expect(formOf(hook)).toEqual({ ...baseData(), experiencePoints: 120 });
+    expect(hook.result.current.isDirty).toBe(false);
+
+    mocks.patchCharacterData.mockReset();
+    let outcome: Awaited<ReturnType<typeof hook.result.current.save>> | undefined;
+    await act(async () => {
+      outcome = await hook.result.current.save();
+    });
+    expect(outcome?.status).toBe('unchanged');
+    expect(mocks.patchCharacterData).not.toHaveBeenCalled();
+  });
+
+  it('the echo of the own save before its answer, while the user retyped that field: no reset, typed value kept', async () => {
+    const { hook, socket } = setup();
+    userEdits(hook, { ...baseData(), experiencePoints: 120 });
+    const resolve = pendingPatch();
+    let savePromise!: Promise<unknown>;
+    act(() => {
+      savePromise = hook.result.current.save();
+    });
+    userEdits(hook, { ...baseData(), experiencePoints: 130 });
+    const saved = makeCharacter({ ...baseData(), experiencePoints: 120 }, { updatedAt: '2026-09-26T00:00:01.000Z' });
+    act(() => socket.emit('character.updated', { ...remoteEvent(saved.data as any, ['experiencePoints']), character: saved }));
+    expect(hook.result.current.resets).toEqual([]);
+    expect(formOf(hook).experiencePoints).toBe(130);
+    await act(async () => {
+      resolve({ character: saved, applied: ['experiencePoints'], conflicts: [], status: 200 });
+      await savePromise;
+    });
+    expect(hook.result.current.resets).toEqual([]);
+    expect(formOf(hook).experiencePoints).toBe(130);
+    expect(hook.result.current.isDirty).toBe(true);
+  });
+
+  it('409 re-fetch: fields that were applied (equal to what we sent) are not reported, a retyped value survives', async () => {
+    const { hook } = setup();
+    userEdits(hook, { ...baseData(), experiencePoints: 120, hp: { current: 5, maximum: 10, temporary: 0 } });
+    let resolvePatch!: (value: unknown) => void;
+    mocks.patchCharacterData.mockReturnValue(new Promise((resolve) => (resolvePatch = resolve)));
+    let savePromise!: Promise<unknown>;
+    act(() => {
+      savePromise = hook.result.current.save();
+    });
+    userEdits(hook, { ...formOf(hook), experiencePoints: 125 });
+    const current = { ...baseData(), experiencePoints: 120, hp: { current: 2, maximum: 10, temporary: 0 } };
+    mocks.getCharacter.mockResolvedValue({ character: makeCharacter(current, { updatedAt: '2026-09-26T00:00:02.000Z' }) });
+    await act(async () => {
+      resolvePatch({ character: makeCharacter(current), applied: ['experiencePoints'], conflicts: [{ path: 'hp.current', base: 8, current: 2, attempted: 5 }], status: 200 });
+      await savePromise;
+    });
+    expect(formOf(hook).experiencePoints).toBe(125);
+    expect(hook.result.current.resets).toEqual([expect.objectContaining({ path: 'hp.current', mine: 5, theirs: 2 })]);
+  });
+
+  it('onServerCharacter only gets data the store adopted: an older save answer or older event is not forwarded', async () => {
+    const { hook, socket, onServerCharacter } = setup();
+    const newer = makeCharacter({ ...baseData(), conditions: ['prone'] }, { updatedAt: '2026-09-26T00:00:05.000Z' });
+    act(() => socket.emit('character.updated', { ...remoteEvent(newer.data as any, ['conditions']), character: newer }));
+    expect(onServerCharacter).toHaveBeenCalledTimes(1);
+
+    const older = makeCharacter({ ...baseData(), experiencePoints: 1 }, { updatedAt: '2026-09-26T00:00:03.000Z' });
+    act(() => socket.emit('character.updated', { ...remoteEvent(older.data as any, ['experiencePoints']), character: older }));
+    expect(onServerCharacter).toHaveBeenCalledTimes(1);
+    expect(formOf(hook).experiencePoints).toBe(100);
+
+    userEdits(hook, { ...formOf(hook), characterName: 'X' });
+    mocks.patchCharacterData.mockResolvedValue({
+      character: makeCharacter({ ...baseData(), characterName: 'X' }, { updatedAt: '2026-09-26T00:00:04.000Z' }),
+      applied: ['characterName'],
+      conflicts: [],
+      status: 200,
+    });
+    await act(async () => {
+      await hook.result.current.save();
+    });
+    expect(onServerCharacter).toHaveBeenCalledTimes(1);
+  });
+
+  it('a failed save ends the in-flight state (pruning compares with base again)', async () => {
+    const { hook } = setup();
+    userEdits(hook, { ...baseData(), experiencePoints: 120 });
+    mocks.patchCharacterData.mockRejectedValue(new Error('network'));
+    await expect(
+      act(async () => {
+        await hook.result.current.save();
+      }),
+    ).rejects.toThrow('network');
+    // Back to the server value: not pending any more (no save is in flight).
+    act(() => {
+      storeOf(hook).edit('experiencePoints', 120, 100);
+    });
+    expect(storeOf(hook).getState().touched.size).toBe(0);
+  });
+
+  it('a save answer that changed a field the user did not send credits "někdo jiný", not "server"', async () => {
+    const { hook } = setup();
+    userEdits(hook, { ...baseData(), experiencePoints: 120 });
+    const resolve = pendingPatch();
+    let savePromise!: Promise<unknown>;
+    act(() => {
+      savePromise = hook.result.current.save();
+    });
+    userEdits(hook, { ...formOf(hook), characterName: 'Typed' }); // not part of the save
+    await act(async () => {
+      resolve({
+        character: makeCharacter({ ...baseData(), experiencePoints: 120, characterName: 'Other' }, { updatedAt: '2026-09-26T00:00:01.000Z' }),
+        applied: ['experiencePoints'],
+        conflicts: [],
+        status: 200,
+      });
+      await savePromise;
+    });
+    expect(hook.result.current.resets).toEqual([
+      expect.objectContaining({ path: 'characterName', mine: 'Typed', theirs: 'Other', author: { userId: null, displayName: 'někdo jiný' } }),
+    ]);
+  });
+});
+
