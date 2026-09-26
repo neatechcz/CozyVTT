@@ -128,6 +128,22 @@ describe('delegated character control', () => {
     expect(other.status).toBe(403);
   });
 
+  it('lists every campaign character for a DM and lets the DM open and edit each sheet', async () => {
+    const list = await dmAgent.get('/api/characters');
+    expect(list.status).toBe(200);
+    expect(list.body.characters.map((char: { id: string }) => char.id)).toEqual(
+      expect.arrayContaining([characterId, otherCharacterId]),
+    );
+
+    for (const id of [characterId, otherCharacterId]) {
+      const sheet = await dmAgent.get(`/api/characters/${id}`);
+      expect(sheet.status).toBe(200);
+      const update = await dmAgent.put(`/api/characters/${id}`).send({ data: { notes: 'DM edit' } });
+      expect(update.status).toBe(200);
+      expect(update.body.character.data).toEqual({ notes: 'DM edit' });
+    }
+  });
+
   it('shows each player only their assigned character across lists, campaign, roster, and sheet URLs', async () => {
     await prisma.campaignMembership.update({
       where: { userId_campaignId: { userId: playerId, campaignId } },

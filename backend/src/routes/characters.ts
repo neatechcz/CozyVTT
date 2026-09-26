@@ -111,25 +111,26 @@ router.post('/', authenticated, async (req: AuthenticatedRequest, res: Response)
 
 /**
  * GET /api/characters
- * List characters owned by or assigned to the authenticated user
+ * List characters owned by the user, assigned to the player, or in a campaign they DM
  * Requires: Authentication
  */
 router.get('/', authenticated, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.session.userId!;
-    const assignments = await prisma.campaignMembership.findMany({
-      where: { userId, role: 'PLAYER' },
-      select: { campaignId: true, characterIds: true },
+    const memberships = await prisma.campaignMembership.findMany({
+      where: { userId, role: { in: ['PLAYER', 'DM'] } },
+      select: { campaignId: true, characterIds: true, role: true },
     });
 
     const characters = await prisma.character.findMany({
       where: {
         OR: [
           { userId },
-          ...assignments.map((membership) => ({
-            campaignId: membership.campaignId,
-            id: { in: membership.characterIds },
-          })),
+          ...memberships.map((membership) =>
+            membership.role === 'DM'
+              ? { campaignId: membership.campaignId }
+              : { campaignId: membership.campaignId, id: { in: membership.characterIds } },
+          ),
         ],
       },
       include: {
