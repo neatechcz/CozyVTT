@@ -61,6 +61,7 @@ import DmToolPanelContainer from '@/components/campaign/DmToolPanelContainer';
 import { useWallHistory } from '@/hooks/useWallHistory';
 import Toast, { useToast } from '@/components/Toast';
 import Button from '@/components/ui/Button';
+import { getOwnCharacterIds, isOwnToken as isOwnTokenForUser } from '@/utils/tokenOwnership';
 import '@/styles/spirit-effects.css';
 
 /** Returns the accent color for the spirit layer style string. Used for spirit token ring. */
@@ -98,6 +99,12 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
   const { socket } = useWebSocket();
   const { user } = useAuth();
   const isDM = userRole === 'DM';
+  // Characters the user owns or is assigned: their tokens are "own" (vision
+  // sources, fog exemption) — the same rule the server filters with.
+  const ownCharacterIds = useMemo(
+    () => getOwnCharacterIds(campaign, user?.id),
+    [campaign, user?.id]
+  );
   // Three stacked canvases. `canvasRef` is the TOP canvas — it
   // receives all pointer input and holds the overlay draw layer; terrain and
   // tokens sit beneath it. All three are the same size and share one world
@@ -1268,10 +1275,8 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
     };
 
     const renderIsDM = userRole === 'DM';
-    // Ownership predicate — fog exemption
-    const isOwnToken = (t: Token): boolean =>
-      t.controlledBy === user?.id ||
-      !!(t.characterId && campaign?.characters?.find((c) => c.id === t.characterId && c.userId === user?.id));
+    // Ownership predicate — fog exemption (same rule as the server)
+    const isOwnToken = (t: Token): boolean => isOwnTokenForUser(t, user?.id, ownCharacterIds);
 
     // 5. Tokens (+ drag ghost)
     drawTokens(ctx, {
@@ -1293,7 +1298,7 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
     }, viewport);
 
     ctx.restore();
-  }, [currentMap, imageLoaded, mapImage, mapControls.panOffset, mapControls.zoom, userRole, user?.id, campaign?.characters, campaign?.spiritLayerStyle, tokens, tokenImages, animatingTokens, draggedToken, dragOffset, hoverCoords, hoverToken, revealedCells, dmShowSpiritTokens, dmViewBothPlanes, characterHpCache]);
+  }, [currentMap, imageLoaded, mapImage, mapControls.panOffset, mapControls.zoom, userRole, user?.id, ownCharacterIds, campaign?.spiritLayerStyle, tokens, tokenImages, animatingTokens, draggedToken, dragOffset, hoverCoords, hoverToken, revealedCells, dmShowSpiritTokens, dmViewBothPlanes, characterHpCache]);
 
   /**
    * Draw the OVERLAY layer (top canvas): dynamic-lighting darkness, DM light
@@ -1321,10 +1326,8 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
     };
 
     const renderIsDM = userRole === 'DM';
-    // Ownership predicate — lighting vision sources
-    const isOwnToken = (t: Token): boolean =>
-      t.controlledBy === user?.id ||
-      !!(t.characterId && campaign?.characters?.find((c) => c.id === t.characterId && c.userId === user?.id));
+    // Ownership predicate — lighting vision sources (same rule as the server)
+    const isOwnToken = (t: Token): boolean => isOwnTokenForUser(t, user?.id, ownCharacterIds);
 
     // 6. Dynamic lighting — raycast visibility darkness over tokens.
     //    DM always sees all; "Preview player view" simulates player vision.
@@ -1448,7 +1451,7 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
         brushRadius,
       }, viewport);
     }
-  }, [currentMap, imageLoaded, mapImage, mapControls.zoom, mapControls.panOffset, userRole, user?.id, campaign?.characters, tokens, dmPreviewPlayerView, lightSources, selectedLightId, lightMode, wallSegments, wallColor, hoveredWallId, selectedWallId, hoveredDoorId, wallMode, selectedEndpoint, wallInProgress, wallType, snapToGrid, brushSize, splitHoverPoint, polygonPoints, showRuler, rulerColor, effectiveRulerOrigin, showAoE, aoeConfig, aoeOrigin, hoverCoords, fogMode, brushRadius]);
+  }, [currentMap, imageLoaded, mapImage, mapControls.zoom, mapControls.panOffset, userRole, user?.id, ownCharacterIds, tokens, dmPreviewPlayerView, lightSources, selectedLightId, lightMode, wallSegments, wallColor, hoveredWallId, selectedWallId, hoveredDoorId, wallMode, selectedEndpoint, wallInProgress, wallType, snapToGrid, brushSize, splitHoverPoint, polygonPoints, showRuler, rulerColor, effectiveRulerOrigin, showAoE, aoeConfig, aoeOrigin, hoverCoords, fogMode, brushRadius]);
 
   // ── Layer draw dispatch + dirty-flag scheduling ──────────
   // A single rAF coalesces every repaint request; only the dirty layers
