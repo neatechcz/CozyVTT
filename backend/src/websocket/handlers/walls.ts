@@ -230,7 +230,9 @@ export function registerWallHandlers(io: Server, socket: AuthenticatedSocket): v
       if (!map || map.campaignId !== socket.campaignId) return;
 
       const segments = (Array.isArray(map.wallSegments) ? map.wallSegments : []) as unknown as WallSegment[];
-      socket.emit('walls:replaced', { mapId, segments });
+      // sync: true — this is a resync (e.g. after the requester reconnects and may have missed
+      // broadcasts while offline), not a live change, so it carries no changedBy/sourceSocketId.
+      socket.emit('walls:replaced', { mapId, segments, sync: true });
     } catch (error) {
       logger.error('walls:request failed', { err: error });
     }

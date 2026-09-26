@@ -119,12 +119,15 @@ describe('wall handlers broadcast an origin', () => {
     ]);
   });
 
-  it('walls:request replies to the requester only, without an origin', async () => {
+  it('walls:request replies to the requester only, without changedBy/sourceSocketId, but flagged sync', async () => {
     const { socket, handlers } = setup('PLAYER', 'alice', 'sock-alice-2');
     db.map.findUnique.mockResolvedValue({ campaignId: CAMPAIGN_ID, wallSegments: [SEGMENT_A] });
 
     await handlers['walls:request']({ mapId: MAP_ID });
 
-    expect(socket.emit).toHaveBeenCalledWith('walls:replaced', { mapId: MAP_ID, segments: [SEGMENT_A] });
+    // sync: true marks this as an authoritative resync (e.g. after a client reconnects and may
+    // have missed broadcasts while offline) — unlike a live broadcast, it must be applied even by
+    // a DM, who otherwise skips origin-less wall events as its own already-applied edit.
+    expect(socket.emit).toHaveBeenCalledWith('walls:replaced', { mapId: MAP_ID, segments: [SEGMENT_A], sync: true });
   });
 });
