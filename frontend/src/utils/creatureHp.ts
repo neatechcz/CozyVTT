@@ -22,13 +22,37 @@ export function tokenHpForCreature(statBlock: NpcStatBlock | null | undefined): 
   return { current: hp, max: hp, temp: 0 };
 }
 
+/** Result of reading the creature form's HP inputs: the hp to store, or a form error. */
+export type StatBlockHpFormResult =
+  | { ok: true; hp: NpcStatBlock['hp'] }
+  | { ok: false; error: string };
+
 /**
- * Build `statBlock.hp` from the creature form's text inputs.
- * Returns undefined when the average is blank or not a positive integer.
+ * Validate the creature form's HP inputs and build `statBlock.hp`.
+ *
+ * The average must be a whole number of at least 1 — decimals are rejected,
+ * never truncated. Leaving both the average and the formula empty means
+ * "no HP", which is only allowed when the creature had no hit points before
+ * (`hadHp` false, e.g. a new creature); clearing existing hit points is an error.
  */
-export function statBlockHpFromForm(averageInput: string, formulaInput: string): NpcStatBlock['hp'] {
-  const average = parseInt(averageInput.trim(), 10);
-  if (!isPositiveNumber(average)) return undefined;
+export function parseStatBlockHpForm(
+  averageInput: string,
+  formulaInput: string,
+  hadHp: boolean,
+): StatBlockHpFormResult {
+  const averageText = averageInput.trim();
   const formula = formulaInput.trim();
-  return formula ? { average, formula } : { average };
+
+  if (!averageText) {
+    if (hadHp) return { ok: false, error: 'HP is required: enter a whole number of at least 1' };
+    if (formula) return { ok: false, error: 'Enter the HP average for the HP dice' };
+    return { ok: true, hp: undefined };
+  }
+
+  const average = Number(averageText);
+  if (!Number.isFinite(average)) return { ok: false, error: 'HP must be a number' };
+  if (!Number.isInteger(average)) return { ok: false, error: 'HP must be a whole number' };
+  if (average < 1) return { ok: false, error: 'HP must be at least 1' };
+
+  return { ok: true, hp: formula ? { average, formula } : { average } };
 }

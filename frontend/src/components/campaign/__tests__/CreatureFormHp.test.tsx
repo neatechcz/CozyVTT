@@ -110,3 +110,140 @@ describe('CreatureForm hit points', () => {
     expect((mocks.createCreature.mock.calls[0][1].statBlock as NpcStatBlock).hp).toEqual({ average: 11 });
   });
 });
+
+describe('CreatureForm hit point validation', () => {
+  beforeEach(() => {
+    mocks.updateCreature.mockReset().mockImplementation(async (_c: string, _id: string, payload: unknown) => payload);
+    mocks.createCreature.mockReset().mockImplementation(async (_c: string, payload: unknown) => payload);
+  });
+
+  it('shows an error instead of removing hp when the average is cleared', async () => {
+    renderForm(creature({ ...baseStatBlock, hp: { average: 7, formula: '2d6' } }));
+    fireEvent.change(screen.getByLabelText('Hit points average'), { target: { value: '' } });
+    fireEvent.change(screen.getByLabelText('Hit dice formula'), { target: { value: '' } });
+
+    fireEvent.click(screen.getByText('Save Changes'));
+    expect(await screen.findByText('HP is required: enter a whole number of at least 1')).toBeInTheDocument();
+    expect(mocks.updateCreature).not.toHaveBeenCalled();
+  });
+
+  it('rejects a decimal average instead of truncating it', async () => {
+    renderForm(creature({ ...baseStatBlock, hp: { average: 7, formula: '2d6' } }));
+    fireEvent.change(screen.getByLabelText('Hit points average'), { target: { value: '7.5' } });
+
+    fireEvent.click(screen.getByText('Save Changes'));
+    expect(await screen.findByText('HP must be a whole number')).toBeInTheDocument();
+    expect(mocks.updateCreature).not.toHaveBeenCalled();
+  });
+
+  it('rejects hit dice without an average', async () => {
+    renderForm(creature(baseStatBlock));
+    fireEvent.change(screen.getByLabelText('Hit dice formula'), { target: { value: '2d6' } });
+
+    fireEvent.click(screen.getByText('Save Changes'));
+    expect(await screen.findByText('Enter the HP average for the HP dice')).toBeInTheDocument();
+    expect(mocks.updateCreature).not.toHaveBeenCalled();
+  });
+
+  it('rejects a zero average for a new creature', async () => {
+    renderForm(null);
+    fireEvent.change(screen.getByPlaceholderText('e.g. Goblin Boss'), { target: { value: 'Bandit' } });
+    fireEvent.change(screen.getByLabelText('Hit points average'), { target: { value: '0' } });
+
+    fireEvent.click(screen.getByText('Create Creature'));
+    expect(await screen.findByText('HP must be at least 1')).toBeInTheDocument();
+    expect(mocks.createCreature).not.toHaveBeenCalled();
+  });
+
+  it('saves once the error is corrected', async () => {
+    renderForm(creature({ ...baseStatBlock, hp: { average: 7, formula: '2d6' } }));
+    fireEvent.change(screen.getByLabelText('Hit points average'), { target: { value: '7.5' } });
+    fireEvent.click(screen.getByText('Save Changes'));
+    expect(await screen.findByText('HP must be a whole number')).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText('Hit points average'), { target: { value: '8' } });
+    fireEvent.click(screen.getByText('Save Changes'));
+    await waitFor(() => expect(mocks.updateCreature).toHaveBeenCalled());
+    expect(screen.queryByText('HP must be a whole number')).not.toBeInTheDocument();
+    expect(savedStatBlock(mocks.updateCreature).hp).toEqual({ average: 8, formula: '2d6' });
+  });
+});
+
+/** A duplicated SRD creature: every field the Open5e seed produces, plus extras the form never shows. */
+const srdStatBlock: NpcStatBlock = {
+  ac: 15,
+  hp: { average: 7, formula: '2d6' },
+  speed: '30 ft.',
+  abilities: { str: 8, dex: 14, con: 10, int: 10, wis: 8, cha: 8 },
+  savingThrows: { dex: 4 },
+  skills: { stealth: 6 },
+  damageVulnerabilities: 'radiant',
+  damageResistances: 'cold',
+  damageImmunities: 'poison',
+  conditionImmunities: 'poisoned',
+  senses: 'darkvision 60 ft., passive Perception 9',
+  languages: 'Common, Goblin',
+  challengeRating: '1/4',
+  xp: 50,
+  traits: [{ name: 'Nimble Escape', description: 'Disengage or Hide as a bonus action.' }],
+  actions: [
+    { name: 'Scimitar', description: 'Melee Weapon Attack: +4 to hit.', attack_bonus: 4, damage_dice: '1d6' } as {
+      name: string;
+      description: string;
+    },
+  ],
+  bonusActions: [{ name: 'Dash', description: 'Moves quickly.' }],
+  reactions: [{ name: 'Redirect Attack', description: 'Swaps places with an ally.' }],
+  legendaryActions: [{ name: 'Cackle', description: 'Frightens a creature.' }],
+  creatureType: 'Small humanoid (goblinoid)',
+  alignment: 'neutral evil',
+  gameSystem: 'dnd5e',
+  notes: 'Seeded from Open5e',
+};
+
+describe('CreatureForm keeps the whole stat block', () => {
+  beforeEach(() => {
+    mocks.updateCreature.mockReset().mockImplementation(async (_c: string, _id: string, payload: unknown) => payload);
+  });
+
+  it('saves an unchanged SRD copy without losing any field', async () => {
+    renderForm(creature(srdStatBlock));
+    fireEvent.click(screen.getByText('Save Changes'));
+    await waitFor(() => expect(mocks.updateCreature).toHaveBeenCalled());
+    expect(savedStatBlock(mocks.updateCreature)).toEqual(srdStatBlock);
+  });
+
+  it('overwrites only the edited fields', async () => {
+    renderForm(creature(srdStatBlock));
+    fireEvent.change(screen.getByDisplayValue('15'), { target: { value: '17' } });
+    fireEvent.change(screen.getByDisplayValue('Common, Goblin'), { target: { value: 'Common' } });
+
+    fireEvent.click(screen.getByText('Save Changes'));
+    await waitFor(() => expect(mocks.updateCreature).toHaveBeenCalled());
+    expect(savedStatBlock(mocks.updateCreature)).toEqual({ ...srdStatBlock, ac: 17, languages: 'Common' });
+  });
+
+  it('removes a form field the user cleared but keeps the rest', async () => {
+    renderForm(creature(srdStatBlock));
+    fireEvent.change(screen.getByDisplayValue('cold'), { target: { value: '' } });
+
+    fireEvent.click(screen.getByText('Save Changes'));
+    await waitFor(() => expect(mocks.updateCreature).toHaveBeenCalled());
+    const saved = savedStatBlock(mocks.updateCreature);
+    expect(saved).not.toHaveProperty('damageResistances');
+    expect(saved.savingThrows).toEqual({ dex: 4 });
+    expect(saved.skills).toEqual({ stealth: 6 });
+  });
+
+  it('drops the CR-derived xp when the challenge rating changes', async () => {
+    renderForm(creature(srdStatBlock));
+    fireEvent.change(screen.getByDisplayValue('1/4'), { target: { value: '1' } });
+
+    fireEvent.click(screen.getByText('Save Changes'));
+    await waitFor(() => expect(mocks.updateCreature).toHaveBeenCalled());
+    const saved = savedStatBlock(mocks.updateCreature);
+    expect(saved.challengeRating).toBe('1');
+    expect(saved).not.toHaveProperty('xp');
+    expect(saved.skills).toEqual({ stealth: 6 });
+  });
+});
