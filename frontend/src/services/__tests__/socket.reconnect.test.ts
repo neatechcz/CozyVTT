@@ -159,6 +159,42 @@ describe('socketClient reconnect after a server-forced disconnect', () => {
     expect(created).toHaveLength(8);
   });
 
+  it('a caller connect() without disconnect() (standalone editor retry) starts a new series', async () => {
+    const { client, signals } = await connectedWithSignals();
+    created[0].fire('disconnect', 'io server disconnect');
+    for (const [i, delay] of [1000, 2000, 4000, 8000, 16000].entries()) {
+      await vi.advanceTimersByTimeAsync(delay);
+      rejectUnauthenticated(created[i + 1]);
+    }
+    expect(signals.filter((s) => s.event === 'failed')).toHaveLength(1);
+    expect(created).toHaveLength(6);
+
+    // The editor page retries on its own: connect() straight away
+    const connecting = client.connect('camp-1');
+    connecting.catch(() => undefined);
+    expect(created).toHaveLength(7);
+    expect(created[5].disconnect).toHaveBeenCalled();
+    rejectUnauthenticated(created[6]);
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(created).toHaveLength(8);
+  });
+
+  it('does not report an unrelated earlier server error when a retry series gives up', async () => {
+    const { signals } = await connectedWithSignals();
+    // A domain error while connected (e.g. a rejected token move)
+    created[0].fire('error', { message: 'You cannot move this token' });
+
+    // Later the server kicks the connection and every retry, without saying why
+    created[0].fire('disconnect', 'io server disconnect');
+    for (const [i, delay] of [1000, 2000, 4000, 8000, 16000].entries()) {
+      await vi.advanceTimersByTimeAsync(delay);
+      created[i + 1].fire('connect');
+      created[i + 1].fire('disconnect', 'io server disconnect');
+    }
+
+    expect(signals.slice(-1)).toEqual([{ event: 'failed' }]);
+  });
+
   it('a pending retry does not replace a connection opened after disconnect()', async () => {
     const { client } = await connectedWithSignals();
     created[0].fire('disconnect', 'io server disconnect');

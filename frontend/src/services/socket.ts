@@ -84,7 +84,11 @@ class SocketClient {
    */
   private reconnectAttempts = 0;
   private maxReconnectAttempts = 5;
-  /** Last server `error` message since the last successful join (why a retry series failed). */
+  /**
+   * Last server `error` message seen while connecting or during a retry
+   * series (why the series failed). Domain errors of an established
+   * connection (e.g. a rejected token move) are not recorded.
+   */
   private lastServerError: string | null = null;
   private reconnectDelay = 1000; // Start with 1 second
   private isConnecting = false;
@@ -226,6 +230,13 @@ class SocketClient {
       this.socket.on('disconnect', (reason) => {
         this.emitLifecycle('disconnected');
         if (reason === 'io server disconnect') {
+          // A kick during the handshake ends this attempt: without this the
+          // next retry would be refused as "already in progress"
+          if (this.socket === socket && this.isConnecting) {
+            clearTimeout(connectionTimeout);
+            this.isConnecting = false;
+            reject(new Error('Disconnected by the server'));
+          }
           // Server disconnected us, need to manually reconnect
           this.reconnect(socket);
         }
@@ -255,7 +266,9 @@ class SocketClient {
       // Error events from server
       this.socket.on('error', (error) => {
         console.error('[Socket] Server error event:', error);
-        this.lastServerError = serverErrorMessage(error) ?? this.lastServerError;
+        if (this.isConnecting || this.reconnectAttempts > 0) {
+          this.lastServerError = serverErrorMessage(error) ?? this.lastServerError;
+        }
         clearTimeout(connectionTimeout);
         this.isConnecting = false;
         reject(error);
@@ -272,6 +285,8 @@ class SocketClient {
   private reconnect(socket: Socket) {
     if (this.reconnectAttempts >= this.maxReconnectAttempts) {
       console.error('[Socket] Max reconnection attempts reached');
+      // The kicked socket stays in this.socket (disconnected, its Manager
+      // closed) until the next connect() or disconnect() replaces it.
       this.emitLifecycle('failed', this.lastServerError ? { error: this.lastServerError } : undefined);
       return;
     }
