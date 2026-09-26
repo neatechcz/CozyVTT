@@ -26,6 +26,12 @@ describe('getDnd5eFieldLabel', () => {
     expect(getDnd5eFieldLabel('')).toBe('Celý list postavy');
   });
 
+  it('never returns inherited Object.prototype members', () => {
+    expect(getDnd5eFieldLabel('toString')).toBe('toString');
+    expect(getDnd5eFieldLabel('constructor')).toBe('constructor');
+    expect(getDnd5eFieldLabel('hasOwnProperty')).toBe('hasOwnProperty');
+  });
+
   it('falls back to the raw path', () => {
     expect(getDnd5eFieldLabel('some.unknown.path')).toBe('some.unknown.path');
   });

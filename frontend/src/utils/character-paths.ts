@@ -85,24 +85,58 @@ export function diffPaths(a: unknown, b: unknown): string[] {
   return out;
 }
 
+export type PathResolution =
+  | { kind: 'value'; value: unknown }
+  | { kind: 'missing' }
+  | { kind: 'blocked'; prefix: string; value: unknown };
+
 /**
- * Reads an own property path; returns `undefined` when any step is missing.
- * The empty path `""` is the whole document.
+ * Resolve `path` against `obj` (same semantics as the backend):
+ * - `value`: every segment exists (own keys of plain objects) — its value;
+ * - `missing`: a key on the way (or the last one) is absent or `undefined`,
+ *   so the path could be created without touching any existing value;
+ * - `blocked`: an existing array, `null` or primitive sits at `prefix` before
+ *   the end of the path — the path cannot be read or written through it.
+ */
+export function resolvePath(obj: unknown, path: string): PathResolution {
+  const segments = path.split('.');
+  let current: unknown = obj;
+  for (let i = 0; i < segments.length; i++) {
+    if (!isPlainObject(current)) {
+      return { kind: 'blocked', prefix: segments.slice(0, i).join('.'), value: current };
+    }
+    const segment = segments[i];
+    if (!hasOwn(current, segment) || current[segment] === undefined) {
+      return { kind: 'missing' };
+    }
+    current = current[segment];
+  }
+  return { kind: 'value', value: current };
+}
+
+/**
+ * Reads an own property path; returns `undefined` when any step is missing
+ * or blocked. The empty path `""` is the whole document.
  */
 export function getAtPath(obj: unknown, path: string): unknown {
   if (path === '') return obj;
-  let current: unknown = obj;
-  for (const segment of path.split('.')) {
-    if (!isPlainObject(current) || !hasOwn(current, segment)) return undefined;
-    current = current[segment];
+  const resolved = resolvePath(obj, path);
+  return resolved.kind === 'value' ? resolved.value : undefined;
+}
+
+export class PathBlockedError extends Error {
+  constructor(public readonly path: string, public readonly prefix: string) {
+    super(`Path ${JSON.stringify(path)} is blocked by a non-object value at ${JSON.stringify(prefix)}`);
+    this.name = 'PathBlockedError';
   }
-  return current;
 }
 
 /**
  * Returns a copy of `obj` with `value` written at `path`; objects along the
- * path are shallow-copied (missing or non-object ones are replaced by `{}`),
- * the input is never mutated. `undefined` removes the key.
+ * path are shallow-copied, the input is never mutated. Only missing (or
+ * `undefined`) intermediates are created; an existing array, `null` or
+ * primitive on the way throws PathBlockedError (like the backend).
+ * `undefined` removes the key.
  */
 export function setAtPath<T extends PlainObject>(obj: T, path: string, value: unknown): T {
   if (!isSafePath(path)) {
@@ -111,14 +145,19 @@ export function setAtPath<T extends PlainObject>(obj: T, path: string, value: un
   const segments = path.split('.');
   const root: PlainObject = { ...obj };
   let target = root;
-  let source: unknown = obj;
   for (let i = 0; i < segments.length - 1; i++) {
     const segment = segments[i];
-    const next = isPlainObject(source) && hasOwn(source, segment) ? source[segment] : undefined;
-    const copy: PlainObject = isPlainObject(next) ? { ...next } : {};
+    const next = hasOwn(target, segment) ? target[segment] : undefined;
+    let copy: PlainObject;
+    if (next === undefined) {
+      copy = {};
+    } else if (isPlainObject(next)) {
+      copy = { ...next };
+    } else {
+      throw new PathBlockedError(path, segments.slice(0, i + 1).join('.'));
+    }
     target[segment] = copy;
     target = copy;
-    source = next;
   }
   const last = segments[segments.length - 1];
   if (value === undefined) {

@@ -122,8 +122,10 @@ export default function CharacterSheetEditorModal({
               onSave={handleSave}
               onCancel={handleCancel}
               externalData={liveSync.externalData}
+              externalBase={liveSync.externalBase}
               externalDataVersion={liveSync.externalDataVersion}
               onLocalChange={liveSync.reportLocalChange}
+              onDiscardLocalChanges={liveSync.discardLocalChanges}
             />
           </>
         );

@@ -132,6 +132,42 @@ describe('mergeRemoteUpdate', () => {
     expect(resetFields).toEqual([]);
   });
 
+  describe('remote replaced an object with a non-object the user edited inside', () => {
+    const b = { proficiencies: { armor: 'light' }, other: 1 };
+    const local = { proficiencies: { armor: 'light', weapons: 'swords' }, other: 1 };
+
+    it.each([
+      ['an array', ['light', 'simple']],
+      ['null', null],
+      ['a primitive', 'light armor, simple weapons'],
+    ])('keeps the remote value (%s) and records a reset at the blocked prefix', (_label, theirs) => {
+      const remote = { proficiencies: theirs, other: 2 };
+      const { data, resetFields } = mergeRemoteUpdate(b, local, remote);
+      expect(data).toEqual({ proficiencies: theirs, other: 2 });
+      expect(resetFields).toEqual([
+        { path: 'proficiencies', mine: { armor: 'light', weapons: 'swords' }, theirs },
+      ]);
+    });
+
+    it('records one reset for several local paths under the same blocked prefix', () => {
+      const remote = { proficiencies: ['x'], other: 1 };
+      const { resetFields } = mergeRemoteUpdate(b, { proficiencies: { armor: 'heavy', weapons: 'axes' }, other: 1 }, remote);
+      expect(resetFields).toEqual([
+        { path: 'proficiencies', mine: { armor: 'heavy', weapons: 'axes' }, theirs: ['x'] },
+      ]);
+    });
+
+    it('blocks deeper prefixes too', () => {
+      const deepBase = { a: { b: { c: 1 } } };
+      const deepLocal = { a: { b: { c: 2 } } };
+      const deepRemote = { a: { b: 5 } };
+      expect(mergeRemoteUpdate(deepBase, deepLocal, deepRemote)).toEqual({
+        data: { a: { b: 5 } },
+        resetFields: [{ path: 'a.b', mine: { c: 2 }, theirs: 5 }],
+      });
+    });
+  });
+
   it('merges a whole-document ("") change when the root is not path-addressable', () => {
     const b: Record<string, unknown> = { 'a-b': 1 };
     const localOnly = mergeRemoteUpdate(b, { 'a-b': 2 }, { 'a-b': 1 });

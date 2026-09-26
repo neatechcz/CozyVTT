@@ -213,10 +213,13 @@ export default function CharacterEditorPage() {
       // Pass tokenImageUrl through so token images are persisted
       await handleSave(data, showToast ?? true, tokenImageUrl);
 
-      // Store for top save button reference
-      pendingDataRef.current = data;
+      // Store for top save button reference. Not for D&D 5e: live sync keeps
+      // the form current, so replaying this snapshot could PATCH old values back.
+      if (!isDnd5e) {
+        pendingDataRef.current = data;
+      }
     },
-    [handleSave]
+    [handleSave, isDnd5e]
   );
 
   // ============================================
@@ -269,7 +272,7 @@ export default function CharacterEditorPage() {
   // ============================================
 
   const handleManualSave = async () => {
-    if (pendingDataRef.current) {
+    if (!isDnd5e && pendingDataRef.current) {
       await handleSave(pendingDataRef.current, true);
     }
   };
@@ -377,15 +380,17 @@ export default function CharacterEditorPage() {
               </span>
             )}
 
-            {/* Manual Save Button */}
-            <Button
-              onClick={handleManualSave}
-              disabled={!hasUnsavedChanges || saving}
-              className="flex items-center gap-2"
-            >
-              <Save className="w-4 h-4" />
-              Save
-            </Button>
+            {/* Manual Save Button (D&D 5e saves from the sheet itself) */}
+            {!isDnd5e && (
+              <Button
+                onClick={handleManualSave}
+                disabled={!hasUnsavedChanges || saving}
+                className="flex items-center gap-2"
+              >
+                <Save className="w-4 h-4" />
+                Save
+              </Button>
+            )}
 
             {/* Export Button */}
             <Button
@@ -413,8 +418,10 @@ export default function CharacterEditorPage() {
           {...(isDnd5e
             ? {
                 externalData: liveSync.externalData,
+                externalBase: liveSync.externalBase,
                 externalDataVersion: liveSync.externalDataVersion,
                 onLocalChange: liveSync.reportLocalChange,
+                onDiscardLocalChanges: liveSync.discardLocalChanges,
               }
             : {})}
         />

@@ -20,6 +20,8 @@ import {
 } from 'lucide-react';
 import { Character } from '../../../types';
 import { api } from '../../../services/api';
+import { mergeRemoteUpdate } from '../../../utils/characterMerge';
+import { deepEqual } from '../../../utils/character-paths';
 
 interface DnD5eCharacterEditorProps {
   character: Character;
@@ -27,9 +29,13 @@ interface DnD5eCharacterEditorProps {
   onCancel: () => void;
   /** Data from a live update (someone else changed the character); applied when `externalDataVersion` changes */
   externalData?: object;
+  /** The form data (as last reported) that `externalData` was merged against */
+  externalBase?: object;
   externalDataVersion?: number;
   /** Called on every form data change; `origin` tells user edits from derived/adopted changes */
   onLocalChange?: (data: any, origin: 'user' | 'system') => void;
+  /** Called when the editor goes away (cancel, close, switch to view) */
+  onDiscardLocalChanges?: () => void;
 }
 
 type TabId = 'stats' | 'combat' | 'spells' | 'inventory' | 'features' | 'bio';
@@ -144,8 +150,10 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
   onSave,
   onCancel,
   externalData,
+  externalBase,
   externalDataVersion,
   onLocalChange,
+  onDiscardLocalChanges,
 }) => {
   const [activeTab, setActiveTab] = useState<TabId>('stats');
   const [isSaving, setIsSaving] = useState(false);
@@ -158,24 +166,38 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
   // Form state - initialize with character data
   const [formData, setFormData] = useState<any>(() => buildFormData(data));
 
-  // Live updates: replace the form with external data whenever its version
-  // changes (no remount — tab, colour picker and token preview are kept).
+  // The form object produced by the latest user edit (updateField). A report
+  // is the user's iff it carries exactly that object.
+  const userObjRef = useRef<any>(null);
+
+  // Live updates: when the version changes, rebase the CURRENT form onto the
+  // external data (no remount — tab, colour picker and token preview are
+  // kept). Edits not yet reported (e.g. a keystroke committed after the
+  // merge was computed) stay on top instead of being overwritten.
   const appliedExternalVersionRef = useRef(externalDataVersion);
   useEffect(() => {
     if (externalDataVersion === undefined || externalDataVersion === appliedExternalVersionRef.current) return;
     appliedExternalVersionRef.current = externalDataVersion;
-    if (externalData) {
-      setFormData(buildFormData(externalData));
-    }
+    if (!externalData) return;
+    setFormData((prev: any) => {
+      if (!externalBase) return buildFormData(externalData);
+      const next = buildFormData(mergeRemoteUpdate(externalBase as any, prev, externalData as any).data);
+      if (!deepEqual(prev, externalBase)) {
+        userObjRef.current = next; // carries unreported user edits
+      }
+      return next;
+    });
   }, [externalDataVersion]);
 
-  // Report every form change; changes made through updateField are the user's.
-  const userEditRef = useRef(false);
+  // Report every form change, tagged by origin.
   useEffect(() => {
-    const origin = userEditRef.current ? 'user' : 'system';
-    userEditRef.current = false;
-    onLocalChange?.(formData, origin);
+    onLocalChange?.(formData, formData === userObjRef.current ? 'user' : 'system');
   }, [formData]);
+
+  // Unsaved edits die with the editor (cancel, close, back to view mode).
+  const onDiscardRef = useRef(onDiscardLocalChanges);
+  onDiscardRef.current = onDiscardLocalChanges;
+  useEffect(() => () => onDiscardRef.current?.(), []);
 
   // Token image state (file will be uploaded on save)
   const [tokenImageFile, setTokenImageFile] = useState<File | null>(null);
@@ -504,7 +526,6 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
 
   // Update form field
   const updateField = (path: string, value: any) => {
-    userEditRef.current = true;
     setFormData((prev: any) => {
       const newData = { ...prev };
       const keys = path.split('.');
@@ -521,6 +542,7 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
         current = current[keys[i]];
       }
       current[keys[keys.length - 1]] = value;
+      userObjRef.current = newData; // tags this form object as a user edit
       return newData;
     });
   };

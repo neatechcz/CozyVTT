@@ -44,8 +44,11 @@ export function getDnd5eFieldLabel(path: string): string {
   // `""` is the whole document (data that is not path-addressable)
   if (path === '') return 'Celý list postavy';
 
-  const known = DND5E_FIELD_LABELS[path];
-  if (known) return known;
+  // Own keys only — `toString`, `constructor`… must not hit Object.prototype.
+  // (Object.hasOwn needs lib ES2022; the project targets ES2020.)
+  if (Object.prototype.hasOwnProperty.call(DND5E_FIELD_LABELS, path)) {
+    return DND5E_FIELD_LABELS[path];
+  }
 
   const expended = SPELL_SLOT_EXPENDED.exec(path);
   if (expended) return `Použité sloty ${expended[1]}. úrovně`;

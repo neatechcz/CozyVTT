@@ -5,6 +5,8 @@ import {
   setAtPath,
   deepEqual,
   isSafePath,
+  resolvePath,
+  PathBlockedError,
 } from '../character-paths';
 
 describe('character-paths', () => {
@@ -116,6 +118,23 @@ describe('character-paths', () => {
     });
   });
 
+  describe('resolvePath', () => {
+    it('resolves existing values', () => {
+      expect(resolvePath({ a: { b: 0 } }, 'a.b')).toEqual({ kind: 'value', value: 0 });
+    });
+
+    it('reports missing (or undefined) keys as missing', () => {
+      expect(resolvePath({ a: {} }, 'a.b.c')).toEqual({ kind: 'missing' });
+      expect(resolvePath({ a: undefined }, 'a.b')).toEqual({ kind: 'missing' });
+    });
+
+    it('reports the prefix where an array, null or primitive blocks the path', () => {
+      expect(resolvePath({ p: ['light'] }, 'p.weapons')).toEqual({ kind: 'blocked', prefix: 'p', value: ['light'] });
+      expect(resolvePath({ p: null }, 'p.weapons')).toEqual({ kind: 'blocked', prefix: 'p', value: null });
+      expect(resolvePath({ p: { q: 7 } }, 'p.q.r')).toEqual({ kind: 'blocked', prefix: 'p.q', value: 7 });
+    });
+  });
+
   describe('setAtPath', () => {
     it('creates intermediate objects and does not mutate its input', () => {
       const input = { a: { keep: 1 } };
@@ -127,8 +146,20 @@ describe('character-paths', () => {
       expect(out.a).not.toBe(input.a);
     });
 
-    it('replaces a non-object intermediate with an object', () => {
-      expect(setAtPath({ a: 3 }, 'a.b', 1)).toEqual({ a: { b: 1 } });
+    it('throws PathBlockedError instead of writing through an array, null or primitive', () => {
+      expect(() => setAtPath({ a: 3 }, 'a.b', 1)).toThrow(PathBlockedError);
+      expect(() => setAtPath({ a: null }, 'a.b', 1)).toThrow(PathBlockedError);
+      expect(() => setAtPath({ a: ['x'] }, 'a.b.c', 1)).toThrow(PathBlockedError);
+      try {
+        setAtPath({ a: { b: 'str' } }, 'a.b.c', 1);
+      } catch (error) {
+        expect(error).toBeInstanceOf(PathBlockedError);
+        expect((error as PathBlockedError).prefix).toBe('a.b');
+      }
+    });
+
+    it('creates missing and undefined intermediates', () => {
+      expect(setAtPath({ a: undefined }, 'a.b', 1)).toEqual({ a: { b: 1 } });
     });
 
     it('removes the key when the value is undefined', () => {

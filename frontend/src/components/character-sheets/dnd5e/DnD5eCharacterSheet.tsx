@@ -13,7 +13,16 @@ import { DnD5eCharacterEditor } from './DnD5eCharacterEditor';
  * DnD5eCharacterSheet - Mode switcher for D&D 5e character sheet
  */
 export const DnD5eCharacterSheet: React.FC<CharacterSheetProps> = (props) => {
-  const { mode, character, onSave, externalData, externalDataVersion, onLocalChange } = props;
+  const {
+    mode,
+    character,
+    onSave,
+    externalData,
+    externalBase,
+    externalDataVersion,
+    onLocalChange,
+    onDiscardLocalChanges,
+  } = props;
   const [currentMode, setCurrentMode] = useState<'view' | 'edit'>(mode);
 
   // Handle cancel - return to view mode
@@ -37,8 +46,10 @@ export const DnD5eCharacterSheet: React.FC<CharacterSheetProps> = (props) => {
         onSave={handleSave}
         onCancel={handleCancel}
         externalData={externalData}
+        externalBase={externalBase}
         externalDataVersion={externalDataVersion}
         onLocalChange={onLocalChange}
+        onDiscardLocalChanges={onDiscardLocalChanges}
       />
     );
   }

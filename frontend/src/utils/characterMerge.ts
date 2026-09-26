@@ -4,7 +4,7 @@
 // knows, `local` what the user has in the form, `remote` the new server state.
 // ============================================
 
-import { deepEqual, diffPaths, getAtPath, isSafePath, setAtPath } from './character-paths';
+import { deepEqual, diffPaths, getAtPath, isSafePath, resolvePath, setAtPath } from './character-paths';
 
 export { diffPaths } from './character-paths';
 
@@ -47,8 +47,31 @@ export function mergeRemoteUpdate<T extends CharacterDataObject>(
   let data = cloneData(remote);
   const resetFields: ResetField[] = [];
 
+  const blockedPrefixes = new Set<string>();
+
   for (const path of diffPaths(base, local)) {
     const mine = getAtPath(local, path);
+
+    // The remote replaced an object on this path with an array, `null` or a
+    // primitive (diffPaths only descends where base and local are objects,
+    // so base had an object there): that counts as a remote change of the
+    // whole prefix — keep the remote value, reset the user's object once.
+    const resolved = path === '' ? null : resolvePath(remote, path);
+    if (resolved?.kind === 'blocked') {
+      if (!blockedPrefixes.has(resolved.prefix)) {
+        blockedPrefixes.add(resolved.prefix);
+        const minePrefix = getAtPath(local, resolved.prefix);
+        if (!deepEqual(minePrefix, resolved.value)) {
+          resetFields.push({
+            path: resolved.prefix,
+            mine: cloneData(minePrefix),
+            theirs: cloneData(resolved.value),
+          });
+        }
+      }
+      continue;
+    }
+
     const theirs = getAtPath(remote, path);
     const remoteChanged = !deepEqual(getAtPath(base, path), theirs);
 

@@ -72,11 +72,19 @@ export interface UseLiveCharacterSyncOptions {
 
 export interface UseLiveCharacterSyncResult {
   externalData: CharacterDataObject | undefined;
+  /**
+   * The local data `externalData` was merged against. The editor rebases its
+   * current form onto `externalData` relative to this, so edits it has not
+   * reported yet survive the update.
+   */
+  externalBase: CharacterDataObject | undefined;
   externalDataVersion: number;
   resets: SheetReset[];
   dismissResets: () => void;
   save: (localData: CharacterDataObject) => Promise<LiveSaveOutcome>;
   reportLocalChange: (data: CharacterDataObject, origin?: LocalChangeOrigin) => void;
+  /** Forget the user's unsaved edits (editor cancelled or closed); keeps resets */
+  discardLocalChanges: () => void;
   /** The user has edits that are not on the server */
   isDirty: boolean;
 }
@@ -84,6 +92,24 @@ export interface UseLiveCharacterSyncResult {
 export const UNKNOWN_AUTHOR: SheetResetAuthor = { userId: null, displayName: 'někdo jiný' };
 
 const CHARACTER_UPDATED = 'character.updated';
+
+/** Server limit for one PATCH request */
+const MAX_PATCH_CHANGES = 200;
+
+/** True when `a` is a strictly older timestamp than `b` (unparseable → false). */
+function isOlder(a: string | undefined, b: string | undefined): boolean {
+  const ta = a ? Date.parse(a) : NaN;
+  const tb = b ? Date.parse(b) : NaN;
+  return !Number.isNaN(ta) && !Number.isNaN(tb) && ta < tb;
+}
+
+interface ExternalState {
+  data: CharacterDataObject | undefined;
+  base: CharacterDataObject | undefined;
+  version: number;
+}
+
+const INITIAL_EXTERNAL: ExternalState = { data: undefined, base: undefined, version: 0 };
 
 /** Same field, or one contains the other; `""` is the whole document. */
 function pathsOverlap(a: string, b: string): boolean {
@@ -96,16 +122,17 @@ export function useLiveCharacterSync({
   isDnd5e,
   onServerCharacter,
 }: UseLiveCharacterSyncOptions): UseLiveCharacterSyncResult {
-  const [external, setExternal] = useState<{ data: CharacterDataObject | undefined; version: number }>({
-    data: undefined,
-    version: 0,
-  });
+  const [external, setExternal] = useState<ExternalState>(INITIAL_EXTERNAL);
   const [resets, setResets] = useState<SheetReset[]>([]);
   const [isDirty, setIsDirty] = useState(false);
 
   const trackedIdRef = useRef<string | null>(null);
   const baseRef = useRef<CharacterDataObject>({});
+  /** `updatedAt` of the server state in `baseRef` */
+  const baseUpdatedAtRef = useRef<string | undefined>(undefined);
   const localRef = useRef<CharacterDataObject>({});
+  /** The editor's form data exactly as last reported (before save post-processing) */
+  const lastReportedRef = useRef<CharacterDataObject>({});
   /** Paths the user edited that still differ from `base` */
   const touchedRef = useRef<Set<string>>(new Set());
   const onServerCharacterRef = useRef(onServerCharacter);
@@ -115,10 +142,19 @@ export function useLiveCharacterSync({
   // child, and child effects — including its first local report — run before
   // ours, so `base` must already be set when that report arrives.
   if (isDnd5e && character && trackedIdRef.current !== character.id) {
+    const switching = trackedIdRef.current !== null;
     trackedIdRef.current = character.id;
     baseRef.current = cloneData((character.data ?? {}) as CharacterDataObject);
+    baseUpdatedAtRef.current = character.updatedAt;
     localRef.current = cloneData(baseRef.current);
+    lastReportedRef.current = cloneData(baseRef.current);
     touchedRef.current = new Set();
+    if (switching) {
+      // Another character: nothing of the previous one's state applies.
+      setExternal(INITIAL_EXTERNAL);
+      setResets([]);
+      setIsDirty(false);
+    }
   }
 
   const isTouched = (path: string): boolean => {
@@ -139,12 +175,18 @@ export function useLiveCharacterSync({
     setIsDirty(touched.size > 0);
   };
 
+  /**
+   * Hand `data` to the editor together with the form data it last reported:
+   * the editor rebases its current form onto `data` relative to that, so
+   * only edits it has not reported yet are kept on top.
+   */
   const pushToEditor = (data: CharacterDataObject) => {
-    setExternal((prev) => ({ data: cloneData(data), version: prev.version + 1 }));
+    const against = lastReportedRef.current;
+    setExternal((prev) => ({ data: cloneData(data), base: cloneData(against), version: prev.version + 1 }));
   };
 
   /** Move `base` to a new server state, merging it into the local data. */
-  const rebase = (serverData: CharacterDataObject, author: SheetResetAuthor) => {
+  const rebase = (serverData: CharacterDataObject, author: SheetResetAuthor, updatedAt?: string) => {
     let next: CharacterDataObject;
     let newResets: SheetReset[] = [];
 
@@ -161,6 +203,7 @@ export function useLiveCharacterSync({
     }
 
     baseRef.current = cloneData(serverData);
+    baseUpdatedAtRef.current = updatedAt;
     localRef.current = next;
     refreshDirty();
     pushToEditor(next);
@@ -185,12 +228,17 @@ export function useLiveCharacterSync({
 
       const remoteData = (payload.character.data ?? {}) as CharacterDataObject;
       // Our own save echoed back, or a change outside `data` (name, token).
-      if (deepEqual(remoteData, baseRef.current)) return;
+      if (deepEqual(remoteData, baseRef.current)) {
+        if (!isOlder(payload.character.updatedAt, baseUpdatedAtRef.current)) {
+          baseUpdatedAtRef.current = payload.character.updatedAt;
+        }
+        return;
+      }
 
       const author: SheetResetAuthor = payload.updatedBy
         ? { userId: payload.updatedBy.userId, displayName: payload.updatedBy.displayName }
         : { ...UNKNOWN_AUTHOR, userId: payload.userId ?? null };
-      rebaseRef.current(remoteData, author);
+      rebaseRef.current(remoteData, author, payload.character.updatedAt);
     };
 
     socket.on(CHARACTER_UPDATED, handleCharacterUpdated);
@@ -209,6 +257,7 @@ export function useLiveCharacterSync({
         }
       }
       localRef.current = next;
+      lastReportedRef.current = next;
       refreshDirty();
     },
     [],
@@ -226,10 +275,17 @@ export function useLiveCharacterSync({
     localRef.current = savedLocal;
 
     const adoptSaved = (saved: Character): LiveSaveOutcome => {
+      if (isOlder(saved.updatedAt, baseUpdatedAtRef.current)) {
+        // A newer broadcast (written after our save, so it already contains
+        // it) was adopted while the request was in flight — keep that base.
+        refreshDirty();
+        return { status: 'saved', character: saved };
+      }
       const serverData = (saved.data ?? {}) as CharacterDataObject;
       // Keep anything typed while the request was in flight.
       const { data: next } = mergeRemoteUpdate(savedLocal, localRef.current, serverData);
       baseRef.current = cloneData(serverData);
+      baseUpdatedAtRef.current = saved.updatedAt;
       localRef.current = next;
       refreshDirty();
       pushToEditor(next);
@@ -237,18 +293,27 @@ export function useLiveCharacterSync({
       return { status: 'saved', character: saved };
     };
 
+    const saveWholeDocument = async (): Promise<LiveSaveOutcome> => {
+      const { character: saved } = await api.updateCharacter(id, { data: savedLocal as Character['data'] });
+      return adoptSaved(saved);
+    };
+
     if (needsFullDocumentSave(baseRef.current, savedLocal)) {
       // The data is not path-addressable (the root has a key outside the
       // shared path rules), so field-level changes cannot express it: fall
       // back to the full-document PUT for this save (last write wins).
-      const { character: saved } = await api.updateCharacter(id, { data: savedLocal as Character['data'] });
-      return adoptSaved(saved);
+      return saveWholeDocument();
     }
 
     const changes = buildChanges(baseRef.current, savedLocal);
     if (changes.length === 0) {
       refreshDirty();
       return { status: 'unchanged' };
+    }
+    if (changes.length > MAX_PATCH_CHANGES) {
+      // The PATCH endpoint rejects more than 200 changes (e.g. a first save
+      // of an old sheet the editor normalised heavily): use the full PUT.
+      return saveWholeDocument();
     }
 
     const result = await api.patchCharacterData(id, changes);
@@ -263,19 +328,29 @@ export function useLiveCharacterSync({
     // non-object, `current` may be undefined); the merge works from data.
     const { character: fresh } = await api.getCharacter(id);
     onServerCharacterRef.current?.(fresh);
-    rebaseRef.current((fresh.data ?? {}) as CharacterDataObject, UNKNOWN_AUTHOR);
+    rebaseRef.current((fresh.data ?? {}) as CharacterDataObject, UNKNOWN_AUTHOR, fresh.updatedAt);
     return { status: 'conflicts', character: fresh, conflicts: result.conflicts };
   }, []);
 
   const dismissResets = useCallback(() => setResets([]), []);
 
+  const discardLocalChanges = useCallback(() => {
+    if (!trackedIdRef.current) return;
+    localRef.current = cloneData(baseRef.current);
+    lastReportedRef.current = cloneData(baseRef.current);
+    touchedRef.current = new Set();
+    setIsDirty(false);
+  }, []);
+
   return {
     externalData: external.data,
+    externalBase: external.base,
     externalDataVersion: external.version,
     resets,
     dismissResets,
     save,
     reportLocalChange,
+    discardLocalChanges,
     isDirty,
   };
 }

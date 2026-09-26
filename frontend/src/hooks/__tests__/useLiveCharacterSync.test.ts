@@ -437,6 +437,124 @@ describe('useLiveCharacterSync', () => {
     expect(onServerCharacter).toHaveBeenCalledWith(saved);
   });
 
+  it('discardLocalChanges() drops local edits (not dirty, no later false resets) and keeps resets', () => {
+    const { hook, socket } = setup();
+    act(() => hook.result.current.reportLocalChange({ ...baseData(), experiencePoints: 110 }));
+    act(() =>
+      socket.emit('character.updated', remoteEvent({ ...baseData(), experiencePoints: 200 }, ['experiencePoints'])),
+    );
+    act(() => hook.result.current.reportLocalChange({ ...baseData(), experiencePoints: 200, hp: { current: 1, maximum: 10, temporary: 0 } }));
+    expect(hook.result.current.isDirty).toBe(true);
+    expect(hook.result.current.resets).toHaveLength(1);
+
+    act(() => hook.result.current.discardLocalChanges());
+    expect(hook.result.current.isDirty).toBe(false);
+    expect(hook.result.current.resets).toHaveLength(1);
+
+    // A later remote change to the discarded field is simply adopted.
+    act(() =>
+      socket.emit(
+        'character.updated',
+        remoteEvent({ ...baseData(), experiencePoints: 200, hp: { current: 9, maximum: 10, temporary: 0 } }, ['hp.current']),
+      ),
+    );
+    expect(hook.result.current.resets).toHaveLength(1);
+    expect(hook.result.current.externalData).toEqual({
+      ...baseData(),
+      experiencePoints: 200,
+      hp: { current: 9, maximum: 10, temporary: 0 },
+    });
+  });
+
+  it('exposes the local data each external push was merged against (externalBase)', () => {
+    const { hook, socket } = setup();
+    const local = { ...baseData(), characterName: 'Mine' };
+    act(() => hook.result.current.reportLocalChange(local));
+    act(() => socket.emit('character.updated', remoteEvent({ ...baseData(), experiencePoints: 5 }, ['experiencePoints'])));
+    expect(hook.result.current.externalBase).toEqual(local);
+  });
+
+  it('a save response older than an already adopted broadcast does not move base backwards', async () => {
+    const { hook, socket } = setup();
+    const local = { ...baseData(), experiencePoints: 175 };
+    act(() => hook.result.current.reportLocalChange(local));
+
+    let resolvePatch!: (value: unknown) => void;
+    mocks.patchCharacterData.mockReturnValue(new Promise((resolve) => (resolvePatch = resolve)));
+    let savePromise!: Promise<unknown>;
+    act(() => {
+      savePromise = hook.result.current.save(local);
+    });
+
+    // Someone else wrote after our save; their broadcast (T2) arrives first.
+    const newer = { ...local, conditions: ['prone'] };
+    act(() =>
+      socket.emit('character.updated', {
+        ...remoteEvent(newer, ['conditions']),
+        character: makeCharacter(newer, { updatedAt: '2026-09-26T00:00:02.000Z' }),
+      }),
+    );
+    await act(async () => {
+      resolvePatch({
+        character: makeCharacter(local, { updatedAt: '2026-09-26T00:00:01.000Z' }),
+        applied: ['experiencePoints'],
+        conflicts: [],
+        status: 200,
+      });
+      await savePromise;
+    });
+
+    expect(hook.result.current.externalData).toEqual(newer);
+    expect(hook.result.current.isDirty).toBe(false);
+
+    // Base is still T2: saving the same data changes nothing.
+    let outcome: Awaited<ReturnType<typeof hook.result.current.save>> | undefined;
+    await act(async () => {
+      outcome = await hook.result.current.save(newer);
+    });
+    expect(outcome?.status).toBe('unchanged');
+    expect(mocks.patchCharacterData).toHaveBeenCalledTimes(1);
+  });
+
+  it('falls back to the full-document PUT when there are more than 200 changes', async () => {
+    const many: Record<string, unknown> = {};
+    for (let i = 0; i < 201; i++) many[`f${i}`] = 0;
+    const { hook } = setup({ data: many });
+    const local = Object.fromEntries(Object.keys(many).map((key) => [key, 1]));
+    act(() => hook.result.current.reportLocalChange(local));
+    mocks.updateCharacter.mockResolvedValue({ message: 'ok', character: makeCharacter(local) });
+
+    let outcome: Awaited<ReturnType<typeof hook.result.current.save>> | undefined;
+    await act(async () => {
+      outcome = await hook.result.current.save(local);
+    });
+
+    expect(mocks.patchCharacterData).not.toHaveBeenCalled();
+    expect(mocks.updateCharacter).toHaveBeenCalledWith('char-1', { data: local });
+    expect(outcome?.status).toBe('saved');
+  });
+
+  it('switching to another character resets resets, isDirty and the external version', () => {
+    const socket = createFakeSocket();
+    const first = makeCharacter(baseData());
+    const second = makeCharacter({ ...baseData(), characterName: 'Mich' }, { id: 'char-2' });
+    const hook = renderHook(({ character }) => useLiveCharacterSync({ character, socket, isDnd5e: true }), {
+      initialProps: { character: first },
+    });
+    act(() => hook.result.current.reportLocalChange({ ...baseData(), experiencePoints: 1 }));
+    act(() => socket.emit('character.updated', remoteEvent({ ...baseData(), experiencePoints: 2 }, ['experiencePoints'])));
+    expect(hook.result.current.resets).toHaveLength(1);
+    act(() => hook.result.current.reportLocalChange({ ...baseData(), experiencePoints: 2, conditions: ['x'] }));
+    expect(hook.result.current.isDirty).toBe(true);
+
+    hook.rerender({ character: second });
+
+    expect(hook.result.current.resets).toEqual([]);
+    expect(hook.result.current.isDirty).toBe(false);
+    expect(hook.result.current.externalDataVersion).toBe(0);
+    expect(hook.result.current.externalData).toBeUndefined();
+  });
+
   it('propagates validation errors from save()', async () => {
     const { hook } = setup();
     const local = { ...baseData(), experiencePoints: -5 };

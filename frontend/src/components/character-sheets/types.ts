@@ -34,6 +34,8 @@ export interface CharacterSheetProps {
    * callback reporting every local form change.
    */
   externalData?: object;
+  externalBase?: object;
   externalDataVersion?: number;
   onLocalChange?: (data: any, origin: 'user' | 'system') => void;
+  onDiscardLocalChanges?: () => void;
 }
