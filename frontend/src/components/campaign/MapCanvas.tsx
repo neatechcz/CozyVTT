@@ -46,6 +46,7 @@ import {
 import { createVisionCache, type VisionSource } from './map/vision';
 import { useTokenAnimation, useFogRevealAnimation } from './map/useMapAnimations';
 import { useTokenSocketEvents } from './map/useTokenSocketEvents';
+import { useWallSocketEvents } from './map/useWallSocketEvents';
 import type { TokenAnimation } from './map/layers/types';
 import { useRenderLoop, type MapLayer } from './map/useRenderLoop';
 import api from '@/services/api';
@@ -185,7 +186,7 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
   const { markDirty } = useRenderLoop(drawLayerRef);
 
   // Walls & Fog of War state — wall segments use undo/redo history hook
-  const { walls: wallSegments, push: pushWallHistory, replace: replaceWallHistory, undo: undoWalls, redo: redoWalls, canUndo: canUndoWalls, canRedo: canRedoWalls } = useWallHistory([]);
+  const { walls: wallSegments, push: pushWallHistory, replace: replaceWallHistory, reset: resetWallHistory, undo: undoWalls, redo: redoWalls, canUndo: canUndoWalls, canRedo: canRedoWalls } = useWallHistory([]);
   const [fogState, setFogState] = useState<FogState | null>(null);
   // Player view: list of revealed fog cell indices (derived from server fog:cells event).
   // null = fog data not received yet (show everything); Set = fog active (show only revealed cells).
@@ -765,6 +766,20 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
   );
   useTokenSocketEvents(socket, currentMapId, startTokenAnimation);
 
+  /**
+   * wall:added / wall:removed / wall:updated / walls:replaced from other
+   * clients (another DM socket, the AI narrator's MCP service account, a
+   * player toggling an unlocked door).
+   */
+  const onWallsChanged = useCallback(() => {
+    wallCacheValidRef.current = false;
+  }, []);
+  useWallSocketEvents(socket, currentMapId, isDM, wallSegmentsRef, {
+    replaceWalls: replaceWallHistory,
+    resetWalls: resetWallHistory,
+    onWallsChanged,
+  });
+
   // ============================================
   // Map Change
   // Fade transition when currentMap changes +
@@ -872,14 +887,15 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
   // ============================================
   useEffect(() => {
     if (!currentMap) {
-      replaceWallHistory([]);
+      resetWallHistory([]);
       setFogState(null);
       setRevealedCells(null);
       return;
     }
 
-    // Load wall segments and light sources from the map response (included in GET /maps/:id)
-    replaceWallHistory((currentMap.wallSegments as WallSegment[] | undefined) ?? []);
+    // Load wall segments and light sources from the map response (included in GET /maps/:id).
+    // Uses reset (not replace) so undo/redo never restores a previous map's walls.
+    resetWallHistory((currentMap.wallSegments as WallSegment[] | undefined) ?? []);
     setLightSources((currentMap.lights as LightSource[] | undefined) ?? []);
 
     // DMs: request full fog state; players: request revealed cells
@@ -901,39 +917,6 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
   // ============================================
   useEffect(() => {
     if (!socket) return;
-
-    const handleWallAdded = (data: { mapId: string; segment: WallSegment }) => {
-      // DM already applied the change optimistically before emitting; skip the echo to
-      // avoid reverting local state with stale data from the closed-over wallSegments.
-      if (isDM) return;
-      if (!currentMap || data.mapId !== currentMap.id) return;
-      replaceWallHistory([...wallSegmentsRef.current, data.segment]);
-      wallCacheValidRef.current = false;
-    };
-
-    const handleWallRemoved = (data: { mapId: string; segmentId: string }) => {
-      if (isDM) return;
-      if (!currentMap || data.mapId !== currentMap.id) return;
-      replaceWallHistory(wallSegmentsRef.current.filter((s) => s.id !== data.segmentId));
-      wallCacheValidRef.current = false;
-    };
-
-    const handleWallUpdated = (data: { mapId: string; segment: WallSegment }) => {
-      if (isDM) return;
-      if (!currentMap || data.mapId !== currentMap.id) return;
-      replaceWallHistory(wallSegmentsRef.current.map((s) => s.id === data.segment.id ? data.segment : s));
-      wallCacheValidRef.current = false;
-    };
-
-    const handleWallsReplaced = (data: { mapId: string; segments: WallSegment[] }) => {
-      // DM's local undo/redo stack is already correct; echoing walls:replaced causes
-      // a redundant re-render and can race with rapid pushes.
-      if (isDM) return;
-      if (!currentMap || data.mapId !== currentMap.id) return;
-      // Full canonical list from server — safe to use directly (no stale-closure risk)
-      replaceWallHistory(data.segments);
-      wallCacheValidRef.current = false;
-    };
 
     const handleFogUpdated = (data: { mapId: string; fogState: FogState }) => {
       if (!currentMap || data.mapId !== currentMap.id) return;
@@ -1013,10 +996,6 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
       setLightSources(data.lights);
     };
 
-    socket.on('wall:added', handleWallAdded);
-    socket.on('wall:removed', handleWallRemoved);
-    socket.on('wall:updated', handleWallUpdated);
-    socket.on('walls:replaced', handleWallsReplaced);
     socket.on('fog:updated', handleFogUpdated);
     socket.on('fog:cells', handleFogCells);
     socket.on('dm:editing', handleDmEditing);
@@ -1029,10 +1008,6 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
       socket.off('token:appeared', handleTokenAppeared);
       socket.off('token:disappeared', handleTokenDisappeared);
       socket.off('map:lighting:updated', handleLightingUpdated);
-      socket.off('wall:added', handleWallAdded);
-      socket.off('wall:removed', handleWallRemoved);
-      socket.off('wall:updated', handleWallUpdated);
-      socket.off('walls:replaced', handleWallsReplaced);
       socket.off('fog:updated', handleFogUpdated);
       socket.off('fog:cells', handleFogCells);
       socket.off('dm:editing', handleDmEditing);

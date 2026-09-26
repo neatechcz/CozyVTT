@@ -11,6 +11,8 @@ import { vi } from 'vitest';
 
 type Listener = (...args: any[]) => void;
 
+let fakeSocketIdCounter = 0;
+
 class FakeManager {
   listeners = new Map<string, Listener[]>();
   on(event: string, listener: Listener) {
@@ -31,6 +33,9 @@ class FakeManager {
 
 export class FakeSocket {
   connected = false;
+  /** Unique per instance, like socket.io's real `Socket#id` — lets tests tell
+   * "this client's own socket" apart from another client's. */
+  id = `fake-socket-${++fakeSocketIdCounter}`;
   /** socket.io Manager: reconnect_* events are emitted here, not on the socket */
   io = new FakeManager();
   listeners = new Map<string, Listener[]>();
