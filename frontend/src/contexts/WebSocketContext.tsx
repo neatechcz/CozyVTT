@@ -122,16 +122,8 @@ export function WebSocketProvider({ children }: WebSocketProviderProps) {
 
       setStatus('connected');
       connectedCampaignRef.current = id;
-
-      // Detect reconnect-to-same-campaign on the manual path (Retry button,
-      // navigator.onLine handler). The .on('reconnect') listener below only
-      // fires on socket.io's internal auto-reconnect; manual re-connects go
-      // through here. Either way, reconnectCount must tick so consumers
-      // (ChatPanel, CampaignPage) refetch missed state.
-      if (previouslyConnectedCampaignRef.current === id) {
-        setReconnectCount((c) => c + 1);
-      }
-      previouslyConnectedCampaignRef.current = id;
+      // reconnectCount ticks in the 'authenticated' lifecycle listener below
+      // (every rejoin, whichever path created it)
 
       // Wire up the full lifecycle on the raw socket so the status badge stays
       // in sync across drops and auto-reconnects. Previously a single
@@ -152,11 +144,12 @@ export function WebSocketProvider({ children }: WebSocketProviderProps) {
           setStatus('connecting');
         });
 
-        // Successful reconnect — flip back to 'connected' and signal consumers
+        // Successful reconnect — flip back to 'connected'. Consumers are
+        // signalled (reconnectCount) once the room is rejoined: see the
+        // 'authenticated' lifecycle listener.
         socket.on('reconnect', () => {
           if (!isMountedRef.current) return;
           setStatus('connected');
-          setReconnectCount((c) => c + 1);
         });
 
         // Final reconnect failure (socket.io gave up)
@@ -229,6 +222,26 @@ export function WebSocketProvider({ children }: WebSocketProviderProps) {
       previouslyConnectedCampaignRef.current = null;
     };
   }, [campaignId]); // connect is stable - no need in deps (causes premature cleanup)
+
+  // Every (re)join of the campaign room — first connect, socket.io's own
+  // auto-reconnect (which re-authenticates on the same socket) and the manual
+  // paths (Retry button, back online, server-forced reconnect) that build a
+  // new socket. A rejoin of the campaign joined before ticks reconnectCount so
+  // consumers (ChatPanel, CampaignPage, the character sheet editor) refetch
+  // whatever they missed while disconnected.
+  useEffect(() => {
+    return socketClient.onLifecycle((event) => {
+      if (event !== 'authenticated' || !isMountedRef.current) return;
+      const id = socketClient.getCampaignId();
+      if (!id) return;
+      setStatus('connected');
+      setError(null);
+      if (previouslyConnectedCampaignRef.current === id) {
+        setReconnectCount((c) => c + 1);
+      }
+      previouslyConnectedCampaignRef.current = id;
+    });
+  }, []);
 
   // Browser network listeners — flip status immediately when the OS reports
   // the network has gone away, and actively trigger reconnection when it

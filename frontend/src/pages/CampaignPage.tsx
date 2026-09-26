@@ -161,12 +161,10 @@ function CampaignPageContent() {
     socket.onSessionResumed(handleResumed);
 
     return () => {
-      const socketInstance = socket.getSocket();
-      if (!socketInstance) return;
-      socketInstance.off('session.started', handleStarted);
-      socketInstance.off('session.paused', handlePaused);
-      socketInstance.off('session.ended', handleEnded);
-      socketInstance.off('session.resumed', handleResumed);
+      socket.off('session.started', handleStarted);
+      socket.off('session.paused', handlePaused);
+      socket.off('session.ended', handleEnded);
+      socket.off('session.resumed', handleResumed);
     };
   }, [socket, status, updateCampaignStatus, setActiveSession]);
 

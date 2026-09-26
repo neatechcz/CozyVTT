@@ -8,7 +8,7 @@ import { diffPaths, isSafePath } from '../utils/character-paths';
 import { GameSystem } from '../game-systems';
 import { validateCharacterData } from '../validators/game-systems';
 import { CreateCharacterSchema, UpdateCharacterSchema } from '../validators/characters';
-import { withCharacterRowLock } from '../services/characterLock';
+import { withCharacterRowLock, isCharacterLockTimeout, CHARACTER_BUSY_MESSAGE } from '../services/characterLock';
 import {
   InvalidPathError,
   MAX_CHANGES,
@@ -585,6 +585,14 @@ router.put('/:id', authenticated, async (req: AuthenticatedRequest, res: Respons
       character: updatedCharacter,
     });
   } catch (error) {
+    if (isCharacterLockTimeout(error)) {
+      // The row lock was not obtained in time (another writer holds it)
+      res.set('Retry-After', '1');
+      return res.status(503).json({
+        error: 'Service Unavailable',
+        message: CHARACTER_BUSY_MESSAGE,
+      });
+    }
     logger.error('Error updating character', { err: error });
     return res.status(500).json({
       error: 'Internal Server Error',
@@ -679,6 +687,14 @@ router.patch('/:id/data', characterDataPatchBodyParser, authenticated, async (re
     const status = applied.length === 0 && conflicts.length > 0 ? 409 : 200;
     return res.status(status).json({ character: updatedCharacter, applied, conflicts });
   } catch (error) {
+    if (isCharacterLockTimeout(error)) {
+      // The row lock was not obtained in time (another writer holds it)
+      res.set('Retry-After', '1');
+      return res.status(503).json({
+        error: 'Service Unavailable',
+        message: CHARACTER_BUSY_MESSAGE,
+      });
+    }
     logger.error('Error patching character data', { err: error });
     return res.status(500).json({
       error: 'Internal Server Error',

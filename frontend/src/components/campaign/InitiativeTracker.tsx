@@ -320,7 +320,7 @@ export default function InitiativeTracker() {
     socket.emitInitiativeRequestState();
 
     return () => {
-      socket.getSocket()?.off('initiative.state', handleState);
+      socket.off('initiative.state', handleState);
     };
   }, [socket]);
 

@@ -45,8 +45,8 @@ type EventCallback<T = any> = (data: T) => void;
 
 /**
  * Client-level connection signals (not server events):
- * - `replaced`: a new underlying socket was created — listeners added with
- *   `on()` were on the old one and must be added again
+ * - `replaced`: a new underlying socket was created (listeners added with
+ *   `on()` are already re-attached to it)
  * - `authenticated`: joined the campaign room (first join and every rejoin)
  * - `disconnected`: the connection dropped (socket.io may be retrying)
  * - `failed`: socket.io gave up reconnecting
@@ -62,6 +62,13 @@ class SocketClient {
   private campaignId: string | null = null;
   private quiet = false;
   private lifecycleListeners = new Set<(event: SocketLifecycleEvent) => void>();
+  /**
+   * Every listener added with `on()` (and the `onX()` helpers), by event.
+   * The client replaces its underlying socket (server-forced reconnect,
+   * browser back online, campaign switch); each new socket gets all of them
+   * attached again, so subscribers never go deaf after a replacement.
+   */
+  private listenerRegistry = new Map<string, Set<EventCallback>>();
 
   constructor() {
     // Socket will be initialized when connect() is called
@@ -114,6 +121,7 @@ class SocketClient {
         randomizationFactor: 0.5,
       });
       this.socket = socket;
+      this.attachRegisteredListeners(socket);
       this.emitLifecycle('replaced');
 
       // Set up a timeout to prevent hanging forever
@@ -276,7 +284,7 @@ class SocketClient {
   }
 
   onSyncState(callback: EventCallback) {
-    this.socket?.on('sync.state', callback);
+    this.on('sync.state', callback);
   }
 
   // ============================================
@@ -296,34 +304,34 @@ class SocketClient {
   }
 
   onTokenMoved(callback: EventCallback<TokenMovedEvent>) {
-    this.socket?.on('token.moved', callback);
+    this.on('token.moved', callback);
   }
 
   // Token add / update / remove made through the REST API (DM or MCP).
   // The server filters per recipient; hidden tokens reach DMs only.
 
   onTokenAdded(callback: EventCallback<TokenAddedPayload>) {
-    this.socket?.on('token.added', callback);
+    this.on('token.added', callback);
   }
 
   offTokenAdded(callback: EventCallback<TokenAddedPayload>) {
-    this.socket?.off('token.added', callback);
+    this.off('token.added', callback);
   }
 
   onTokenUpdated(callback: EventCallback<TokenUpdatedPayload>) {
-    this.socket?.on('token.updated', callback);
+    this.on('token.updated', callback);
   }
 
   offTokenUpdated(callback: EventCallback<TokenUpdatedPayload>) {
-    this.socket?.off('token.updated', callback);
+    this.off('token.updated', callback);
   }
 
   onTokenRemoved(callback: EventCallback<TokenRemovedPayload>) {
-    this.socket?.on('token.removed', callback);
+    this.on('token.removed', callback);
   }
 
   offTokenRemoved(callback: EventCallback<TokenRemovedPayload>) {
-    this.socket?.off('token.removed', callback);
+    this.off('token.removed', callback);
   }
 
   // ============================================
@@ -335,11 +343,11 @@ class SocketClient {
   }
 
   onDiceRolled(callback: EventCallback<DiceRolledEvent>) {
-    this.socket?.on('dice.rolled', callback);
+    this.on('dice.rolled', callback);
   }
 
   onDiceRolledSecret(callback: EventCallback<DiceRolledSecretEvent>) {
-    this.socket?.on('dice.rolled.secret', callback);
+    this.on('dice.rolled.secret', callback);
   }
 
   emitClearDiceHistory() {
@@ -347,7 +355,7 @@ class SocketClient {
   }
 
   onDiceHistoryCleared(callback: EventCallback<void>) {
-    this.socket?.on('dice.historyCleared', callback);
+    this.on('dice.historyCleared', callback);
   }
 
   // ============================================
@@ -359,11 +367,11 @@ class SocketClient {
   }
 
   onChatMessage(callback: EventCallback<ChatMessageBroadcast>) {
-    this.socket?.on('chat.message', callback);
+    this.on('chat.message', callback);
   }
 
   onChatSystem(callback: EventCallback<{ content: string; metadata?: any; timestamp: string }>) {
-    this.socket?.on('chat.system', callback);
+    this.on('chat.system', callback);
   }
 
   // ============================================
@@ -375,7 +383,7 @@ class SocketClient {
   }
 
   onMapChanged(callback: EventCallback<{ mapId: string; mapData: any }>) {
-    this.socket?.on('map.changed', callback);
+    this.on('map.changed', callback);
   }
 
   // ============================================
@@ -395,19 +403,19 @@ class SocketClient {
   }
 
   onSessionStarted(callback: EventCallback<SessionStartedBroadcast>) {
-    this.socket?.on('session.started', callback);
+    this.on('session.started', callback);
   }
 
   onSessionPaused(callback: EventCallback) {
-    this.socket?.on('session.paused', callback);
+    this.on('session.paused', callback);
   }
 
   onSessionEnded(callback: EventCallback<{ message: string }>) {
-    this.socket?.on('session.ended', callback);
+    this.on('session.ended', callback);
   }
 
   onSessionResumed(callback: EventCallback) {
-    this.socket?.on('session.resumed', callback);
+    this.on('session.resumed', callback);
   }
 
   // ============================================
@@ -419,7 +427,7 @@ class SocketClient {
   }
 
   onVibeUpdated(callback: EventCallback<VibeUpdatedBroadcast>) {
-    this.socket?.on('vibe.updated', callback);
+    this.on('vibe.updated', callback);
   }
 
   // ============================================
@@ -435,11 +443,11 @@ class SocketClient {
   }
 
   onSpiritLayerToggled(callback: EventCallback<SpiritLayerToggledBroadcast>) {
-    this.socket?.on('spirit_layer.toggled', callback);
+    this.on('spirit_layer.toggled', callback);
   }
 
   onSpiritLayerTokenToggled(callback: EventCallback<SpiritLayerTokenToggledBroadcast>) {
-    this.socket?.on('spirit_layer.token.toggled', callback);
+    this.on('spirit_layer.token.toggled', callback);
   }
 
   emitSpiritLayerStyleChange(style: string) {
@@ -447,7 +455,7 @@ class SocketClient {
   }
 
   onSpiritLayerStyleChanged(callback: EventCallback<{ style: string }>) {
-    this.socket?.on('spirit_layer.style_changed', callback);
+    this.on('spirit_layer.style_changed', callback);
   }
 
   // ============================================
@@ -459,7 +467,7 @@ class SocketClient {
   }
 
   onAtmosphereEffectUpdated(callback: EventCallback<AtmosphereEffectUpdatedBroadcast>) {
-    this.socket?.on('atmosphere.effect.updated', callback);
+    this.on('atmosphere.effect.updated', callback);
   }
 
   emitAtmosphereAudioSet(data: AtmosphereAudioSetEvent) {
@@ -467,7 +475,7 @@ class SocketClient {
   }
 
   onAtmosphereAudioUpdated(callback: EventCallback<AtmosphereAudioUpdatedBroadcast>) {
-    this.socket?.on('atmosphere.audio.updated', callback);
+    this.on('atmosphere.audio.updated', callback);
   }
 
   // ============================================
@@ -479,7 +487,7 @@ class SocketClient {
   }
 
   onCharacterHpUpdated(callback: EventCallback<CharacterHpUpdatedBroadcast>) {
-    this.socket?.on('character.hp.updated', callback);
+    this.on('character.hp.updated', callback);
   }
 
   // ============================================
@@ -523,7 +531,7 @@ class SocketClient {
   }
 
   onInitiativeState(callback: EventCallback<CombatState>) {
-    this.socket?.on('initiative.state', callback);
+    this.on('initiative.state', callback);
   }
 
   // ============================================
@@ -552,20 +560,47 @@ class SocketClient {
   // Event Cleanup
   // ============================================
 
+  /**
+   * Adds a listener that stays subscribed across socket replacements (see
+   * `listenerRegistry`). Adding the same handler for the same event again is
+   * a no-op, so it is never called twice per event.
+   */
   on(event: string, callback: EventCallback) {
+    let listeners = this.listenerRegistry.get(event);
+    if (!listeners) {
+      listeners = new Set();
+      this.listenerRegistry.set(event, listeners);
+    }
+    if (listeners.has(callback)) return;
+    listeners.add(callback);
     this.socket?.on(event, callback);
   }
 
+  /** Removes the listener (all listeners of the event without a callback) for good. */
   off(event: string, callback?: EventCallback) {
     if (callback) {
+      const listeners = this.listenerRegistry.get(event);
+      listeners?.delete(callback);
+      if (listeners?.size === 0) this.listenerRegistry.delete(event);
       this.socket?.off(event, callback);
     } else {
-      this.socket?.off(event);
+      // Only the registered listeners — the client's own connection handlers stay
+      for (const listener of this.listenerRegistry.get(event) ?? []) this.socket?.off(event, listener);
+      this.listenerRegistry.delete(event);
     }
   }
 
   removeAllListeners() {
-    this.socket?.removeAllListeners();
+    for (const [event, listeners] of this.listenerRegistry) {
+      for (const listener of listeners) this.socket?.off(event, listener);
+    }
+    this.listenerRegistry.clear();
+  }
+
+  private attachRegisteredListeners(socket: Socket) {
+    for (const [event, listeners] of this.listenerRegistry) {
+      for (const listener of listeners) socket.on(event, listener);
+    }
   }
 
   // ============================================

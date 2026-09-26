@@ -40,6 +40,8 @@ vi.mock('@/services/socket', () => ({
     disconnect: vi.fn(),
     getSocket: vi.fn().mockReturnValue(null),
     startHeartbeat: vi.fn(),
+    onLifecycle: vi.fn(() => () => {}),
+    getCampaignId: vi.fn().mockReturnValue(null),
   },
 }));
 

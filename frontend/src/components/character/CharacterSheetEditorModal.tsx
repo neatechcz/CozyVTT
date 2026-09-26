@@ -2,7 +2,7 @@
  * Character Sheet Editor Modal
  */
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { X } from 'lucide-react';
 import { useFocusTrap } from '@/hooks/useFocusTrap';
 import { useToast } from '@/contexts/ToastContext';
@@ -34,12 +34,26 @@ export default function CharacterSheetEditorModal({
   const [saving, setSaving] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
   const { showToast } = useToast();
-  const { socket } = useWebSocket();
+  const { socket, reconnectCount } = useWebSocket();
 
   // Live sync (D&D 5e only): other people's changes flow into the open
   // editor; saving sends only the changed fields.
   const isDnd5e = character.gameSystem === GameSystem.DND_5E;
   const liveSync = useLiveCharacterSync({ character, socket, isDnd5e, normalizeForm: buildDnd5eFormData });
+  const { refresh: refreshLiveCharacter } = liveSync;
+
+  // After the campaign room is rejoined (reconnect), reload the character:
+  // changes whose broadcast was missed while disconnected are merged like any
+  // remote change (touched fields that collide are reported in the panel).
+  const seenReconnectCountRef = useRef(reconnectCount);
+  useEffect(() => {
+    if (reconnectCount === seenReconnectCountRef.current) return;
+    seenReconnectCountRef.current = reconnectCount;
+    if (!isDnd5e) return;
+    refreshLiveCharacter().catch((err) => {
+      console.warn('Failed to reload the character after reconnecting:', err);
+    });
+  }, [reconnectCount, isDnd5e, refreshLiveCharacter]);
 
   // Handle save. The editors pass a freshly-uploaded token image URL as the
   // third argument — forward it so the character's token actually updates.
@@ -59,6 +73,13 @@ export default function CharacterSheetEditorModal({
 
         if (onSaved) {
           onSaved();
+        }
+
+        if (outcome.status === 'stale') {
+          // Nothing was written: the newer sheet is merged into the form
+          // (collisions in the panel) — keep the editor open to save again
+          showToast(outcome.message, 'warning');
+          return;
         }
 
         if (outcome.status === 'conflicts') {

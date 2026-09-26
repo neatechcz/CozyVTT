@@ -53,8 +53,9 @@ export default function CharacterEditorPage() {
   const liveCampaignId =
     isDnd5e && !loading && !permissionError ? character?.campaignId ?? null : null;
   const [liveStatus, setLiveStatus] = useState<'connecting' | 'live' | 'offline'>('connecting');
-  // Bumped whenever the client creates a new underlying socket: listeners
-  // added through socketClient.on() stayed on the old one
+  // Bumped whenever the client creates a new underlying socket. The client
+  // re-attaches listeners added through socketClient.on() by itself; the hook
+  // resubscribing on a new generation is a harmless off/on of one handler.
   const [socketGeneration, setSocketGeneration] = useState(0);
   const liveSocket = useMemo<(LiveSyncSocket & { generation: number }) | null>(
     () =>
@@ -258,6 +259,12 @@ export default function CharacterEditorPage() {
           if (tokenImageUrl !== undefined) {
             const updated = await characterService.updateCharacter(character.id, { tokenImageUrl });
             setCharacter(updated);
+          }
+
+          if (outcome.status === 'stale') {
+            // Nothing was written: the newer sheet is merged into the form
+            showToast(outcome.message, 'warning');
+            return;
           }
 
           setLastSaved(new Date());

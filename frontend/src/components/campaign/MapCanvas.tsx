@@ -15,7 +15,6 @@ import type {
   TokenMoveStartEvent,
   TokenMoveEvent,
   TokenMoveEndEvent,
-  TokenMovedEvent,
   Map as CampaignMap,
   SpiritLayerToggledBroadcast,
   SpiritLayerTokenToggledBroadcast,
@@ -25,13 +24,6 @@ import type {
 import { TokenLayer, TokenType } from '@/types';
 import type { WallSegment, FogState, WallType, LightSource } from '@/types/walls';
 import { douglasPeucker, edgeSnapPoints } from '@/utils/geometry';
-import {
-  applyTokenEvent,
-  type TokenEvent,
-  type TokenAddedPayload,
-  type TokenUpdatedPayload,
-  type TokenRemovedPayload,
-} from '@/utils/tokenEvents';
 import {
   drawMapImage,
   drawSpiritLayer,
@@ -53,6 +45,8 @@ import {
 } from './map/layers';
 import { createVisionCache, type VisionSource } from './map/vision';
 import { useTokenAnimation, useFogRevealAnimation } from './map/useMapAnimations';
+import { useTokenSocketEvents } from './map/useTokenSocketEvents';
+import type { TokenAnimation } from './map/layers/types';
 import { useRenderLoop, type MapLayer } from './map/useRenderLoop';
 import api from '@/services/api';
 import CharacterSheetViewerModal from '@/components/character/CharacterSheetViewerModal';
@@ -751,84 +745,17 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
   // ============================================
 
   /**
-   * Listen for token.moved events from other clients
-   */
-  useEffect(() => {
-    if (!socket) return;
-
-    const handleTokenMoved = (event: TokenMovedEvent) => {
-      // Read from the store (not a render closure) so rapid events that arrive
-      // in the same macro-task all see the most recently mutated state.
-      const store = useGameStore.getState();
-      const token = store.tokens[event.tokenId];
-      if (!token) return;
-
-      // Start animation from current position to new position
-      setAnimatingTokens((prev) => {
-        const newMap = new Map(prev);
-        newMap.set(event.tokenId, {
-          fromX: token.position.x,
-          fromY: token.position.y,
-          toX: event.x,
-          toY: event.y,
-          startTime: Date.now(),
-          duration: 200,
-        });
-        return newMap;
-      });
-
-      // Store writes are synchronous — subsequent handlers in the same
-      // macro-task (e.g. token:appeared for NPCs) see the correct state.
-      store.applyTokenMove(event.tokenId, { x: event.x, y: event.y });
-    };
-
-    // Listen for token moved events
-    const socketInstance = socket.getSocket();
-    if (socketInstance) {
-      socketInstance.on('token.moved', handleTokenMoved);
-    }
-
-    // Cleanup listener on unmount
-    return () => {
-      if (socketInstance) {
-        socketInstance.off('token.moved', handleTokenMoved);
-      }
-    };
-  }, [socket]); // handler reads/writes via the store, no reactive deps needed
-
-  /**
-   * Listen for token.added / token.updated / token.removed — tokens changed
-   * through the REST API (DM toolbar, AI game master via MCP). The server has
-   * already filtered hidden tokens out for players, so events are applied as
-   * they come; only events for a map other than the displayed one are dropped.
+   * token.moved from other clients; token.added / updated / removed from the
+   * REST API (DM toolbar, AI game master via MCP)
    */
   const currentMapId = currentMap?.id;
-  useEffect(() => {
-    if (!socket) return;
-
-    const applyEvent = (event: TokenEvent) => {
-      if (!currentMapId || event.mapId !== currentMapId) return;
-      // Read the live list from the store at event time (never a render
-      // closure copy) so rapid events build on each other.
-      const store = useGameStore.getState();
-      const current = store.tokenOrder.map((id) => store.tokens[id]).filter((t): t is Token => !!t);
-      store.setTokens(applyTokenEvent(current, event));
-    };
-
-    const handleTokenAdded = (payload: TokenAddedPayload) => applyEvent({ type: 'token.added', ...payload });
-    const handleTokenUpdated = (payload: TokenUpdatedPayload) => applyEvent({ type: 'token.updated', ...payload });
-    const handleTokenRemoved = (payload: TokenRemovedPayload) => applyEvent({ type: 'token.removed', ...payload });
-
-    socket.onTokenAdded(handleTokenAdded);
-    socket.onTokenUpdated(handleTokenUpdated);
-    socket.onTokenRemoved(handleTokenRemoved);
-
-    return () => {
-      socket.offTokenAdded(handleTokenAdded);
-      socket.offTokenUpdated(handleTokenUpdated);
-      socket.offTokenRemoved(handleTokenRemoved);
-    };
-  }, [socket, currentMapId]);
+  const startTokenAnimation = useCallback(
+    (tokenId: string, animation: TokenAnimation) => {
+      setAnimatingTokens((prev) => new Map(prev).set(tokenId, animation));
+    },
+    [setAnimatingTokens],
+  );
+  useTokenSocketEvents(socket, currentMapId, startTokenAnimation);
 
   // ============================================
   // Map Change
@@ -849,8 +776,6 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
   // Listen for map.changed events broadcast by the DM
   useEffect(() => {
     if (!socket) return;
-    const socketInstance = socket.getSocket();
-    if (!socketInstance) return;
 
     const handleMapChanged = ({ mapData, spiritVisible: sv }: { mapId: string; mapData: CampaignMap; spiritVisible?: boolean }) => {
       setCurrentMap(mapData);
@@ -872,9 +797,9 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
       }
     };
 
-    socketInstance.on('map.changed', handleMapChanged);
+    socket.on('map.changed', handleMapChanged);
     return () => {
-      socketInstance.off('map.changed', handleMapChanged);
+      socket.off('map.changed', handleMapChanged);
     };
   }, [socket, setCurrentMap]);
 
@@ -884,8 +809,6 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
 
   useEffect(() => {
     if (!socket) return;
-    const socketInstance = socket.getSocket();
-    if (!socketInstance) return;
 
     const handleSpiritLayerToggled = (data: SpiritLayerToggledBroadcast) => {
       // Play ethereal audio cue — ascending when entering, descending when leaving
@@ -908,14 +831,14 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
       updateCampaignSpiritLayer(campaign?.spiritLayerEnabled ?? false, data.style);
     };
 
-    socketInstance.on('spirit_layer.toggled', handleSpiritLayerToggled);
-    socketInstance.on('spirit_layer.token.toggled', handleSpiritTokenToggled);
-    socketInstance.on('spirit_layer.style_changed', handleSpiritStyleChanged);
+    socket.on('spirit_layer.toggled', handleSpiritLayerToggled);
+    socket.on('spirit_layer.token.toggled', handleSpiritTokenToggled);
+    socket.on('spirit_layer.style_changed', handleSpiritStyleChanged);
 
     return () => {
-      socketInstance.off('spirit_layer.toggled', handleSpiritLayerToggled);
-      socketInstance.off('spirit_layer.token.toggled', handleSpiritTokenToggled);
-      socketInstance.off('spirit_layer.style_changed', handleSpiritStyleChanged);
+      socket.off('spirit_layer.toggled', handleSpiritLayerToggled);
+      socket.off('spirit_layer.token.toggled', handleSpiritTokenToggled);
+      socket.off('spirit_layer.style_changed', handleSpiritStyleChanged);
     };
   }, [socket, updateCampaignSpiritLayer, campaign?.spiritLayerEnabled, playEtherealTransition]);
 
@@ -925,16 +848,14 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
 
   useEffect(() => {
     if (!socket) return;
-    const socketInstance = socket.getSocket();
-    if (!socketInstance) return;
 
     const handleVibeUpdated = (data: VibeUpdatedBroadcast) => {
       updateVibe(data.period, data.hue, data.filter);
     };
 
-    socketInstance.on('vibe.updated', handleVibeUpdated);
+    socket.on('vibe.updated', handleVibeUpdated);
     return () => {
-      socketInstance.off('vibe.updated', handleVibeUpdated);
+      socket.off('vibe.updated', handleVibeUpdated);
     };
   }, [socket, updateVibe]);
 
@@ -972,8 +893,6 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
   // ============================================
   useEffect(() => {
     if (!socket) return;
-    const socketInstance = socket.getSocket();
-    if (!socketInstance) return;
 
     const handleWallAdded = (data: { mapId: string; segment: WallSegment }) => {
       // DM already applied the change optimistically before emitting; skip the echo to
@@ -1060,9 +979,9 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
       setCurrentMap({ ...currentMap, lightingEnabled: data.lightingEnabled });
     };
 
-    socketInstance.on('token:appeared', handleTokenAppeared);
-    socketInstance.on('token:disappeared', handleTokenDisappeared);
-    socketInstance.on('map:lighting:updated', handleLightingUpdated);
+    socket.on('token:appeared', handleTokenAppeared);
+    socket.on('token:disappeared', handleTokenDisappeared);
+    socket.on('map:lighting:updated', handleLightingUpdated);
 
     // Light source events
     const handleLightAdded = (data: { mapId: string; light: LightSource }) => {
@@ -1086,33 +1005,33 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
       setLightSources(data.lights);
     };
 
-    socketInstance.on('wall:added', handleWallAdded);
-    socketInstance.on('wall:removed', handleWallRemoved);
-    socketInstance.on('wall:updated', handleWallUpdated);
-    socketInstance.on('walls:replaced', handleWallsReplaced);
-    socketInstance.on('fog:updated', handleFogUpdated);
-    socketInstance.on('fog:cells', handleFogCells);
-    socketInstance.on('dm:editing', handleDmEditing);
-    socketInstance.on('light:added', handleLightAdded);
-    socketInstance.on('light:removed', handleLightRemoved);
-    socketInstance.on('light:updated', handleLightUpdated);
-    socketInstance.on('lights:replaced', handleLightsReplaced);
+    socket.on('wall:added', handleWallAdded);
+    socket.on('wall:removed', handleWallRemoved);
+    socket.on('wall:updated', handleWallUpdated);
+    socket.on('walls:replaced', handleWallsReplaced);
+    socket.on('fog:updated', handleFogUpdated);
+    socket.on('fog:cells', handleFogCells);
+    socket.on('dm:editing', handleDmEditing);
+    socket.on('light:added', handleLightAdded);
+    socket.on('light:removed', handleLightRemoved);
+    socket.on('light:updated', handleLightUpdated);
+    socket.on('lights:replaced', handleLightsReplaced);
 
     return () => {
-      socketInstance.off('token:appeared', handleTokenAppeared);
-      socketInstance.off('token:disappeared', handleTokenDisappeared);
-      socketInstance.off('map:lighting:updated', handleLightingUpdated);
-      socketInstance.off('wall:added', handleWallAdded);
-      socketInstance.off('wall:removed', handleWallRemoved);
-      socketInstance.off('wall:updated', handleWallUpdated);
-      socketInstance.off('walls:replaced', handleWallsReplaced);
-      socketInstance.off('fog:updated', handleFogUpdated);
-      socketInstance.off('fog:cells', handleFogCells);
-      socketInstance.off('dm:editing', handleDmEditing);
-      socketInstance.off('light:added', handleLightAdded);
-      socketInstance.off('light:removed', handleLightRemoved);
-      socketInstance.off('light:updated', handleLightUpdated);
-      socketInstance.off('lights:replaced', handleLightsReplaced);
+      socket.off('token:appeared', handleTokenAppeared);
+      socket.off('token:disappeared', handleTokenDisappeared);
+      socket.off('map:lighting:updated', handleLightingUpdated);
+      socket.off('wall:added', handleWallAdded);
+      socket.off('wall:removed', handleWallRemoved);
+      socket.off('wall:updated', handleWallUpdated);
+      socket.off('walls:replaced', handleWallsReplaced);
+      socket.off('fog:updated', handleFogUpdated);
+      socket.off('fog:cells', handleFogCells);
+      socket.off('dm:editing', handleDmEditing);
+      socket.off('light:added', handleLightAdded);
+      socket.off('light:removed', handleLightRemoved);
+      socket.off('light:updated', handleLightUpdated);
+      socket.off('lights:replaced', handleLightsReplaced);
     };
   }, [socket, currentMap?.id]);  
 

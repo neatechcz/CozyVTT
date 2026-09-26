@@ -6,7 +6,7 @@
 import { Server } from 'socket.io';
 import { AuthenticatedSocket } from '../auth';
 import { prisma } from '../../config/database';
-import { withCharacterRowLock } from '../../services/characterLock';
+import { withCharacterRowLock, isCharacterLockTimeout, CHARACTER_BUSY_MESSAGE } from '../../services/characterLock';
 import { resolveUpdatedBy } from '../../services/characterPatch';
 import logger from '../../utils/logger';
 
@@ -140,6 +140,11 @@ export function registerCharacterHandlers(io: Server, socket: AuthenticatedSocke
       }
 
     } catch (error) {
+      if (isCharacterLockTimeout(error)) {
+        // The row lock was not obtained in time (another writer holds it)
+        socket.emit('error', { message: CHARACTER_BUSY_MESSAGE });
+        return;
+      }
       logger.error('character.hp.update failed', { err: error });
       socket.emit('error', { message: 'Failed to update character HP' });
     }

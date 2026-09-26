@@ -2,7 +2,8 @@
  * Character row lock tests (fake Prisma, no database).
  */
 
-import { withCharacterRowLock } from '../characterLock';
+import { Prisma } from '@prisma/client';
+import { withCharacterRowLock, isCharacterLockTimeout } from '../characterLock';
 
 function makePrisma() {
   const order: string[] = [];
@@ -49,4 +50,22 @@ test('propagates errors from fn (the transaction rolls back)', async () => {
       throw new Error('boom');
     })
   ).rejects.toThrow('boom');
+});
+
+test('runs the transaction with explicit maxWait 5 s and timeout 10 s (not the Prisma defaults)', async () => {
+  const { prisma } = makePrisma();
+
+  await withCharacterRowLock(prisma as any, 'char-1', async () => 1);
+
+  expect(prisma.$transaction).toHaveBeenCalledWith(expect.any(Function), { maxWait: 5000, timeout: 10000 });
+});
+
+test('isCharacterLockTimeout recognises only the Prisma transaction timeout (P2028)', () => {
+  const known = (code: string) =>
+    new Prisma.PrismaClientKnownRequestError('Transaction API error', { code, clientVersion: 'test' });
+
+  expect(isCharacterLockTimeout(known('P2028'))).toBe(true);
+  expect(isCharacterLockTimeout(known('P2002'))).toBe(false);
+  expect(isCharacterLockTimeout(new Error('boom'))).toBe(false);
+  expect(isCharacterLockTimeout(undefined)).toBe(false);
 });

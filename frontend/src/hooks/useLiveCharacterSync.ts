@@ -45,10 +45,19 @@ export interface CharacterUpdatedPayload {
   updatedBy?: { userId: string; displayName: string };
 }
 
+/** Shown when a whole-document save was not sent because the sheet changed meanwhile */
+export const STALE_SAVE_MESSAGE = 'List mezitím změnil někdo jiný — zkontrolujte změny a uložte znovu.';
+
 export type LiveSaveOutcome =
   | { status: 'saved'; character: Character }
   | { status: 'unchanged' }
-  | { status: 'conflicts'; character: Character; conflicts: CharacterDataConflict[] };
+  | { status: 'conflicts'; character: Character; conflicts: CharacterDataConflict[] }
+  /**
+   * A whole-document save was needed but the character changed since the
+   * form's base: nothing was written, the newer state was merged into the
+   * form (collisions are in `resets`). Show `message` and let the user save again.
+   */
+  | { status: 'stale'; character: Character; message: string };
 
 export interface UseLiveCharacterSyncOptions {
   character: Character | null;
@@ -176,7 +185,23 @@ export function useLiveCharacterSync({
       return { status: 'saved', character: saved };
     };
 
+    /** Adopts a newer server copy through the normal remote merge. */
+    const mergeFresh = (fresh: Character) => {
+      if (current() && target.applyRemote((fresh.data ?? {}) as CharacterDataObject, UNKNOWN_AUTHOR, fresh.updatedAt)) {
+        onServerCharacterRef.current?.(fresh);
+      }
+    };
+
+    // The PUT replaces the whole document, so it may only be sent while the
+    // form's base is still the server state: otherwise it would write back
+    // the old values of fields someone else changed meanwhile.
     const saveWholeDocument = async (): Promise<LiveSaveOutcome> => {
+      const { character: latest } = await api.getCharacter(id);
+      if (latest.updatedAt !== snapshot.baseUpdatedAt) {
+        mergeFresh(latest);
+        target.endSave();
+        return { status: 'stale', character: latest, message: STALE_SAVE_MESSAGE };
+      }
       const { character: saved } = await api.updateCharacter(id, { data: snapshot.sent as Character['data'] });
       return adoptSaved(saved);
     };
@@ -185,7 +210,7 @@ export function useLiveCharacterSync({
       if (needsFullDocumentSave(snapshot.base, snapshot.sent)) {
         // The data is not path-addressable (the root has a key outside the
         // shared path rules), so field-level changes cannot express it: fall
-        // back to the full-document PUT for this save (last write wins).
+        // back to the full-document PUT (only while the base is current).
         return await saveWholeDocument();
       }
 
@@ -211,9 +236,7 @@ export function useLiveCharacterSync({
       // Conflict paths/values are not inspected (a path may run through a
       // non-object, `current` may be undefined); the merge works from data.
       const { character: fresh } = await api.getCharacter(id);
-      if (current() && target.applyRemote((fresh.data ?? {}) as CharacterDataObject, UNKNOWN_AUTHOR, fresh.updatedAt)) {
-        onServerCharacterRef.current?.(fresh);
-      }
+      mergeFresh(fresh);
       target.endSave();
       return { status: 'conflicts', character: fresh, conflicts: result.conflicts };
     } catch (error) {

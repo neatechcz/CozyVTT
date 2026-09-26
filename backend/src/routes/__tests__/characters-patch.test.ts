@@ -20,6 +20,7 @@ jest.mock('../../websocket/utils', () => ({
   broadcastToCampaign: jest.fn(),
 }));
 
+import { Prisma } from '@prisma/client';
 import express from 'express';
 import request from 'supertest';
 import characterRoutes, { characterDataPatchBodyParser } from '../characters';
@@ -531,5 +532,58 @@ describe('PUT /api/characters/:id', () => {
     expect(res.body.validationErrors).toEqual(
       expect.arrayContaining([expect.objectContaining({ path: 'hp.current' })])
     );
+  });
+});
+
+describe('row lock busy (Prisma transaction timeout P2028)', () => {
+  const lockTimeout = () =>
+    new Prisma.PrismaClientKnownRequestError(
+      'Transaction API error: Transaction already closed: the timeout for this transaction was 10000 ms.',
+      { code: 'P2028', clientVersion: 'test' }
+    );
+  const BUSY = { error: 'Service Unavailable', message: 'Character is busy, retry shortly' };
+
+  test('PATCH answers 503 "Character is busy", nothing written or broadcast', async () => {
+    seed();
+    db.$transaction.mockRejectedValueOnce(lockTimeout());
+
+    const res = await patch(OWNER, { changes: [{ path: 'hp.current', base: 10, value: 4 }] });
+
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual(BUSY);
+    expect(res.headers['retry-after']).toBe('1');
+    expect(rows.get('char-1')!.data.hp).toEqual({ maximum: 10, current: 10, temporary: 0 });
+    expect(broadcast).not.toHaveBeenCalled();
+  });
+
+  test('PUT answers 503 "Character is busy", nothing broadcast', async () => {
+    seed();
+    db.$transaction.mockRejectedValueOnce(lockTimeout());
+
+    const res = await request(app).put('/api/characters/char-1').set('x-test-user', OWNER).send({ name: 'X' });
+
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual(BUSY);
+    expect(broadcast).not.toHaveBeenCalled();
+  });
+
+  test('other transaction errors stay 500', async () => {
+    seed();
+    db.$transaction.mockRejectedValueOnce(new Error('connection reset'));
+
+    const res = await patch(OWNER, { changes: [{ path: 'hp.current', base: 10, value: 4 }] });
+
+    expect(res.status).toBe(500);
+  });
+
+  test('PATCH and PUT take the row lock with explicit maxWait / timeout', async () => {
+    seed();
+    await patch(OWNER, { changes: [{ path: 'hp.current', base: 10, value: 4 }] });
+    await request(app).put('/api/characters/char-1').set('x-test-user', OWNER).send({ name: 'X' });
+
+    expect(db.$transaction).toHaveBeenCalledTimes(2);
+    for (const call of db.$transaction.mock.calls) {
+      expect(call[1]).toEqual({ maxWait: 5000, timeout: 10000 });
+    }
   });
 });

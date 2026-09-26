@@ -14,6 +14,7 @@ jest.mock('../../config/database', () => ({
   },
 }));
 
+import { Prisma } from '@prisma/client';
 import { prisma } from '../../config/database';
 import { registerCharacterHandlers } from '../handlers/characters';
 
@@ -235,4 +236,27 @@ test('refuses a character whose campaignId is not the socket campaign', async ()
   expect(tx.character.update).not.toHaveBeenCalled();
   expect(roomEmit).not.toHaveBeenCalled();
   expect(stored().data.hp.current).toBe(8);
+});
+
+test('a row lock timeout (Prisma P2028) is reported as "Character is busy", nothing broadcast', async () => {
+  const { roomEmit, socket, handler } = setup('DND_5E', { hp: { current: 8, maximum: 10 } });
+  db.$transaction.mockRejectedValueOnce(
+    new Prisma.PrismaClientKnownRequestError('Transaction API error: Unable to start a transaction in the given time.', {
+      code: 'P2028',
+      clientVersion: 'test',
+    })
+  );
+
+  await handler({ characterId: 'char-1', delta: -1 });
+
+  expect(socket.emit).toHaveBeenCalledWith('error', { message: 'Character is busy, retry shortly' });
+  expect(roomEmit).not.toHaveBeenCalled();
+});
+
+test('the row lock transaction uses explicit maxWait / timeout', async () => {
+  const { handler } = setup('DND_5E', { hp: { current: 8, maximum: 10 } });
+
+  await handler({ characterId: 'char-1', delta: -1 });
+
+  expect(db.$transaction).toHaveBeenCalledWith(expect.any(Function), { maxWait: 5000, timeout: 10000 });
 });

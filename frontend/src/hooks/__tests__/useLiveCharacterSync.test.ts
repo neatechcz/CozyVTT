@@ -449,6 +449,8 @@ describe('useLiveCharacterSync', () => {
     expect(hook.result.current.isDirty).toBe(true);
 
     const saved = makeCharacter(local);
+    // The re-read before the PUT finds the form's base still current
+    mocks.getCharacter.mockResolvedValue({ character: makeCharacter(odd) });
     mocks.updateCharacter.mockResolvedValue({ message: 'ok', character: saved });
 
     let outcome: Awaited<ReturnType<typeof hook.result.current.save>> | undefined;
@@ -536,6 +538,7 @@ describe('useLiveCharacterSync', () => {
     const { hook } = setup({ data: many });
     const local = Object.fromEntries(Object.keys(many).map((key) => [key, 1]));
     userEdits(hook, local);
+    mocks.getCharacter.mockResolvedValue({ character: makeCharacter(many) });
     mocks.updateCharacter.mockResolvedValue({ message: 'ok', character: makeCharacter(local) });
 
     let outcome: Awaited<ReturnType<typeof hook.result.current.save>> | undefined;
@@ -829,3 +832,81 @@ describe('useLiveCharacterSync — round 5', () => {
   });
 });
 
+
+describe('useLiveCharacterSync — whole-document PUT only from a current base', () => {
+  const LATER = '2026-09-26T00:05:00.000Z';
+
+  it('base still current: re-reads the character, then PUTs', async () => {
+    const odd = { ...baseData(), 'bad-key': 1 };
+    const { hook } = setup({ data: odd });
+    const local = { ...odd, 'bad-key': 2 };
+    userEdits(hook, local);
+    mocks.getCharacter.mockResolvedValue({ character: makeCharacter(odd) });
+    mocks.updateCharacter.mockResolvedValue({ message: 'ok', character: makeCharacter(local, { updatedAt: LATER }) });
+
+    let outcome: Awaited<ReturnType<typeof hook.result.current.save>> | undefined;
+    await act(async () => {
+      outcome = await hook.result.current.save();
+    });
+
+    expect(mocks.getCharacter).toHaveBeenCalledWith('char-1');
+    expect(mocks.getCharacter.mock.invocationCallOrder[0]).toBeLessThan(mocks.updateCharacter.mock.invocationCallOrder[0]);
+    expect(mocks.updateCharacter).toHaveBeenCalledWith('char-1', { data: local });
+    expect(outcome?.status).toBe('saved');
+  });
+
+  it('not path-addressable, character changed meanwhile: no PUT, the newer sheet is merged and the user is told to save again', async () => {
+    const odd = { ...baseData(), 'bad-key': 1 };
+    const { hook, onServerCharacter } = setup({ data: odd });
+    // The user edits bad-key and hp.current; someone else (no broadcast
+    // received) changed hp.current and experiencePoints
+    userEdits(hook, { ...odd, 'bad-key': 2, hp: { current: 6, maximum: 10, temporary: 0 } });
+    const theirs = { ...odd, experiencePoints: 300, hp: { current: 2, maximum: 10, temporary: 0 } };
+    const fresh = makeCharacter(theirs, { updatedAt: LATER });
+    mocks.getCharacter.mockResolvedValue({ character: fresh });
+
+    let outcome: Awaited<ReturnType<typeof hook.result.current.save>> | undefined;
+    await act(async () => {
+      outcome = await hook.result.current.save();
+    });
+
+    expect(mocks.updateCharacter).not.toHaveBeenCalled();
+    expect(mocks.patchCharacterData).not.toHaveBeenCalled();
+    expect(outcome).toEqual({
+      status: 'stale',
+      character: fresh,
+      message: 'List mezitím změnil někdo jiný — zkontrolujte změny a uložte znovu.',
+    });
+    // A root that is not path-addressable diffs as the whole document (path
+    // ''), so the merge takes the newer sheet and reports the user's whole
+    // form as one reset — nothing is lost silently, nothing is written
+    expect(formOf(hook)).toEqual(theirs);
+    expect(hook.result.current.resets).toHaveLength(1);
+    expect(hook.result.current.resets[0]).toMatchObject({
+      path: '',
+      mine: { ...odd, 'bad-key': 2, hp: { current: 6, maximum: 10, temporary: 0 } },
+      theirs,
+    });
+    expect(onServerCharacter).toHaveBeenCalledWith(fresh);
+    expect(storeOf(hook).getState().baseUpdatedAt).toBe(LATER);
+  });
+
+  it('more than 200 changes, character changed meanwhile: no PUT, stale outcome', async () => {
+    const many: Record<string, unknown> = {};
+    for (let i = 0; i < 201; i++) many[`f${i}`] = 0;
+    const { hook } = setup({ data: many });
+    userEdits(hook, Object.fromEntries(Object.keys(many).map((key) => [key, 1])));
+    mocks.getCharacter.mockResolvedValue({ character: makeCharacter({ ...many, f0: 7 }, { updatedAt: LATER }) });
+
+    let outcome: Awaited<ReturnType<typeof hook.result.current.save>> | undefined;
+    await act(async () => {
+      outcome = await hook.result.current.save();
+    });
+
+    expect(mocks.updateCharacter).not.toHaveBeenCalled();
+    expect(outcome?.status).toBe('stale');
+    expect(formOf(hook).f0).toBe(7);
+    expect(formOf(hook).f1).toBe(1);
+    expect(hook.result.current.resets.map((reset) => reset.path)).toEqual(['f0']);
+  });
+});
