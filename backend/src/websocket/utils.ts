@@ -1,7 +1,7 @@
 import { Server } from 'socket.io';
 import { prisma } from '../config/database';
 import logger from '../utils/logger';
-import { filterTokensByRole, getSpiritVisibilityBatch } from '../utils/spirit-layer';
+import { filterTokensByRole, filterTokensForViewer, getSpiritVisibilityBatch } from '../utils/spirit-layer';
 import type { AuthenticatedSocket } from './auth';
 
 /**
@@ -94,19 +94,58 @@ export async function broadcastToCharacterViewers(
 /** A token as stored in a map's `tokens` JSON array (only `id` is read directly). */
 type StoredToken = { id: string };
 
+/** The stored map fields a token event needs to compute players' lighting views. */
+const TOKEN_VIEW_MAP_SELECT = {
+  tokens: true,
+  lightingEnabled: true,
+  wallSegments: true,
+  lights: true,
+  width: true,
+  height: true,
+  gridSize: true,
+} as const;
+
+/**
+ * The map's token array with the event's token set to `token` (replaced in
+ * place, appended when absent, dropped when `token` is null). The rest of the
+ * array is the map as stored now.
+ */
+function withEventToken(tokens: unknown, tokenId: string, token: StoredToken | null): StoredToken[] {
+  const stored = (Array.isArray(tokens) ? tokens : []) as StoredToken[];
+  const others = stored.filter((t) => t?.id !== tokenId);
+  if (!token) return others;
+  const index = stored.findIndex((t) => t?.id === tokenId);
+  if (index === -1) return [...others, token];
+  const next = [...stored];
+  next[index] = token;
+  return next;
+}
+
 /**
  * Broadcast a token add / update / remove made through the REST routes.
  *
  * Pass the token as it was before the write (`null` when it was just
  * created) and as it is after the write (`null` when it was deleted). Each
- * socket in the campaign room receives the event that turns its view of the
- * token from "before" into "after", using the same rules as the map GET
- * (filterTokensByRole):
+ * socket in the campaign room receives the events that turn its view of the
+ * map from "before" into "after", using the same per-viewer pipeline as
+ * map.changed (filterTokensForViewer: filterTokensByRole, then line of sight):
  * - DM sockets see every token: `token.added` / `token.updated` / `token.removed`.
  * - Other sockets only see tokens that pass filterTokensByRole (visible, on
  *   the plane they currently see, DM-only `notes` stripped). A token that
  *   becomes hidden from them arrives as `token.removed`; one that becomes
  *   visible arrives as `token.added`; a token they never see sends nothing.
+ * - On a map with dynamic lighting, a player (non-DM socket with a userId)
+ *   additionally sees only tokens in their line of sight
+ *   (filterTokensByLighting). Their whole before/after view is compared, so
+ *   the event's token entering / leaving sight is `token.added` /
+ *   `token.removed`, and a change that moves their sight (their own token
+ *   moved, assigned, hidden or removed) also sends `token.added` /
+ *   `token.removed` for every other token that entered or left it. The
+ *   event's own token is always emitted first.
+ *
+ * Views are computed from the map as stored when the broadcast runs, with
+ * the event's token set to `before` / `after`. If the map can no longer be
+ * read, players receive nothing (fail closed); DMs still do.
  *
  * Payloads: `token.added|token.updated { mapId, token }`,
  * `token.removed { mapId, tokenId }`.
@@ -128,30 +167,81 @@ export async function broadcastTokenEvent(
     const campaignSockets = await io.in(campaignId).fetchSockets();
     const authedSockets = campaignSockets.map((s) => s as unknown as AuthenticatedSocket);
 
+    const hasViewers = authedSockets.some((s) => s.role !== 'DM');
     const needsSpiritVisibility = authedSockets.some((s) => s.role !== 'DM' && s.userId);
-    const visibility = needsSpiritVisibility
-      ? await getSpiritVisibilityBatch(
-          campaignId,
-          authedSockets.map((s) => s.userId).filter((id): id is string => !!id)
-        )
-      : new Map<string, boolean>();
+    const [visibility, map] = await Promise.all([
+      needsSpiritVisibility
+        ? getSpiritVisibilityBatch(
+            campaignId,
+            authedSockets.map((s) => s.userId).filter((id): id is string => !!id)
+          )
+        : Promise.resolve(new Map<string, boolean>()),
+      hasViewers
+        ? prisma.map.findUnique({ where: { id: mapId }, select: TOKEN_VIEW_MAP_SELECT })
+        : Promise.resolve(null),
+    ]);
+
+    const beforeTokens = map?.lightingEnabled ? withEventToken(map.tokens, tokenId, before) : null;
+    const afterTokens = map?.lightingEnabled ? withEventToken(map.tokens, tokenId, after) : null;
+    // One view per (role, plane, user): a user's sockets share the computation.
+    const eventsByViewer = new Map<string, Array<[string, unknown]>>();
+
+    const viewerEvents = (role: string, spiritVisible: boolean, userId: string | undefined) => {
+      const key = `${role}|${spiritVisible}|${userId ?? ''}`;
+      const cached = eventsByViewer.get(key);
+      if (cached) return cached;
+
+      const events: Array<[string, unknown]> = [];
+      if (!map) {
+        // Map gone: its lighting is unknown, so send nothing (fail closed).
+      } else if (beforeTokens && afterTokens && userId) {
+        const seenBefore = filterTokensForViewer(beforeTokens, map, role, spiritVisible, userId);
+        const seenAfter = filterTokensForViewer(afterTokens, map, role, spiritVisible, userId);
+        const beforeIds = new Set(seenBefore.map((t) => t.id));
+        const afterIds = new Set(seenAfter.map((t) => t.id));
+
+        const eventToken = seenAfter.find((t) => t.id === tokenId);
+        if (eventToken) {
+          events.push([beforeIds.has(tokenId) ? 'token.updated' : 'token.added', { mapId, token: eventToken }]);
+        } else if (beforeIds.has(tokenId)) {
+          events.push(['token.removed', { mapId, tokenId }]);
+        }
+        for (const t of seenAfter) {
+          if (t.id !== tokenId && !beforeIds.has(t.id)) events.push(['token.added', { mapId, token: t }]);
+        }
+        for (const t of seenBefore) {
+          if (t.id !== tokenId && !afterIds.has(t.id)) events.push(['token.removed', { mapId, tokenId: t.id }]);
+        }
+      } else {
+        const seenBefore = before ? filterTokensByRole([before], role, spiritVisible)[0] ?? null : null;
+        const seenAfter = after ? filterTokensByRole([after], role, spiritVisible)[0] ?? null : null;
+        if (seenAfter) {
+          events.push([seenBefore ? 'token.updated' : 'token.added', { mapId, token: seenAfter }]);
+        } else if (seenBefore) {
+          events.push(['token.removed', { mapId, tokenId }]);
+        }
+      }
+
+      eventsByViewer.set(key, events);
+      return events;
+    };
 
     for (const s of campaignSockets) {
       const authedSocket = s as unknown as AuthenticatedSocket;
-      let seenBefore: unknown = before;
-      let seenAfter: unknown = after;
 
-      if (authedSocket.role !== 'DM') {
-        const role = authedSocket.role ?? 'SPECTATOR';
-        const spiritVisible = !!(authedSocket.userId && visibility.get(authedSocket.userId));
-        seenBefore = before ? filterTokensByRole([before], role, spiritVisible)[0] ?? null : null;
-        seenAfter = after ? filterTokensByRole([after], role, spiritVisible)[0] ?? null : null;
+      if (authedSocket.role === 'DM') {
+        if (after) {
+          s.emit(before ? 'token.updated' : 'token.added', { mapId, token: after });
+        } else if (before) {
+          s.emit('token.removed', { mapId, tokenId });
+        }
+        continue;
       }
 
-      if (seenAfter) {
-        s.emit(seenBefore ? 'token.updated' : 'token.added', { mapId, token: seenAfter });
-      } else if (seenBefore) {
-        s.emit('token.removed', { mapId, tokenId });
+      const role = authedSocket.role ?? 'SPECTATOR';
+      const spiritVisible = !!(authedSocket.userId && visibility.get(authedSocket.userId));
+      for (const [event, payload] of viewerEvents(role, spiritVisible, authedSocket.userId)) {
+        s.emit(event, payload);
       }
     }
   } catch (error) {

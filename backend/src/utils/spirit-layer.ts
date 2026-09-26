@@ -329,6 +329,41 @@ export function filterTokensByLighting(
   });
 }
 
+/** The map fields the per-viewer token filter reads. */
+export type TokenViewMap = Pick<
+  MapData,
+  'lightingEnabled' | 'wallSegments' | 'lights' | 'width' | 'height' | 'gridSize'
+>;
+
+/**
+ * The tokens one viewer may receive from a map: filterTokensByRole, then —
+ * for a non-DM viewer with a userId on a map with dynamic lighting —
+ * filterTokensByLighting from that viewer's line of sight.
+ *
+ * The single token pipeline shared by filterMapData (map.changed)
+ * and the REST token-event broadcast (broadcastTokenEvent).
+ */
+export function filterTokensForViewer(
+  tokens: unknown,
+  map: TokenViewMap,
+  userRole: string,
+  spiritVisible: boolean,
+  userId?: string
+): Token[] {
+  const roleFiltered = filterTokensByRole(tokens, userRole, spiritVisible);
+  if (userRole === 'DM' || !map.lightingEnabled || !userId) return roleFiltered;
+  return filterTokensByLighting(
+    roleFiltered,
+    userId,
+    map.wallSegments,
+    map.width,
+    map.height,
+    map.gridSize,
+    true,
+    map.lights
+  );
+}
+
 /**
  * Filter entire map data based on user role and spirit layer visibility.
  *
@@ -350,21 +385,7 @@ export function filterMapData(
   spiritVisible: boolean,
   userId?: string
 ): MapData & { tokens: Token[] } {
-  let filteredTokens = filterTokensByRole(mapData.tokens, userRole, spiritVisible);
-
-  // Apply dynamic lighting filter for non-DM players when lighting is enabled
-  if (userRole !== 'DM' && mapData.lightingEnabled && userId) {
-    filteredTokens = filterTokensByLighting(
-      filteredTokens,
-      userId,
-      mapData.wallSegments,
-      mapData.width,
-      mapData.height,
-      mapData.gridSize,
-      true,
-      mapData.lights
-    );
-  }
+  const filteredTokens = filterTokensForViewer(mapData.tokens, mapData, userRole, spiritVisible, userId);
 
   return {
     ...mapData,
