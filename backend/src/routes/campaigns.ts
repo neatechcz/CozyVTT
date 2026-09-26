@@ -7,6 +7,7 @@ import { prisma } from '../config/database';
 import { canDeleteCampaign } from '../services/permissions';
 import { captureGameState, restoreGameState, getNextSessionNumber, getLastSession } from '../services/sessionState';
 import { sendSystemMessage, broadcastToUser, broadcastToCampaign, broadcastTokenEvent } from '../websocket/utils';
+import { bumpMapVersion } from '../websocket/mapVersion';
 import { isSmtpConfigured, sendCampaignInvitationEmail } from '../services/email';
 import { DEFAULT_VIBE_SETTINGS, validateVibeSettings, findVibePeriod, VibeSettings } from '../utils/vibe-presets';
 import { GameSystem } from '../game-systems';
@@ -542,6 +543,10 @@ router.put('/:campaignId', campaignDM, async (req: AuthenticatedRequest, res: Re
       where: { id: campaignId },
       data: updateData,
     });
+    // Spirit visibility may have changed: cached drag viewers of the current map are stale.
+    if (spiritLayerEnabled !== undefined && campaign.currentMapId) {
+      bumpMapVersion(campaign.currentMapId);
+    }
 
     return res.status(200).json({
       message: 'Campaign updated successfully',

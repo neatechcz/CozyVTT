@@ -82,10 +82,12 @@ function isPublicToken(map: TokenViewMap, token: Token | undefined): boolean {
  * same per-recipient rules as map.changed (filterTokensForViewer).
  *
  * Shortcut: a visible material-plane token on a map without dynamic lighting
- * goes to the whole room in one emit, but only when every non-DM viewer has a
- * userId and sees the material plane (nobody is in the spirit realm, where
- * only spirit-layer tokens are visible) — then each of them would receive it
- * anyway. Otherwise every viewer is checked.
+ * goes to every vetted socket in one emit, but only when every non-DM viewer
+ * has a userId and sees the material plane (nobody is in the spirit realm,
+ * where only spirit-layer tokens are visible) — then each of them would
+ * receive it anyway. The emit targets the vetted socket ids, never the room:
+ * viewers may be cached (DRAG_CONTEXT_TTL_MS), and a socket that joined since
+ * was not vetted. Otherwise every viewer is checked.
  */
 async function emitToTokenViewers(
   io: Server,
@@ -97,13 +99,16 @@ async function emitToTokenViewers(
   payload: unknown,
   { excludeSender, viewers }: { excludeSender: boolean; viewers: () => Promise<RoomViewer[]> }
 ): Promise<void> {
-  const campaignId = sender.campaignId!;
   const roomViewers = await viewers();
   const everyPlayerSeesMaterialPlane = roomViewers.every(
     ({ viewer }) => viewer.role === 'DM' || (!!viewer.userId && !viewer.spiritVisible)
   );
   if (everyPlayerSeesMaterialPlane && isPublicToken(map, tokens.find((t) => t.id === tokenId))) {
-    (excludeSender ? sender.to(campaignId) : io.to(campaignId)).emit(event, payload);
+    const socketIds = roomViewers
+      .map(({ socket }) => socket.id)
+      .filter((id) => !(excludeSender && id === sender.id));
+    // io.to([]) would broadcast to the whole namespace.
+    if (socketIds.length > 0) io.to(socketIds).emit(event, payload);
     return;
   }
 
@@ -158,7 +163,7 @@ export function registerTokenHandlers(io: Server, socket: AuthenticatedSocket): 
       mapId,
       version,
       map: withLightPolygons(map),
-      // Resolved on first use: a public token's frames never need them.
+      // Resolved once per drag context, on first use.
       viewers: () => (viewers ??= getRoomViewers(io, campaignId)),
       expiresAt: Date.now() + DRAG_CONTEXT_TTL_MS,
     };

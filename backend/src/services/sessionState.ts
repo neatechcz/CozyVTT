@@ -12,6 +12,7 @@
 
 import { prisma } from '../config/database';
 import logger from '../utils/logger';
+import { bumpMapVersion } from '../websocket/mapVersion';
 
 /**
  * Game State Interface
@@ -126,6 +127,7 @@ export async function restoreGameState(
             annotations: state.annotations as any,
           },
         });
+        bumpMapVersion(state.mapId); // cached drag snapshots of this map are stale now
 
         logger.info(`✅ Restored game state for campaign ${campaignId} (map: ${state.mapId})`);
       } else {

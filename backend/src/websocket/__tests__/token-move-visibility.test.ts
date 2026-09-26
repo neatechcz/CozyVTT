@@ -9,6 +9,8 @@
  * No database: Prisma is mocked; the Socket.io server is a fake whose room
  * broadcasts are delivered to the fake sockets, so every assertion is per
  * socket regardless of whether the handler emitted per socket or to the room.
+ * `io.to(rooms)` follows Socket.io: the campaign room is every fake socket, a
+ * socket id is that socket, and an empty room list is the whole namespace.
  *
  * Fixture: 10×10 squares, gridSize 100 px. With lighting on, a solid wall at
  * x = 500 px splits the map into west (columns 0–4) and east (5–9).
@@ -42,7 +44,7 @@ const db = prisma as unknown as {
 
 type FakeSocket = {
   id: string;
-  userId: string;
+  userId: string | undefined;
   role: string;
   campaignId: string;
   emit: jest.Mock;
@@ -97,7 +99,7 @@ function mapWith(lightingEnabled: boolean, tokens: TestToken[] = [aliceToken, bo
 
 let sockets: FakeSocket[];
 
-function makeSocket(id: string, userId: string, role: string): FakeSocket {
+function makeSocket(id: string, userId: string | undefined, role: string): FakeSocket {
   const s: FakeSocket = {
     id,
     userId,
@@ -120,11 +122,18 @@ function makeSocket(id: string, userId: string, role: string): FakeSocket {
   return s;
 }
 
+/** The fake sockets in `rooms` (Socket.io: no rooms at all means every socket). */
+function socketsIn(rooms: string | string[]): FakeSocket[] {
+  const list = Array.isArray(rooms) ? rooms : [rooms];
+  if (list.length === 0 || list.includes(CAMPAIGN_ID)) return [...sockets];
+  return sockets.filter((s) => list.includes(s.id));
+}
+
 const io = {
   in: jest.fn(() => ({ fetchSockets: jest.fn(async () => sockets) })),
-  to: jest.fn(() => ({
+  to: jest.fn((rooms: string | string[]) => ({
     emit: (event: string, payload: unknown) => {
-      for (const s of sockets) s.emit(event, payload);
+      for (const s of socketsIn(rooms)) s.emit(event, payload);
     },
   })),
 };
@@ -453,6 +462,50 @@ describe('players in the spirit realm on a map without lighting', () => {
 
     expect(receivedTokenIds(alice)).toEqual(['orc']);
     expect(receivedTokenIds(bob)).toEqual(['orc']);
+  });
+});
+
+describe('whole-room shortcut recipients', () => {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  // Carol's token is on the spirit layer: had the server vetted her, she
+  // would see only spirit-layer tokens.
+  const carolSpirit = token('pc-carol', 8, 8, { controlledBy: 'carol', layer: 'spirit' });
+
+  it.each([
+    ['without a userId', undefined],
+    ['who sees the spirit plane', 'carol'],
+  ])('sends no drag frame to a socket %s that joined after the viewer snapshot', async (_label, userId) => {
+    db.map.findUnique.mockResolvedValue(mapWith(false, [aliceToken, bobToken, lurker, orc, wraith, goblin, carolSpirit]));
+    db.campaignMembership.findMany.mockResolvedValue([
+      { userId: 'dm-user', role: 'DM' },
+      { userId: 'alice', role: 'PLAYER' },
+      { userId: 'bob', role: 'PLAYER' },
+      { userId: 'carol', role: 'PLAYER' },
+    ]);
+    registerTokenHandlers(io as any, dm as any);
+    await dm.handlers['token.move.start']({ tokenId: 'orc', mapId: MAP_ID });
+
+    // Carol joins mid-drag: the cached viewers do not include her.
+    const carol = makeSocket('s-carol', userId, 'PLAYER');
+    sockets.push(carol);
+    dm.handlers['token.move']({ tokenId: 'orc', mapId: MAP_ID, x: 4, y: 6 });
+    await sleep(20);
+    await flush();
+
+    expect(receivedTokenIds(alice)).toEqual(['orc', 'orc']);
+    expect(receivedTokenIds(bob)).toEqual(['orc', 'orc']);
+    expect(carol.emit).not.toHaveBeenCalled();
+    expect(dm.emit).not.toHaveBeenCalled();
+  });
+
+  it('sends nothing when the sender is the only vetted socket', async () => {
+    sockets = [dm];
+    useMap(false);
+    await moveStart(dm, 'orc');
+    await moveFrame(dm, 'orc', 4, 6);
+
+    expect(dm.emit).not.toHaveBeenCalled();
   });
 });
 

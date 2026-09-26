@@ -608,6 +608,26 @@ Additional fields:
 
 ---
 
+### `PUT /api/campaigns/:campaignId/maps/:id/tokens/:tokenId`
+
+Update one token (DM, or a player whose token it is). Only the fields sent
+are changed; `metadata` is merged.
+
+**Response:**
+```json
+{
+  "message": "Token updated successfully",
+  "token": { "id": "uuid", "name": "Goblin Archer", "position": { "x": 5, "y": 3 }, ... }
+}
+```
+
+- `token` — only the updated token, never the map (other tokens, fog, spirit layer).
+- DM-only fields (`notes`) are stripped from `token` for non-DMs, as in the map GET.
+- Other sockets receive the change as per-recipient token events: players get
+  `token.added` / `token.removed` when the token enters or leaves their view.
+
+---
+
 ## Creature Endpoints
 
 All creature endpoints are mounted under `/api/campaigns/:campaignId/creatures`.
@@ -1095,7 +1115,7 @@ Server → Client: emit('authenticated')   ← connection ready
 | `session.ended` | `{ message }` | All campaign members |
 | `session.resumed` | — | All campaign members |
 | `spirit_layer.toggled` | `{ enabled }` | All campaign members |
-| `spirit_layer.token.toggled` | `{ tokenId, visible }` | All campaign members |
+| `spirit_layer.token.toggled` | `{ mapId, tokenId, visible, token, toggledBy, timestamp }` | DMs only (`token` includes DM notes). Players instead get `token.added` / `token.removed` when the token enters or leaves their view (role, spirit plane, line of sight) |
 | `spirit_layer.style_changed` | `{ style }` | All campaign members |
 | `atmosphere.effect.updated` | `{ effect }` | All campaign members |
 | `atmosphere.audio.updated` | `{ assetId, volume, loop, url }` | All campaign members |

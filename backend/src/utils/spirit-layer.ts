@@ -252,8 +252,9 @@ export function filterTokensByRole(
 
 /**
  * Whether `token` is the viewer's own: controlled by them (`controlledBy`),
- * or linked (`characterId`) to a character they own or are assigned through
- * their campaign membership `characterIds` (pass both as `ownCharacterIds`).
+ * or linked (`characterId`) to a character they own or, as a PLAYER, are
+ * assigned through their campaign membership `characterIds` (pass both as
+ * `ownCharacterIds`; see getOwnCharacterIdsBatch).
  *
  * The one ownership rule for dynamic lighting on the server: own tokens are
  * always visible to the viewer and are their vision sources. The client's
@@ -402,7 +403,7 @@ export interface TokenViewer {
   role: string;
   spiritVisible: boolean;
   userId?: string;
-  /** Character ids the viewer owns or is assigned (isOwnToken). */
+  /** Character ids the viewer owns or, as a PLAYER, is assigned (isOwnToken). */
   characterIds?: ReadonlySet<string>;
 }
 
@@ -437,6 +438,8 @@ export function filterTokensForViewer(tokens: unknown, map: TokenViewMap, viewer
 /**
  * Character ids each user owns in the campaign or is assigned through their
  * campaign membership `characterIds` — the `characterIds` of TokenViewer.
+ * Membership assignments count only for PLAYER-role memberships (the same
+ * rule as the character-sheet recipients); ownership counts for anyone.
  */
 export async function getOwnCharacterIdsBatch(
   campaignId: string,
@@ -449,7 +452,7 @@ export async function getOwnCharacterIdsBatch(
 
   const [memberships, characters] = await Promise.all([
     prisma.campaignMembership.findMany({
-      where: { campaignId, userId: { in: uniqueIds } },
+      where: { campaignId, userId: { in: uniqueIds }, role: 'PLAYER' },
       select: { userId: true, characterIds: true },
     }),
     prisma.character.findMany({

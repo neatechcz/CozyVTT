@@ -16,6 +16,7 @@ import {
   sortCombatants,
   type CombatantEntry,
 } from '../initiativeState';
+import { bumpMapVersion } from '../mapVersion';
 
 export function registerInitiativeHandlers(io: Server, socket: AuthenticatedSocket): void {
   /**
@@ -121,6 +122,7 @@ export function registerInitiativeHandlers(io: Server, socket: AuthenticatedSock
       if (tokenIndex !== -1) {
         tokens[tokenIndex] = { ...tokens[tokenIndex], initiative: value };
         await prisma.map.update({ where: { id: mapId }, data: { tokens: tokens as any } });
+        bumpMapVersion(mapId); // cached drag snapshots of this map are stale now
       }
 
       // Update in-memory combat state
@@ -172,6 +174,7 @@ export function registerInitiativeHandlers(io: Server, socket: AuthenticatedSock
       // Persist to token
       tokens[tokenIndex] = { ...token, initiative: rolledValue };
       await prisma.map.update({ where: { id: mapId }, data: { tokens: tokens as any } });
+      bumpMapVersion(mapId); // cached drag snapshots of this map are stale now
 
       // Update in-memory state — add to combatants if not already present
       const state = getCombatState(socket.campaignId);

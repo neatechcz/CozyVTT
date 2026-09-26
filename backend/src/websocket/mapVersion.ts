@@ -1,15 +1,20 @@
 // ============================================
 // In-process map versions
 //
-// Every writer that changes what a map shows (tokens, walls, doors, lights,
-// lighting, the map switch) bumps its version — broadcastTokenEvent,
-// broadcastMapViewChange, token.move.end and the map.change / spirit toggle
-// paths. Cached per-drag map snapshots (token movement handlers) compare the
-// version and reload on the next frame when it changed.
+// Every writer that changes what a map shows or who sees it bumps its
+// version: broadcastTokenEvent, broadcastMapViewChange, token.move.end, the
+// map.change and spirit_layer.toggle socket paths, the campaign PUT when it
+// writes spiritLayerEnabled, session restore, and initiative.set /
+// initiative.roll. Cached per-drag snapshots (token movement handlers: the
+// map and the room's viewers) compare the version and reload on the next
+// frame when it changed.
 //
-// In-process only: with several backend instances, a write on another
-// instance does not bump this one's version (its drag cache then expires by
-// time, DRAG_CONTEXT_TTL_MS).
+// Not covered — the drag cache then expires by time (DRAG_CONTEXT_TTL_MS,
+// 500 ms):
+// - Membership and assignment changes (role, characterIds, joins), which
+//   change a viewer's inputs without writing the map.
+// - Other backend instances: versions are in-process, so a write on another
+//   instance does not bump this one's.
 // ============================================
 
 const versions = new Map<string, number>();

@@ -3,17 +3,18 @@
 //
 // The same rule as the server's isOwnToken (backend/src/utils/spirit-layer.ts):
 // a token is the viewer's own when they control it (`controlledBy`), or when
-// it is linked (`characterId`) to a character they own or are assigned through
-// their campaign membership `characterIds`. Own tokens are the viewer's vision
-// sources and are exempt from fog; the server always sends them.
+// it is linked (`characterId`) to a character they own or, as a PLAYER, are
+// assigned through their campaign membership `characterIds` (a SPECTATOR's
+// assignments do not count, as on the server). Own tokens are the viewer's
+// vision sources and are exempt from fog; the server always sends them.
 // ============================================
 
 interface OwnershipCampaign {
   characters?: ReadonlyArray<{ id: string; userId: string }>;
-  memberships?: ReadonlyArray<{ userId: string; characterIds?: readonly string[] }>;
+  memberships?: ReadonlyArray<{ userId: string; role?: string; characterIds?: readonly string[] }>;
 }
 
-/** Character ids the user owns in the campaign or is assigned through their membership. */
+/** Character ids the user owns in the campaign or, as a PLAYER, is assigned through their membership. */
 export function getOwnCharacterIds(
   campaign: OwnershipCampaign | null | undefined,
   userId: string | undefined
@@ -22,7 +23,7 @@ export function getOwnCharacterIds(
   if (!campaign || !userId) return ids;
   for (const c of campaign.characters ?? []) if (c.userId === userId) ids.add(c.id);
   for (const m of campaign.memberships ?? []) {
-    if (m.userId === userId) for (const id of m.characterIds ?? []) ids.add(id);
+    if (m.userId === userId && m.role === 'PLAYER') for (const id of m.characterIds ?? []) ids.add(id);
   }
   return ids;
 }

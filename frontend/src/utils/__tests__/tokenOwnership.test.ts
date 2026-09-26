@@ -1,8 +1,8 @@
 /**
  * The client's "own token" rule for dynamic lighting (vision sources, fog
  * exemption) — the same rule as the server's isOwnToken: controlled by the
- * user, or linked to a character the user owns or is assigned through their
- * campaign membership `characterIds`.
+ * user, or linked to a character the user owns or, as a PLAYER, is assigned
+ * through their campaign membership `characterIds`.
  */
 
 import { describe, it, expect } from 'vitest';
@@ -13,16 +13,22 @@ const campaign = {
     { id: 'char-owned', userId: 'alice' },
     { id: 'char-robin', userId: 'mcp-service' },
     { id: 'char-other', userId: 'mcp-service' },
+    { id: 'char-sam', userId: 'sam' },
   ],
   memberships: [
     { userId: 'alice', role: 'PLAYER', characterIds: ['char-robin'] },
     { userId: 'bob', role: 'PLAYER', characterIds: ['char-other'] },
+    { userId: 'sam', role: 'SPECTATOR', characterIds: ['char-other'] },
   ],
 };
 
 describe('getOwnCharacterIds', () => {
   it('collects owned and assigned characters', () => {
     expect([...getOwnCharacterIds(campaign, 'alice')].sort()).toEqual(['char-owned', 'char-robin']);
+  });
+
+  it('counts membership assignments only for a PLAYER, ownership for anyone', () => {
+    expect([...getOwnCharacterIds(campaign, 'sam')]).toEqual(['char-sam']);
   });
 
   it('is empty without a user or campaign', () => {
