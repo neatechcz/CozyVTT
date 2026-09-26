@@ -659,3 +659,133 @@ describe('delegated character control (production permission rules inside the ro
     expect(db.character.update.mock.invocationCallOrder[0]).toBeGreaterThan(Math.max(...membershipReads));
   });
 });
+
+describe('PUT /api/characters/:id — expectedUpdatedAt precondition', () => {
+  function put(userId: string, body: unknown) {
+    return request(app).put('/api/characters/char-1').set('x-test-user', userId).send(body as object);
+  }
+  const CONFLICT_MESSAGE = 'Character changed since it was loaded';
+
+  test('matches the locked row → 200, written and broadcast', async () => {
+    const row = seed();
+    const data = clone(row.data) as any;
+    data.hp.current = 3;
+
+    const res = await put(OWNER, { data, expectedUpdatedAt: row.updatedAt.toISOString() });
+
+    expect(res.status).toBe(200);
+    expect(rows.get('char-1')!.data.hp).toEqual({ maximum: 10, current: 3, temporary: 0 });
+    expect(broadcast).toHaveBeenCalledTimes(1);
+  });
+
+  test('the same instant written with a UTC offset also matches', async () => {
+    const row = seed();
+    const shifted = new Date(row.updatedAt.getTime() + 2 * 3600 * 1000).toISOString().replace('Z', '+02:00');
+
+    const res = await put(OWNER, { name: 'Robin Hood', expectedUpdatedAt: shifted });
+
+    expect(res.status).toBe(200);
+    expect(rows.get('char-1')!.name).toBe('Robin Hood');
+  });
+
+  test('differs from the row → 409 with the current character, nothing written or broadcast', async () => {
+    const row = seed();
+    const stale = new Date(row.updatedAt.getTime() - 1000).toISOString();
+    const data = clone(row.data) as any;
+    data.hp.current = 3;
+
+    const res = await put(DM, { data, name: 'Overwritten', expectedUpdatedAt: stale });
+
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({
+      error: 'Conflict',
+      message: CONFLICT_MESSAGE,
+      character: expect.objectContaining({
+        id: 'char-1',
+        name: 'Robin',
+        updatedAt: row.updatedAt.toISOString(),
+        campaign: { id: 'camp-1', name: 'Klenba' },
+      }),
+    });
+    expect(res.body.character.data.hp).toEqual({ maximum: 10, current: 10, temporary: 0 });
+    expect(db.character.update).not.toHaveBeenCalled();
+    expect(rows.get('char-1')!.name).toBe('Robin');
+    expect(broadcast).not.toHaveBeenCalled();
+  });
+
+  test('is checked against the row read under the lock: a write committed while waiting → 409', async () => {
+    const row = seed();
+    const loadedAt = row.updatedAt.toISOString();
+    // Another writer commits while this PUT waits for the row lock
+    db.$queryRaw.mockImplementationOnce(async () => {
+      const current = rows.get('char-1')!;
+      rows.set('char-1', {
+        ...current,
+        data: { ...current.data, backstory: 'patched meanwhile' },
+        updatedAt: nextTime(),
+      });
+      return [];
+    });
+    const data = clone(row.data) as any;
+    data.hp.current = 3;
+
+    const res = await put(OWNER, { data, expectedUpdatedAt: loadedAt });
+
+    expect(res.status).toBe(409);
+    expect(res.body.character.data.backstory).toBe('patched meanwhile');
+    expect(db.character.update).not.toHaveBeenCalled();
+    expect(rows.get('char-1')!.data.backstory).toBe('patched meanwhile');
+    expect(rows.get('char-1')!.data.hp).toEqual({ maximum: 10, current: 10, temporary: 0 });
+    expect(broadcast).not.toHaveBeenCalled();
+  });
+
+  test('absent → unchanged behaviour: the whole document is replaced even if the row changed', async () => {
+    const row = seed();
+    rows.set('char-1', { ...rows.get('char-1')!, updatedAt: nextTime() });
+    const data = clone(row.data) as any;
+    data.hp.current = 3;
+
+    const res = await put(OWNER, { data });
+
+    expect(res.status).toBe(200);
+    expect(rows.get('char-1')!.data.hp).toEqual({ maximum: 10, current: 3, temporary: 0 });
+  });
+
+  test('a caller who may not edit gets 403 (no character in the body), not 409', async () => {
+    const row = seed();
+    const stale = new Date(row.updatedAt.getTime() - 1000).toISOString();
+
+    const res = await put(PLAYER, { name: 'X', expectedUpdatedAt: stale });
+
+    expect(res.status).toBe(403);
+    expect(res.body.character).toBeUndefined();
+  });
+
+  test('assignment revoked while waiting for the lock + stale expectedUpdatedAt → 403, no character leaked', async () => {
+    const row = seed();
+    const stale = new Date(row.updatedAt.getTime() - 1000).toISOString();
+    db.$queryRaw.mockImplementationOnce(async () => {
+      assignments[ASSIGNED] = [];
+      return [];
+    });
+
+    const res = await put(ASSIGNED, { name: 'X', expectedUpdatedAt: stale });
+
+    expect(res.status).toBe(403);
+    expect(res.body.character).toBeUndefined();
+  });
+
+  test.each([['not a date'], ['2026-09-26'], [12345], [null]])(
+    'an invalid expectedUpdatedAt (%p) → 400, nothing written',
+    async (expectedUpdatedAt) => {
+      seed();
+
+      const res = await put(OWNER, { name: 'X', expectedUpdatedAt });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('Validation Error');
+      expect(db.$transaction).not.toHaveBeenCalled();
+      expect(rows.get('char-1')!.name).toBe('Robin');
+    }
+  );
+});

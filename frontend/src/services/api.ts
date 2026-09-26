@@ -66,6 +66,13 @@ export interface CharacterPatchResult {
   status: number;
 }
 
+export interface CharacterConditionalUpdateResult {
+  /** 200: saved; 409: the character changed since `expectedUpdatedAt`, nothing written */
+  status: number;
+  /** The saved character (200) or the current, unchanged one (409) */
+  character: Character;
+}
+
 // ============================================
 // API Client Configuration
 // ============================================
@@ -539,6 +546,26 @@ class ApiClient {
   async updateCharacter(id: string, data: UpdateCharacterRequest): Promise<{ message: string; character: Character }> {
     const response = await this.client.put(`/api/characters/${id}`, data);
     return response.data;
+  }
+
+  /**
+   * Whole-document PUT with a server-side precondition: written only while the
+   * character's `updatedAt` still equals `expectedUpdatedAt` (checked under
+   * the server's row lock). 409 — the character changed meanwhile, nothing
+   * was written — is returned with the current character, not thrown. Other
+   * errors (400 validation, 403, 503…) throw as usual.
+   */
+  async updateCharacterIfUnchanged(
+    id: string,
+    data: UpdateCharacterRequest,
+    expectedUpdatedAt: string,
+  ): Promise<CharacterConditionalUpdateResult> {
+    const response = await this.client.put<{ character: Character }>(
+      `/api/characters/${id}`,
+      { ...data, expectedUpdatedAt },
+      { validateStatus: (status) => (status >= 200 && status < 300) || status === 409 },
+    );
+    return { status: response.status, character: response.data.character };
   }
 
   /**

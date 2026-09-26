@@ -9,6 +9,7 @@ const mocks = vi.hoisted(() => ({
   patchCharacterData: vi.fn(),
   getCharacter: vi.fn(),
   updateCharacter: vi.fn(),
+  updateCharacterIfUnchanged: vi.fn(),
 }));
 
 vi.mock('@/services/api', () => {
@@ -16,6 +17,7 @@ vi.mock('@/services/api', () => {
     patchCharacterData: mocks.patchCharacterData,
     getCharacter: mocks.getCharacter,
     updateCharacter: mocks.updateCharacter,
+    updateCharacterIfUnchanged: mocks.updateCharacterIfUnchanged,
   };
   return { api, default: api };
 });
@@ -68,6 +70,9 @@ function makeCharacter(data: Record<string, unknown>, overrides: Partial<Charact
 
 const gm = { userId: 'gm', displayName: 'Pán jeskyně' };
 
+/** `updatedAt` of the character the hook is set up with (the form's base) */
+const LOADED_AT = '2026-09-26T00:00:00.000Z';
+
 function remoteEvent(data: Record<string, unknown>, changedPaths: string[], characterId = 'char-1') {
   return {
     characterId,
@@ -97,6 +102,7 @@ beforeEach(() => {
   mocks.patchCharacterData.mockReset();
   mocks.getCharacter.mockReset();
   mocks.updateCharacter.mockReset();
+  mocks.updateCharacterIfUnchanged.mockReset();
 });
 
 
@@ -451,7 +457,7 @@ describe('useLiveCharacterSync', () => {
     const saved = makeCharacter(local);
     // The re-read before the PUT finds the form's base still current
     mocks.getCharacter.mockResolvedValue({ character: makeCharacter(odd) });
-    mocks.updateCharacter.mockResolvedValue({ message: 'ok', character: saved });
+    mocks.updateCharacterIfUnchanged.mockResolvedValue({ status: 200, character: saved });
 
     let outcome: Awaited<ReturnType<typeof hook.result.current.save>> | undefined;
     await act(async () => {
@@ -459,7 +465,7 @@ describe('useLiveCharacterSync', () => {
     });
 
     expect(mocks.patchCharacterData).not.toHaveBeenCalled();
-    expect(mocks.updateCharacter).toHaveBeenCalledWith('char-1', { data: local });
+    expect(mocks.updateCharacterIfUnchanged).toHaveBeenCalledWith('char-1', { data: local }, LOADED_AT);
     expect(outcome?.status).toBe('saved');
     expect(hook.result.current.isDirty).toBe(false);
     expect(onServerCharacter).toHaveBeenCalledWith(saved);
@@ -539,7 +545,7 @@ describe('useLiveCharacterSync', () => {
     const local = Object.fromEntries(Object.keys(many).map((key) => [key, 1]));
     userEdits(hook, local);
     mocks.getCharacter.mockResolvedValue({ character: makeCharacter(many) });
-    mocks.updateCharacter.mockResolvedValue({ message: 'ok', character: makeCharacter(local) });
+    mocks.updateCharacterIfUnchanged.mockResolvedValue({ status: 200, character: makeCharacter(local) });
 
     let outcome: Awaited<ReturnType<typeof hook.result.current.save>> | undefined;
     await act(async () => {
@@ -547,7 +553,7 @@ describe('useLiveCharacterSync', () => {
     });
 
     expect(mocks.patchCharacterData).not.toHaveBeenCalled();
-    expect(mocks.updateCharacter).toHaveBeenCalledWith('char-1', { data: local });
+    expect(mocks.updateCharacterIfUnchanged).toHaveBeenCalledWith('char-1', { data: local }, LOADED_AT);
     expect(outcome?.status).toBe('saved');
   });
 
@@ -842,7 +848,7 @@ describe('useLiveCharacterSync — whole-document PUT only from a current base',
     const local = { ...odd, 'bad-key': 2 };
     userEdits(hook, local);
     mocks.getCharacter.mockResolvedValue({ character: makeCharacter(odd) });
-    mocks.updateCharacter.mockResolvedValue({ message: 'ok', character: makeCharacter(local, { updatedAt: LATER }) });
+    mocks.updateCharacterIfUnchanged.mockResolvedValue({ status: 200, character: makeCharacter(local, { updatedAt: LATER }) });
 
     let outcome: Awaited<ReturnType<typeof hook.result.current.save>> | undefined;
     await act(async () => {
@@ -850,8 +856,8 @@ describe('useLiveCharacterSync — whole-document PUT only from a current base',
     });
 
     expect(mocks.getCharacter).toHaveBeenCalledWith('char-1');
-    expect(mocks.getCharacter.mock.invocationCallOrder[0]).toBeLessThan(mocks.updateCharacter.mock.invocationCallOrder[0]);
-    expect(mocks.updateCharacter).toHaveBeenCalledWith('char-1', { data: local });
+    expect(mocks.getCharacter.mock.invocationCallOrder[0]).toBeLessThan(mocks.updateCharacterIfUnchanged.mock.invocationCallOrder[0]);
+    expect(mocks.updateCharacterIfUnchanged).toHaveBeenCalledWith('char-1', { data: local }, LOADED_AT);
     expect(outcome?.status).toBe('saved');
   });
 
@@ -870,6 +876,7 @@ describe('useLiveCharacterSync — whole-document PUT only from a current base',
       outcome = await hook.result.current.save();
     });
 
+    expect(mocks.updateCharacterIfUnchanged).not.toHaveBeenCalled();
     expect(mocks.updateCharacter).not.toHaveBeenCalled();
     expect(mocks.patchCharacterData).not.toHaveBeenCalled();
     expect(outcome).toEqual({
@@ -903,10 +910,126 @@ describe('useLiveCharacterSync — whole-document PUT only from a current base',
       outcome = await hook.result.current.save();
     });
 
+    expect(mocks.updateCharacterIfUnchanged).not.toHaveBeenCalled();
     expect(mocks.updateCharacter).not.toHaveBeenCalled();
     expect(outcome?.status).toBe('stale');
     expect(formOf(hook).f0).toBe(7);
     expect(formOf(hook).f1).toBe(1);
     expect(hook.result.current.resets.map((reset) => reset.path)).toEqual(['f0']);
+  });
+});
+
+describe('useLiveCharacterSync — server-side precondition on the whole-document PUT (409)', () => {
+  const LATER = '2026-09-26T00:05:00.000Z';
+  const STALE_MESSAGE = 'List mezitím změnil někdo jiný — zkontrolujte změny a uložte znovu.';
+
+  it('the PUT always carries expectedUpdatedAt = the base the form is on (after an adopted broadcast)', async () => {
+    const odd = { ...baseData(), 'bad-key': 1 };
+    const { hook, socket } = setup({ data: odd });
+    const remote = { ...odd, experiencePoints: 150 };
+    act(() => socket.emit('character.updated', {
+      ...remoteEvent(remote, ['experiencePoints']),
+      character: makeCharacter(remote, { updatedAt: LATER }),
+    }));
+    const local = { ...remote, 'bad-key': 2 };
+    userEdits(hook, local);
+    mocks.getCharacter.mockResolvedValue({ character: makeCharacter(remote, { updatedAt: LATER }) });
+    mocks.updateCharacterIfUnchanged.mockResolvedValue({
+      status: 200,
+      character: makeCharacter(local, { updatedAt: '2026-09-26T00:06:00.000Z' }),
+    });
+
+    let outcome: Awaited<ReturnType<typeof hook.result.current.save>> | undefined;
+    await act(async () => {
+      outcome = await hook.result.current.save();
+    });
+
+    expect(mocks.updateCharacterIfUnchanged).toHaveBeenCalledWith('char-1', { data: local }, LATER);
+    expect(mocks.updateCharacter).not.toHaveBeenCalled();
+    expect(outcome?.status).toBe('saved');
+  });
+
+  it('not path-addressable: 409 (changed between the re-read and the PUT) → stale outcome, the returned sheet is merged', async () => {
+    const odd = { ...baseData(), 'bad-key': 1 };
+    const { hook, onServerCharacter } = setup({ data: odd });
+    const mine = { ...odd, 'bad-key': 2, hp: { current: 6, maximum: 10, temporary: 0 } };
+    userEdits(hook, mine);
+    // The re-read still sees the form's base …
+    mocks.getCharacter.mockResolvedValue({ character: makeCharacter(odd) });
+    // … but a PATCH lands before the PUT: the server refuses it and returns the current sheet
+    const theirs = { ...odd, experiencePoints: 300, hp: { current: 2, maximum: 10, temporary: 0 } };
+    const current = makeCharacter(theirs, { updatedAt: LATER });
+    mocks.updateCharacterIfUnchanged.mockResolvedValue({ status: 409, character: current });
+
+    let outcome: Awaited<ReturnType<typeof hook.result.current.save>> | undefined;
+    await act(async () => {
+      outcome = await hook.result.current.save();
+    });
+
+    expect(mocks.updateCharacterIfUnchanged).toHaveBeenCalledWith('char-1', { data: mine }, LOADED_AT);
+    expect(outcome).toEqual({ status: 'stale', character: current, message: STALE_MESSAGE });
+    // Exactly like the client-side stale branch: the newer sheet is merged,
+    // the user's whole (root-level) form is reported as one reset
+    expect(formOf(hook)).toEqual(theirs);
+    expect(hook.result.current.resets).toHaveLength(1);
+    expect(hook.result.current.resets[0]).toMatchObject({ path: '', mine, theirs });
+    expect(onServerCharacter).toHaveBeenCalledWith(current);
+    expect(storeOf(hook).getState().baseUpdatedAt).toBe(LATER);
+  });
+
+  it('more than 200 changes: 409 → stale, the other writer’s field resets, the user’s edits stay and the next save goes through', async () => {
+    // 202 fields: after f0 resets, 201 changes remain — still a whole-document save
+    const many: Record<string, unknown> = {};
+    for (let i = 0; i < 202; i++) many[`f${i}`] = 0;
+    const { hook } = setup({ data: many });
+    const mine = Object.fromEntries(Object.keys(many).map((key) => [key, 1]));
+    userEdits(hook, mine);
+    mocks.getCharacter.mockResolvedValueOnce({ character: makeCharacter(many) });
+    mocks.updateCharacterIfUnchanged.mockResolvedValueOnce({
+      status: 409,
+      character: makeCharacter({ ...many, f0: 7 }, { updatedAt: LATER }),
+    });
+
+    let outcome: Awaited<ReturnType<typeof hook.result.current.save>> | undefined;
+    await act(async () => {
+      outcome = await hook.result.current.save();
+    });
+
+    expect(outcome?.status).toBe('stale');
+    expect(outcome && 'message' in outcome ? outcome.message : undefined).toBe(STALE_MESSAGE);
+    expect(formOf(hook).f0).toBe(7);
+    expect(formOf(hook).f1).toBe(1);
+    expect(hook.result.current.resets.map((reset) => reset.path)).toEqual(['f0']);
+    expect(hook.result.current.isDirty).toBe(true);
+
+    // Saving again: based on the merged sheet (f0 = 7), the PUT carries LATER
+    const expected = { ...mine, f0: 7 };
+    mocks.getCharacter.mockResolvedValueOnce({ character: makeCharacter({ ...many, f0: 7 }, { updatedAt: LATER }) });
+    mocks.updateCharacterIfUnchanged.mockResolvedValueOnce({
+      status: 200,
+      character: makeCharacter(expected, { updatedAt: '2026-09-26T00:06:00.000Z' }),
+    });
+    await act(async () => {
+      outcome = await hook.result.current.save();
+    });
+
+    expect(mocks.updateCharacterIfUnchanged).toHaveBeenLastCalledWith('char-1', { data: expected }, LATER);
+    expect(outcome?.status).toBe('saved');
+    expect(hook.result.current.isDirty).toBe(false);
+  });
+
+  it('other PUT errors still propagate and end the in-flight save', async () => {
+    const odd = { ...baseData(), 'bad-key': 1 };
+    const { hook } = setup({ data: odd });
+    userEdits(hook, { ...odd, 'bad-key': 2 });
+    mocks.getCharacter.mockResolvedValue({ character: makeCharacter(odd) });
+    const error = Object.assign(new Error('Busy'), { response: { status: 503 } });
+    mocks.updateCharacterIfUnchanged.mockRejectedValue(error);
+
+    await act(async () => {
+      await expect(hook.result.current.save()).rejects.toBe(error);
+    });
+    expect(hook.result.current.isDirty).toBe(true);
+    expect(hook.result.current.resets).toEqual([]);
   });
 });

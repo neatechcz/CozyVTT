@@ -497,6 +497,10 @@ router.get('/:id/validate', authenticated, async (req: AuthenticatedRequest, res
  * Requires: Authentication
  * Authorization: Character owner OR campaign DM OR the campaign PLAYER the
  * character is assigned to — checked early and again under the row lock
+ * Precondition: optional `expectedUpdatedAt` (ISO 8601). When present and not
+ * equal to the locked row's `updatedAt` → 409 { error: 'Conflict', message,
+ * character } (the current character) and nothing is written. Absent → the
+ * write is unconditional (backward compatible).
  */
 router.put('/:id', authenticated, async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -510,7 +514,8 @@ router.put('/:id', authenticated, async (req: AuthenticatedRequest, res: Respons
         message: parsed.error.issues[0]?.message ?? 'Invalid character data',
       });
     }
-    const { name, data, tokenImageUrl, gameSystem } = parsed.data;
+    const { name, data, tokenImageUrl, gameSystem, expectedUpdatedAt } = parsed.data;
+    const expectedTime = expectedUpdatedAt !== undefined ? new Date(expectedUpdatedAt).getTime() : undefined;
 
     // Find character first to check authorization
     const character = await prisma.character.findUnique({
@@ -574,6 +579,15 @@ router.put('/:id', authenticated, async (req: AuthenticatedRequest, res: Respons
       if (!(await canEditCharacter(userId, lockedCharacter, tx))) {
         return { status: 'forbidden' as const };
       }
+      // Precondition (after the permission check: the current character is
+      // only ever returned to someone who may edit it)
+      if (expectedTime !== undefined && new Date(lockedCharacter.updatedAt).getTime() !== expectedTime) {
+        const current = await tx.character.findUnique({
+          where: { id },
+          include: { campaign: { select: { id: true, name: true } } },
+        });
+        return { status: 'conflict' as const, current };
+      }
 
       const updated = await tx.character.update({
         where: { id },
@@ -600,6 +614,13 @@ router.put('/:id', authenticated, async (req: AuthenticatedRequest, res: Respons
       return res.status(403).json({
         error: 'Forbidden',
         message: 'You do not have permission to edit this character',
+      });
+    }
+    if (locked.status === 'conflict') {
+      return res.status(409).json({
+        error: 'Conflict',
+        message: 'Character changed since it was loaded',
+        character: locked.current,
       });
     }
     const updatedCharacter = locked.updated;

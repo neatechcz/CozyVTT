@@ -192,18 +192,31 @@ export function useLiveCharacterSync({
       }
     };
 
+    /** Not written: the character changed since the form's base — merge it, ask to save again. */
+    const stale = (latest: Character): LiveSaveOutcome => {
+      mergeFresh(latest);
+      target.endSave();
+      return { status: 'stale', character: latest, message: STALE_SAVE_MESSAGE };
+    };
+
     // The PUT replaces the whole document, so it may only be sent while the
     // form's base is still the server state: otherwise it would write back
-    // the old values of fields someone else changed meanwhile.
+    // the old values of fields someone else changed meanwhile. The re-read
+    // catches most of that without a write; the PUT's server-side
+    // precondition (`expectedUpdatedAt`, checked under the row lock) closes
+    // the window between the re-read and the PUT — its 409 is the same stale case.
     const saveWholeDocument = async (): Promise<LiveSaveOutcome> => {
       const { character: latest } = await api.getCharacter(id);
-      if (latest.updatedAt !== snapshot.baseUpdatedAt) {
-        mergeFresh(latest);
-        target.endSave();
-        return { status: 'stale', character: latest, message: STALE_SAVE_MESSAGE };
+      if (!snapshot.baseUpdatedAt || latest.updatedAt !== snapshot.baseUpdatedAt) {
+        return stale(latest);
       }
-      const { character: saved } = await api.updateCharacter(id, { data: snapshot.sent as Character['data'] });
-      return adoptSaved(saved);
+      const result = await api.updateCharacterIfUnchanged(
+        id,
+        { data: snapshot.sent as Character['data'] },
+        snapshot.baseUpdatedAt,
+      );
+      if (result.status === 409) return stale(result.character);
+      return adoptSaved(result.character);
     };
 
     try {
