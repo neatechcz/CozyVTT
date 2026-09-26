@@ -184,4 +184,27 @@ describe('seedSrdCreatures', () => {
     expect(second).toEqual({ fetched: 1, created: 0, skipped: 1, alreadyExisted: 1, updatedHp: 0 });
     expect(creatureTemplate.update).not.toHaveBeenCalled();
   });
+
+  describe('malformed Open5e entries', () => {
+    // speed: null makes the mapping throw (Object.entries(null))
+    const BROKEN = monster({ slug: 'broken', name: 'Broken Beast', speed: null as unknown as Record<string, number> });
+
+    it('skips a malformed entry and still creates the rest', async () => {
+      const { prisma, rows } = fakePrisma([]);
+      const result = await seedSrdCreatures(prisma, async () => [GOBLIN, BROKEN, ORC]);
+
+      expect(result).toMatchObject({ fetched: 3, created: 2, updatedHp: 0 });
+      expect(rows.map((r) => r.name)).toEqual(['Goblin', 'Orc']);
+    });
+
+    it('skips a malformed entry that already exists and still backfills the rest', async () => {
+      const brokenExisting: FakeTemplate = { ...existingSrd('b1', GOBLIN), name: 'Broken Beast' };
+      const { prisma, rows, creatureTemplate } = fakePrisma([brokenExisting, existingSrd('g1', GOBLIN)]);
+      const result = await seedSrdCreatures(prisma, async () => [BROKEN, GOBLIN, ORC]);
+
+      expect(result).toMatchObject({ fetched: 3, created: 1, updatedHp: 1 });
+      expect(creatureTemplate.update.mock.calls.map((c) => c[0].where.id)).toEqual(['g1']);
+      expect((rows.find((r) => r.id === 'b1')!.statBlock as { hp?: unknown }).hp).toBeUndefined();
+    });
+  });
 });

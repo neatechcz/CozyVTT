@@ -684,7 +684,7 @@ class ApiClient {
     return response.data;
   }
 
-  async seedSrdCreatures(campaignId: string): Promise<{ message: string; fetched: number; created: number; skipped: number; alreadyExisted: number }> {
+  async seedSrdCreatures(campaignId: string): Promise<{ message: string; fetched: number; created: number; skipped: number; alreadyExisted: number; updatedHp: number }> {
     const response = await this.client.post(`/api/campaigns/${campaignId}/creatures/seed`);
     return response.data;
   }

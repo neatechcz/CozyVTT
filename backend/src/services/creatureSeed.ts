@@ -231,10 +231,19 @@ export async function seedSrdCreatures(
   let updatedHp = 0;
 
   for (const monster of monsters) {
-    const data = mapOpen5eMonster(monster);
+    const alreadyExists = existingNames.has(monster.name);
+    if (alreadyExists) skipped++;
 
-    if (existingNames.has(monster.name)) {
-      skipped++;
+    // Map per monster — one malformed Open5e entry must not abort the whole seed
+    let data: ReturnType<typeof mapOpen5eMonster>;
+    try {
+      data = mapOpen5eMonster(monster);
+    } catch (err) {
+      logger.error(`Failed to map Open5e monster "${monster?.name}"`, { err: err });
+      continue;
+    }
+
+    if (alreadyExists) {
       const hp = data.statBlock.hp;
       if (!hp) continue;
 
