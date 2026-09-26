@@ -1,8 +1,16 @@
 import { Server } from 'socket.io';
 import { prisma } from '../config/database';
 import logger from '../utils/logger';
-import { filterTokensByRole, getSpiritVisibilityBatch } from '../utils/spirit-layer';
+import {
+  diffTokenViews,
+  filterTokensForViewer,
+  getTokenViewersFor,
+  tokenViewerKey,
+  withLightPolygons,
+  type TokenViewMap,
+} from '../utils/spirit-layer';
 import type { AuthenticatedSocket } from './auth';
+import { bumpMapVersion } from './mapVersion';
 
 /**
  * WebSocket Utility Functions
@@ -94,19 +102,68 @@ export async function broadcastToCharacterViewers(
 /** A token as stored in a map's `tokens` JSON array (only `id` is read directly). */
 type StoredToken = { id: string };
 
+/** The stored map fields a token event needs to compute players' lighting views. */
+const TOKEN_VIEW_MAP_SELECT = {
+  tokens: true,
+  lightingEnabled: true,
+  wallSegments: true,
+  lights: true,
+  width: true,
+  height: true,
+  gridSize: true,
+} as const;
+
+type TokenEvent = [event: string, payload: unknown];
+
+/**
+ * The map's token array with the event's token set to `token` (replaced in
+ * place, appended when absent, dropped when `token` is null). The rest of the
+ * array is the map as stored now.
+ */
+function withEventToken(tokens: unknown, tokenId: string, token: StoredToken | null): StoredToken[] {
+  const stored = (Array.isArray(tokens) ? tokens : []) as StoredToken[];
+  const others = stored.filter((t) => t?.id !== tokenId);
+  if (!token) return others;
+  const index = stored.findIndex((t) => t?.id === tokenId);
+  if (index === -1) return [...others, token];
+  const next = [...stored];
+  next[index] = token;
+  return next;
+}
+
+/** The non-DM sockets of a campaign room with their TokenViewer inputs, plus the DM sockets. */
+async function getCampaignViewers(campaignId: string) {
+  const io = getSocketInstance();
+  const campaignSockets = await io.in(campaignId).fetchSockets();
+  const authed = campaignSockets.map((s) => s as unknown as AuthenticatedSocket & { emit: typeof s.emit });
+  return getTokenViewersFor(campaignId, authed);
+}
+
 /**
  * Broadcast a token add / update / remove made through the REST routes.
  *
  * Pass the token as it was before the write (`null` when it was just
  * created) and as it is after the write (`null` when it was deleted). Each
- * socket in the campaign room receives the event that turns its view of the
- * token from "before" into "after", using the same rules as the map GET
- * (filterTokensByRole):
+ * socket in the campaign room receives the events that turn its view of the
+ * map from "before" into "after", using the same per-viewer pipeline as
+ * map.changed (filterTokensForViewer: filterTokensByRole, then line of sight):
  * - DM sockets see every token: `token.added` / `token.updated` / `token.removed`.
  * - Other sockets only see tokens that pass filterTokensByRole (visible, on
  *   the plane they currently see, DM-only `notes` stripped). A token that
  *   becomes hidden from them arrives as `token.removed`; one that becomes
  *   visible arrives as `token.added`; a token they never see sends nothing.
+ *   A non-DM socket without a userId receives nothing.
+ * - On a map with dynamic lighting, a player additionally sees only tokens
+ *   in their line of sight (filterTokensByLighting; own tokens per
+ *   isOwnToken). Their whole before/after view is compared, so the event's
+ *   token entering / leaving sight is `token.added` / `token.removed`, and a
+ *   change that moves their sight (their own token moved, assigned, hidden or
+ *   removed) also sends `token.added` / `token.removed` for every other token
+ *   that entered or left it. The event's own token is always emitted first.
+ *
+ * Views are computed from the map as stored when the broadcast runs, with
+ * the event's token set to `before` / `after`. If the map can no longer be
+ * read, players receive nothing (fail closed); DMs still do.
  *
  * Payloads: `token.added|token.updated { mapId, token }`,
  * `token.removed { mapId, tokenId }`.
@@ -123,39 +180,117 @@ export async function broadcastTokenEvent(
   try {
     const tokenId = after?.id ?? before?.id;
     if (!tokenId) return;
+    bumpMapVersion(mapId); // cached drag snapshots of this map are stale now
 
-    const io = getSocketInstance();
-    const campaignSockets = await io.in(campaignId).fetchSockets();
-    const authedSockets = campaignSockets.map((s) => s as unknown as AuthenticatedSocket);
+    const viewers = await getCampaignViewers(campaignId);
+    const hasPlayers = viewers.some(({ viewer }) => viewer.role !== 'DM');
+    const storedMap = hasPlayers
+      ? await prisma.map.findUnique({ where: { id: mapId }, select: TOKEN_VIEW_MAP_SELECT })
+      : null;
+    const map = storedMap ? withLightPolygons(storedMap) : null;
 
-    const needsSpiritVisibility = authedSockets.some((s) => s.role !== 'DM' && s.userId);
-    const visibility = needsSpiritVisibility
-      ? await getSpiritVisibilityBatch(
-          campaignId,
-          authedSockets.map((s) => s.userId).filter((id): id is string => !!id)
-        )
-      : new Map<string, boolean>();
+    // Without lighting a token's visibility does not depend on the others: filter just it.
+    const beforeTokens = map?.lightingEnabled ? withEventToken(map.tokens, tokenId, before) : before ? [before] : [];
+    const afterTokens = map?.lightingEnabled ? withEventToken(map.tokens, tokenId, after) : after ? [after] : [];
+    const eventsByViewer = new Map<string, TokenEvent[]>();
 
-    for (const s of campaignSockets) {
-      const authedSocket = s as unknown as AuthenticatedSocket;
-      let seenBefore: unknown = before;
-      let seenAfter: unknown = after;
-
-      if (authedSocket.role !== 'DM') {
-        const role = authedSocket.role ?? 'SPECTATOR';
-        const spiritVisible = !!(authedSocket.userId && visibility.get(authedSocket.userId));
-        seenBefore = before ? filterTokensByRole([before], role, spiritVisible)[0] ?? null : null;
-        seenAfter = after ? filterTokensByRole([after], role, spiritVisible)[0] ?? null : null;
+    for (const { socket, viewer } of viewers) {
+      if (viewer.role === 'DM') {
+        if (after) {
+          socket.emit(before ? 'token.updated' : 'token.added', { mapId, token: after });
+        } else if (before) {
+          socket.emit('token.removed', { mapId, tokenId });
+        }
+        continue;
       }
+      if (!map) continue; // Map gone: its lighting is unknown, so send nothing (fail closed).
 
-      if (seenAfter) {
-        s.emit(seenBefore ? 'token.updated' : 'token.added', { mapId, token: seenAfter });
-      } else if (seenBefore) {
-        s.emit('token.removed', { mapId, tokenId });
+      const key = tokenViewerKey(viewer);
+      let events = eventsByViewer.get(key);
+      if (!events) {
+        const diff = diffTokenViews(
+          filterTokensForViewer(beforeTokens, map, viewer),
+          filterTokensForViewer(afterTokens, map, viewer),
+          tokenId
+        );
+        events = [];
+        if (diff.eventToken?.kind === 'removed') {
+          events.push(['token.removed', { mapId, tokenId }]);
+        } else if (diff.eventToken) {
+          events.push([`token.${diff.eventToken.kind}`, { mapId, token: diff.eventToken.token }]);
+        }
+        for (const t of diff.added) events.push(['token.added', { mapId, token: t }]);
+        for (const id of diff.removedIds) events.push(['token.removed', { mapId, tokenId: id }]);
+        eventsByViewer.set(key, events);
       }
+      for (const [event, payload] of events) socket.emit(event, payload);
     }
   } catch (error) {
     logger.error('Token broadcast failed', { err: error, campaignId, mapId });
+  }
+}
+
+/**
+ * The map fields whose change can move what players see on a lighting map.
+ * Pass their values from before the write to broadcastMapViewChange.
+ */
+export type MapViewFields = Partial<
+  Pick<TokenViewMap, 'lightingEnabled' | 'wallSegments' | 'lights' | 'width' | 'height' | 'gridSize'>
+>;
+
+/**
+ * After a write that changes what players can see without touching tokens —
+ * a wall or door, a light, the lighting toggle, the map's size or grid —
+ * send each player the tokens that entered or left their view.
+ *
+ * `previous` holds the changed fields' values from before the write; the
+ * rest of the map (tokens, other fields) is read as stored now. Each player's
+ * view with the previous and with the current fields goes through
+ * filterTokensForViewer and diffTokenViews; the result is `token.added
+ * { mapId, token }` / `token.removed { mapId, tokenId }`. DMs see every token
+ * and receive nothing. Skips the map read when no player is connected, and
+ * the diff when lighting is off both before and after.
+ *
+ * Never throws — a failed broadcast is logged.
+ */
+export async function broadcastMapViewChange(
+  campaignId: string,
+  mapId: string,
+  previous: MapViewFields
+): Promise<void> {
+  try {
+    bumpMapVersion(mapId); // cached drag snapshots of this map are stale now
+    const viewers = (await getCampaignViewers(campaignId)).filter(({ viewer }) => viewer.role !== 'DM');
+    if (viewers.length === 0) return;
+
+    const stored = await prisma.map.findUnique({ where: { id: mapId }, select: TOKEN_VIEW_MAP_SELECT });
+    if (!stored) return;
+    const beforeMap = { ...stored, ...previous };
+    if (!stored.lightingEnabled && !beforeMap.lightingEnabled) return;
+
+    const mapBefore = withLightPolygons(beforeMap);
+    const mapAfter = withLightPolygons(stored);
+    const eventsByViewer = new Map<string, TokenEvent[]>();
+
+    for (const { socket, viewer } of viewers) {
+      const key = tokenViewerKey(viewer);
+      let events = eventsByViewer.get(key);
+      if (!events) {
+        const diff = diffTokenViews(
+          filterTokensForViewer(stored.tokens, mapBefore, viewer),
+          filterTokensForViewer(stored.tokens, mapAfter, viewer),
+          null
+        );
+        events = [
+          ...diff.added.map((token): TokenEvent => ['token.added', { mapId, token }]),
+          ...diff.removedIds.map((tokenId): TokenEvent => ['token.removed', { mapId, tokenId }]),
+        ];
+        eventsByViewer.set(key, events);
+      }
+      for (const [event, payload] of events) socket.emit(event, payload);
+    }
+  } catch (error) {
+    logger.error('Map view-change broadcast failed', { err: error, campaignId, mapId });
   }
 }
 

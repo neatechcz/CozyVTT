@@ -6,9 +6,10 @@
 import { Server } from 'socket.io';
 import { AuthenticatedSocket } from '../auth';
 import { prisma } from '../../config/database';
-import { getSpiritVisibilityBatch, filterMapData } from '../../utils/spirit-layer';
-import { sendSystemMessage } from '../utils';
+import { getTokenViewersFor, filterMapData } from '../../utils/spirit-layer';
+import { broadcastTokenEvent, sendSystemMessage } from '../utils';
 import logger from '../../utils/logger';
+import { bumpMapVersion } from '../mapVersion';
 import { Token } from '../shared';
 
 export function registerSpiritHandlers(io: Server, socket: AuthenticatedSocket): void {
@@ -61,28 +62,25 @@ export function registerSpiritHandlers(io: Server, socket: AuthenticatedSocket):
         });
 
         if (currentMap) {
+          // Spirit visibility changed: cached drag viewers of this map are stale.
+          bumpMapVersion(currentMap.id);
           const campaignSockets = await io.in(socket.campaignId).fetchSockets();
-          const visibility = await getSpiritVisibilityBatch(
+          const viewers = await getTokenViewersFor(
             socket.campaignId,
-            campaignSockets.map((s) => (s as unknown as AuthenticatedSocket).userId).filter((id): id is string => !!id)
+            campaignSockets.map((s) => s as unknown as AuthenticatedSocket)
           );
-          for (const s of campaignSockets) {
-            const authedSocket = s as unknown as AuthenticatedSocket;
-            const spiritVisible =
-              authedSocket.role === 'DM'
-                ? true
-                : authedSocket.userId
-                  ? (visibility.get(authedSocket.userId) ?? false)
-                  : false;
+          for (const { socket: s, viewer } of viewers) {
+            const spiritVisible = viewer.spiritVisible;
             const filteredMap = filterMapData(
               {
                 ...currentMap,
                 tokens: currentMap.tokens as any,
                 annotations: currentMap.annotations as any,
               },
-              authedSocket.role || 'PLAYER',
+              viewer.role,
               spiritVisible,
-              authedSocket.userId
+              viewer.userId,
+              viewer.characterIds
             );
             s.emit('map.changed', { mapId: currentMap.id, mapData: filteredMap, spiritVisible });
           }
@@ -120,7 +118,8 @@ export function registerSpiritHandlers(io: Server, socket: AuthenticatedSocket):
 
   /**
    * SPIRIT_LAYER.TOKEN.TOGGLE - DM toggles visibility of a specific token.
-   * Role-filtered broadcast.
+   * `spirit_layer.token.toggled` (with the token) reaches DMs only; every
+   * socket gets the filtered token event from broadcastTokenEvent.
    */
   socket.on('spirit_layer.token.toggle', async (data: { mapId: string; tokenId: string; visible: boolean }) => {
     try {
@@ -161,8 +160,8 @@ export function registerSpiritHandlers(io: Server, socket: AuthenticatedSocket):
         return;
       }
 
-      const token = tokensArray[tokenIndex];
-      token.visible = visible;
+      const before = tokensArray[tokenIndex];
+      const token: Token = { ...before, visible };
 
       // Save updated tokens to database
       const updatedTokens = [...tokensArray];
@@ -173,62 +172,24 @@ export function registerSpiritHandlers(io: Server, socket: AuthenticatedSocket):
         data: { tokens: updatedTokens as any },
       });
 
-      // Role-filtered broadcast: use per-socket filtering
-      const sockets = await io.in(socket.campaignId).fetchSockets();
-      const visibility = await getSpiritVisibilityBatch(
-        socket.campaignId,
-        sockets.map((s) => (s as unknown as AuthenticatedSocket).userId).filter((id): id is string => !!id)
-      );
-
-      for (const s of sockets) {
-        const authedSocket = s as unknown as AuthenticatedSocket;
-        const isSocketDM = authedSocket.role === 'DM';
-
-        // DM always gets the event
-        if (isSocketDM) {
-          s.emit('spirit_layer.token.toggled', {
-            mapId,
-            tokenId,
-            visible,
-            token,
-            toggledBy: socket.userId,
-            timestamp: new Date().toISOString(),
-          });
-          continue;
-        }
-
-        // Non-DMs: only notify if they can see the token after the change
-        // Check spirit visibility for THIS receiver, not the sender
-        const receiverSpiritVisible = authedSocket.userId ? (visibility.get(authedSocket.userId) ?? false) : false;
-
-        // They must be able to see spirit layer (if spirit token) AND token must be visible
-        if (token.layer === 'spirit' && !receiverSpiritVisible) {
-          // Player can't see spirit tokens - skip
-          continue;
-        }
-
-        if (visible) {
-          // Token is now visible - notify player so it appears
-          s.emit('spirit_layer.token.toggled', {
-            mapId,
-            tokenId,
-            visible,
-            token,
-            toggledBy: socket.userId,
-            timestamp: new Date().toISOString(),
-          });
-        } else {
-          // Token is now hidden - notify player so it disappears
-          // Send minimal data (no full token details for hidden tokens)
-          s.emit('spirit_layer.token.toggled', {
-            mapId,
-            tokenId,
-            visible: false,
-            toggledBy: socket.userId,
-            timestamp: new Date().toISOString(),
-          });
-        }
+      // The full token (DM notes included) goes to DMs only.
+      const campaignSockets = await io.in(socket.campaignId).fetchSockets();
+      for (const s of campaignSockets) {
+        if ((s as unknown as AuthenticatedSocket).role !== 'DM') continue;
+        s.emit('spirit_layer.token.toggled', {
+          mapId,
+          tokenId,
+          visible,
+          token,
+          toggledBy: socket.userId,
+          timestamp: new Date().toISOString(),
+        });
       }
+
+      // Everyone gets the per-recipient token event (role, plane, line of
+      // sight): players see the token appear (token.added) or disappear
+      // (token.removed) only if they may see it.
+      await broadcastTokenEvent(socket.campaignId, mapId, before, token);
 
       logger.debug('spirit_layer.token.toggle', { tokenId, visible, userId: socket.userId, mapId });
     } catch (error) {

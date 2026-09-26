@@ -5,8 +5,9 @@
 import { Server } from 'socket.io';
 import { AuthenticatedSocket } from '../auth';
 import { prisma } from '../../config/database';
-import { getSpiritVisibilityBatch, filterMapData } from '../../utils/spirit-layer';
+import { getTokenViewersFor, filterMapData } from '../../utils/spirit-layer';
 import logger from '../../utils/logger';
+import { bumpMapVersion } from '../mapVersion';
 
 export function registerMapHandlers(io: Server, socket: AuthenticatedSocket): void {
   /**
@@ -36,33 +37,29 @@ export function registerMapHandlers(io: Server, socket: AuthenticatedSocket): vo
         return;
       }
 
+      bumpMapVersion(mapId); // cached drag snapshots reload with the switch
+
       // Broadcast role-filtered map data to each connected campaign member.
       // spiritVisible is included in the payload so the client knows whether
       // to show the spirit overlay for this specific viewer.
       const campaignSockets = await io.in(socket.campaignId).fetchSockets();
-      const visibility = await getSpiritVisibilityBatch(
+      const viewers = await getTokenViewersFor(
         socket.campaignId,
-        campaignSockets.map((s) => (s as unknown as AuthenticatedSocket).userId).filter((id): id is string => !!id)
+        campaignSockets.map((s) => s as unknown as AuthenticatedSocket)
       );
-      for (const s of campaignSockets) {
-        const authedSocket = s as unknown as AuthenticatedSocket;
-        const spiritVisible =
-          authedSocket.role === 'DM'
-            ? true
-            : authedSocket.userId
-              ? (visibility.get(authedSocket.userId) ?? false)
-              : false;
+      for (const { socket: s, viewer } of viewers) {
         const filteredMap = filterMapData(
           {
             ...map,
             tokens: map.tokens as any,
             annotations: map.annotations as any,
           },
-          authedSocket.role || 'PLAYER',
-          spiritVisible,
-          authedSocket.userId
+          viewer.role,
+          viewer.spiritVisible,
+          viewer.userId,
+          viewer.characterIds
         );
-        s.emit('map.changed', { mapId, mapData: filteredMap, spiritVisible });
+        s.emit('map.changed', { mapId, mapData: filteredMap, spiritVisible: viewer.spiritVisible });
       }
 
       logger.info('map.change', { mapId, userId: socket.userId, campaignId: socket.campaignId });

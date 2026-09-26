@@ -210,7 +210,8 @@ router.get('/:campaignId', campaignMember, async (req: AuthenticatedRequest, res
             },
           },
         },
-        // PERFORMANCE: return map/character METADATA only. The full
+        // PERFORMANCE: return map/character METADATA only (spiritLayerUrl is
+        // nulled for non-DMs below). The full
         // token/wall/fog/light blobs and full character sheets are unbounded and
         // were never used from this payload — the active map's full data loads via
         // GET /api/maps/:id (spirit-filtered) and character sheets via
@@ -277,6 +278,9 @@ router.get('/:campaignId', campaignMember, async (req: AuthenticatedRequest, res
           ...member,
           characterIds: member.userId === userId ? member.characterIds : [],
         })),
+        // The spirit layer image is DM-only here; players get it (when they
+        // may see the spirit layer) through the filtered map GET / map.changed.
+        maps: isDM ? campaignRest.maps : campaignRest.maps.map((map) => ({ ...map, spiritLayerUrl: null })),
         activeSession: (_sessions && _sessions.length > 0) ? _sessions[0] : null,
         userRole: req.campaignMembership!.role,
       },

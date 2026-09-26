@@ -6,8 +6,8 @@ import multer from 'multer';
 import { AuthenticatedRequest } from '../middleware/rbac';
 import { campaignMember, campaignDM } from '../middleware/compose';
 import { prisma } from '../config/database';
-import { filterMapData, getSpiritVisibility } from '../utils/spirit-layer';
-import { broadcastToCampaign, broadcastTokenEvent } from '../websocket/utils';
+import { filterMapData, getOwnCharacterIdsBatch, getSpiritVisibility } from '../utils/spirit-layer';
+import { broadcastMapViewChange, broadcastToCampaign, broadcastTokenEvent } from '../websocket/utils';
 import { normalizeAssetUrl } from '../utils/asset-urls';
 import { WallSegmentSchema, WallSegmentsArraySchema, FogOperationSchema, LightSourceSchema, LightSourcesArraySchema, LightSourceUpdateSchema } from '../validators/walls';
 import type { WallSegment, FogState, LightSource } from '../types/walls';
@@ -386,6 +386,7 @@ router.get(
  * - DM always sees all tokens on both layers
  * - Players see spirit tokens only when spiritLayerEnabled is true
  * - Hidden tokens (visible: false) only visible to DM
+ * - Dynamic lighting: players only get tokens in their line of sight
  * - Spirit layer URL hidden from non-privileged users
  */
 router.get('/:id', campaignMember, async (req: AuthenticatedRequest, res: Response) => {
@@ -434,8 +435,15 @@ router.get('/:id', campaignMember, async (req: AuthenticatedRequest, res: Respon
     // Get spirit layer visibility for this user
     const spiritVisible = await getSpiritVisibility(campaignId, userId);
 
-    // Filter map data based on role and spirit visibility
-    const responseMap = filterMapData(map, membership.role, spiritVisible);
+    // Filter map data based on role and spirit visibility — and, for players on
+    // a map with dynamic lighting, line of sight from their own tokens (those
+    // they control or whose character they own or are assigned; same view as
+    // map.changed)
+    const ownCharacterIds =
+      membership.role !== 'DM' && map.lightingEnabled
+        ? (await getOwnCharacterIdsBatch(campaignId, [userId])).get(userId)
+        : undefined;
+    const responseMap = filterMapData(map, membership.role, spiritVisible, userId, ownCharacterIds);
 
     return res.status(200).json({ map: responseMap, spiritVisible });
   } catch (error) {
@@ -591,6 +599,15 @@ router.put('/:id', campaignDM, async (req: AuthenticatedRequest, res: Response) 
           lightingEnabled: updatedMap.lightingEnabled,
         });
       } catch { /* non-fatal */ }
+    }
+    // Lighting, size or grid changes move what players see on a lighting map.
+    if (['lightingEnabled', 'width', 'height', 'gridSize'].some((field) => updateData[field] !== undefined)) {
+      await broadcastMapViewChange(campaignId, id, {
+        lightingEnabled: existingMap.lightingEnabled,
+        width: existingMap.width,
+        height: existingMap.height,
+        gridSize: existingMap.gridSize,
+      });
     }
 
     return res.status(200).json({ map: updatedMap });
@@ -1048,7 +1065,7 @@ router.put('/:id/tokens/:tokenId', campaignMember, async (req: AuthenticatedRequ
     updatedTokens[tokenIndex] = updatedToken;
 
     // Update the map
-    const updatedMap = await prisma.map.update({
+    await prisma.map.update({
       where: { id: mapId },
       data: { tokens: updatedTokens as any },
     });
@@ -1056,10 +1073,17 @@ router.put('/:id/tokens/:tokenId', campaignMember, async (req: AuthenticatedRequ
     // Live update; players get token.added / token.removed when visibility flips
     await broadcastTokenEvent(campaignId, mapId, existingToken, updatedToken);
 
+    // Only the updated token — never the map (other tokens, fog, spirit layer).
+    // DM-only fields (notes) are stripped for non-DMs, as in the map GET.
+    let responseToken: Token = updatedToken;
+    if (membership.role !== 'DM') {
+      const { notes: _notes, ...playerToken } = updatedToken;
+      responseToken = playerToken as Token;
+    }
+
     return res.status(200).json({
       message: 'Token updated successfully',
-      token: updatedToken,
-      map: updatedMap,
+      token: responseToken,
     });
   } catch (error) {
     logger.error('Error updating token', { err: error });
@@ -1251,6 +1275,7 @@ router.put('/:id/walls', campaignDM, async (req: AuthenticatedRequest, res: Resp
       where: { id },
       data: { wallSegments: parsed.data as any },
     });
+    await broadcastMapViewChange(campaignId, id, { wallSegments: map.wallSegments });
 
     return res.status(200).json({ segments: updated.wallSegments });
   } catch (error) {
@@ -1285,6 +1310,7 @@ router.post('/:id/walls', campaignDM, async (req: AuthenticatedRequest, res: Res
       where: { id },
       data: { wallSegments: [...existing, parsed.data] as any },
     });
+    await broadcastMapViewChange(campaignId, id, { wallSegments: existing });
 
     return res.status(201).json({ segment: parsed.data, total: (updated.wallSegments as unknown as WallSegment[]).length });
   } catch (error) {
@@ -1311,6 +1337,7 @@ router.delete('/:id/walls/:sid', campaignDM, async (req: AuthenticatedRequest, r
     }
 
     await prisma.map.update({ where: { id }, data: { wallSegments: filtered as any } });
+    await broadcastMapViewChange(campaignId, id, { wallSegments: existing });
     return res.status(200).json({ message: 'Wall segment deleted' });
   } catch (error) {
     logger.error('Error deleting wall segment', { err: error });
@@ -1341,8 +1368,11 @@ router.patch('/:id/walls/:sid', campaignDM, async (req: AuthenticatedRequest, re
       return res.status(404).json({ error: 'Not Found', message: 'Wall segment not found' });
     }
 
+    const previous = [...existing];
     existing[segIndex] = { ...existing[segIndex], type: req.body.type };
     await prisma.map.update({ where: { id }, data: { wallSegments: existing as any } });
+    // An opened or closed door changes what players see on a lighting map.
+    await broadcastMapViewChange(campaignId, id, { wallSegments: previous });
 
     return res.status(200).json({ segment: existing[segIndex] });
   } catch (error) {
@@ -1394,6 +1424,7 @@ router.put('/:id/lights', campaignDM, async (req: AuthenticatedRequest, res: Res
     });
 
     broadcastToCampaign(campaignId, 'lights:replaced', { mapId: id, lights: updated.lights });
+    await broadcastMapViewChange(campaignId, id, { lights: map.lights });
     return res.status(200).json({ lights: updated.lights });
   } catch (error) {
     logger.error('Error replacing light sources:', error);
@@ -1429,6 +1460,7 @@ router.post('/:id/lights', campaignDM, async (req: AuthenticatedRequest, res: Re
     });
 
     broadcastToCampaign(campaignId, 'light:added', { mapId: id, light: parsed.data });
+    await broadcastMapViewChange(campaignId, id, { lights: existing });
     return res.status(201).json({ light: parsed.data, total: (updated.lights as unknown as LightSource[]).length });
   } catch (error) {
     logger.error('Error adding light source:', error);
@@ -1458,10 +1490,12 @@ router.patch('/:id/lights/:lightId', campaignDM, async (req: AuthenticatedReques
       return res.status(404).json({ error: 'Not Found', message: 'Light source not found' });
     }
 
+    const previous = [...existing];
     existing[idx] = { ...existing[idx], ...parsed.data };
     await prisma.map.update({ where: { id }, data: { lights: existing as any } });
 
     broadcastToCampaign(campaignId, 'light:updated', { mapId: id, light: existing[idx] });
+    await broadcastMapViewChange(campaignId, id, { lights: previous });
     return res.status(200).json({ light: existing[idx] });
   } catch (error) {
     logger.error('Error updating light source:', error);
@@ -1489,6 +1523,7 @@ router.delete('/:id/lights/:lightId', campaignDM, async (req: AuthenticatedReque
     await prisma.map.update({ where: { id }, data: { lights: filtered as any } });
 
     broadcastToCampaign(campaignId, 'light:removed', { mapId: id, lightId });
+    await broadcastMapViewChange(campaignId, id, { lights: existing });
     return res.status(200).json({ message: 'Light source deleted' });
   } catch (error) {
     logger.error('Error deleting light source:', error);
@@ -1579,6 +1614,8 @@ router.put('/:id/lighting', campaignDM, async (req: AuthenticatedRequest, res: R
     } catch {
       // Socket may not be initialized in tests — log and continue
     }
+    // Players gain (lighting off) or lose (lighting on) the tokens outside their sight.
+    await broadcastMapViewChange(campaignId, id, { lightingEnabled: map.lightingEnabled });
 
     return res.status(200).json({ lightingEnabled: updated.lightingEnabled });
   } catch (error) {

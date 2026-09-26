@@ -38,6 +38,7 @@ jest.mock('../../config/database', () => ({
     map: { findUnique: jest.fn(), update: jest.fn() },
     campaignMembership: { findUnique: jest.fn(), findMany: jest.fn() },
     campaign: { findUnique: jest.fn() },
+    character: { findMany: jest.fn(async () => []) },
     message: { create: jest.fn() },
   },
 }));
@@ -268,7 +269,11 @@ describe('token REST routes broadcast token events', () => {
       const res = await put(baseToken({ controlledBy: 'player-user' }), { position: { x: 4, y: 4 } });
 
       expect(res.status).toBe(200);
-      expect(received(dmSocket)).toEqual([['token.updated', { mapId: MAP_ID, token: res.body.token }]]);
+      // The player's response carries no DM notes; DM sockets get the full token.
+      expect(res.body.token.notes).toBeUndefined();
+      expect(received(dmSocket)).toEqual([
+        ['token.updated', { mapId: MAP_ID, token: { ...res.body.token, notes: 'DM secret' } }],
+      ]);
       expect(received(playerSocket)[0][0]).toBe('token.updated');
     });
 
