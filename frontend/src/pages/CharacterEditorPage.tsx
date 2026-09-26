@@ -44,12 +44,46 @@ export default function CharacterEditorPage() {
 
   // Live sync (D&D 5e only): remote changes flow into the open editor, saves
   // send only the changed fields. This page is outside the campaign's
-  // WebSocketProvider, so it uses the shared socket client directly — events
-  // arrive only while that client is connected to the character's campaign.
+  // WebSocketProvider, so it connects the shared socket client itself —
+  // quietly, so opening the editor posts no "has joined the campaign".
   const isDnd5e = character?.gameSystem === GameSystem.DND_5E;
+  const liveCampaignId =
+    isDnd5e && !loading && !permissionError ? character?.campaignId ?? null : null;
+  const [liveSocket, setLiveSocket] = useState<typeof socketClient | null>(null);
+
+  useEffect(() => {
+    if (!liveCampaignId) return;
+
+    let active = true;
+    // Already connected to this campaign (e.g. from the campaign page): reuse
+    // it as is and leave it connected afterwards
+    const openedHere =
+      !(socketClient.isConnected() && socketClient.getCampaignId() === liveCampaignId);
+
+    if (openedHere) {
+      socketClient
+        .connect(liveCampaignId, { quiet: true })
+        .then(() => {
+          if (active) setLiveSocket(socketClient);
+        })
+        .catch((err) => {
+          // Not critical — saves still detect conflicts via PATCH
+          if (active) console.warn('Live character updates unavailable:', err);
+        });
+    } else {
+      setLiveSocket(socketClient);
+    }
+
+    return () => {
+      active = false;
+      setLiveSocket(null);
+      if (openedHere) socketClient.disconnect();
+    };
+  }, [liveCampaignId]);
+
   const liveSync = useLiveCharacterSync({
     character,
-    socket: socketClient,
+    socket: liveSocket,
     isDnd5e,
     onServerCharacter: setCharacter,
     normalizeForm: buildDnd5eFormData,

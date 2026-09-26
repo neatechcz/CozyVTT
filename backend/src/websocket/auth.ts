@@ -14,6 +14,12 @@ export interface AuthenticatedSocket extends Socket {
   userId?: string;
   campaignId?: string;
   role?: string;
+  /**
+   * Joined its campaign quietly (e.g. the standalone character editor page):
+   * receives every campaign event, but is never announced — no join/leave
+   * system message, no user.joined / user.left.
+   */
+  quiet?: boolean;
 }
 
 /**

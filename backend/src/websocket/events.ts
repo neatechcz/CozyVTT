@@ -60,9 +60,9 @@ export function registerEventHandlers(io: Server): void {
     // AUTHENTICATE EVENT
     // User requests to join a campaign room
     // ============================================
-    socket.on('authenticate', async (data: { campaignId: string }) => {
+    socket.on('authenticate', async (data: { campaignId: string; quiet?: boolean }) => {
       try {
-        logger.debug('authenticate', { campaignId: data.campaignId, userId: socket.userId });
+        logger.debug('authenticate', { campaignId: data.campaignId, userId: socket.userId, quiet: data.quiet });
 
         if (!data.campaignId || typeof data.campaignId !== 'string') {
           socket.emit('error', { message: 'Campaign ID required' });
@@ -82,16 +82,21 @@ export function registerEventHandlers(io: Server): void {
         if (socket.campaignId && socket.campaignId !== data.campaignId) {
           await socket.leave(socket.campaignId);
 
-          // Notify old campaign that user left
-          socket.to(socket.campaignId).emit('user.left', {
-            userId: socket.userId,
-            timestamp: new Date().toISOString(),
-          });
+          // Notify old campaign that user left (a quiet join was never announced)
+          if (!socket.quiet) {
+            socket.to(socket.campaignId).emit('user.left', {
+              userId: socket.userId,
+              timestamp: new Date().toISOString(),
+            });
+          }
         }
 
-        // Join the campaign room
+        // Join the campaign room — quiet sockets too, so they receive every
+        // campaign event; only the announcements below are skipped for them
+        const quiet = data.quiet === true;
         socket.join(data.campaignId);
         socket.campaignId = data.campaignId; // Update stored campaign ID
+        socket.quiet = quiet;
 
         // Notify the user they've been authenticated
         socket.emit('authenticated', {
@@ -101,28 +106,30 @@ export function registerEventHandlers(io: Server): void {
           timestamp: new Date().toISOString(),
         });
 
-        // Get user information for system message
-        const user = await prisma.user.findUnique({
-          where: { id: socket.userId },
-          select: { displayName: true },
-        });
+        if (!quiet) {
+          // Get user information for system message
+          const user = await prisma.user.findUnique({
+            where: { id: socket.userId },
+            select: { displayName: true },
+          });
 
-        // Send system message to campaign
-        if (user) {
-          await sendSystemMessage(
-            data.campaignId,
-            `${user.displayName} has joined the campaign.`,
-            { userId: socket.userId, action: 'user.joined' }
-          );
+          // Send system message to campaign
+          if (user) {
+            await sendSystemMessage(
+              data.campaignId,
+              `${user.displayName} has joined the campaign.`,
+              { userId: socket.userId, action: 'user.joined' }
+            );
+          }
+
+          // Also emit user.joined event for backwards compatibility
+          socket.to(data.campaignId).emit('user.joined', {
+            userId: socket.userId,
+            timestamp: new Date().toISOString(),
+          });
         }
 
-        // Also emit user.joined event for backwards compatibility
-        socket.to(data.campaignId).emit('user.joined', {
-          userId: socket.userId,
-          timestamp: new Date().toISOString(),
-        });
-
-        logger.info('authenticated', { userId: socket.userId, campaignId: data.campaignId, role: result.role });
+        logger.info('authenticated', { userId: socket.userId, campaignId: data.campaignId, role: result.role, quiet });
       } catch (error) {
         logger.error('authenticate failed', { err: error });
         socket.emit('error', { message: 'Authentication failed' });
@@ -152,8 +159,8 @@ export function registerEventHandlers(io: Server): void {
     socket.on('disconnect', async (reason: string) => {
       logger.debug('ws disconnected', { socketId: socket.id, reason });
 
-      // Notify campaign members if user was in a campaign
-      if (socket.campaignId) {
+      // Notify campaign members if user was in a campaign (not for a quiet join)
+      if (socket.campaignId && !socket.quiet) {
         // Get user information for system message
         const user = await prisma.user.findUnique({
           where: { id: socket.userId },

@@ -50,6 +50,7 @@ class SocketClient {
   private reconnectDelay = 1000; // Start with 1 second
   private isConnecting = false;
   private campaignId: string | null = null;
+  private quiet = false;
 
   constructor() {
     // Socket will be initialized when connect() is called
@@ -59,7 +60,13 @@ class SocketClient {
   // Connection Management
   // ============================================
 
-  connect(campaignId: string): Promise<void> {
+  /**
+   * Connect to a campaign room. `quiet` joins without being announced (no
+   * "has joined/left the campaign" chat message, no user.joined/user.left) —
+   * for pages outside the campaign view, e.g. the standalone character
+   * editor. An existing connection to the same campaign is reused as is.
+   */
+  connect(campaignId: string, options: { quiet?: boolean } = {}): Promise<void> {
     return new Promise((resolve, reject) => {
       if (this.socket?.connected && this.campaignId === campaignId) {
         resolve();
@@ -71,8 +78,10 @@ class SocketClient {
         return;
       }
 
+      const quiet = options.quiet === true;
       this.isConnecting = true;
       this.campaignId = campaignId;
+      this.quiet = quiet;
 
       // Disconnect and clean up any existing socket first
       if (this.socket) {
@@ -81,19 +90,7 @@ class SocketClient {
         this.socket = null;
       }
 
-      // Set up a timeout to prevent hanging forever
-      const connectionTimeout = setTimeout(() => {
-        console.error('[Socket] Connection timeout - server did not respond within 10 seconds');
-        this.isConnecting = false;
-        if (this.socket) {
-          this.socket.removeAllListeners();
-          this.socket.disconnect();
-          this.socket = null;
-        }
-        reject(new Error('Connection timeout - server did not respond'));
-      }, 10000);
-
-      this.socket = io(SOCKET_URL, {
+      const socket = io(SOCKET_URL, {
         withCredentials: true,
         transports: ['websocket', 'polling'],
         reconnection: true,
@@ -105,6 +102,22 @@ class SocketClient {
         // after a backend restart or transient hosting hiccup.
         randomizationFactor: 0.5,
       });
+      this.socket = socket;
+
+      // Set up a timeout to prevent hanging forever
+      const connectionTimeout = setTimeout(() => {
+        // A newer connect() (after disconnect()) owns the client now — leave it alone
+        if (this.socket !== socket) {
+          reject(new Error('Connection abandoned'));
+          return;
+        }
+        console.error('[Socket] Connection timeout - server did not respond within 10 seconds');
+        this.isConnecting = false;
+        socket.removeAllListeners();
+        socket.disconnect();
+        this.socket = null;
+        reject(new Error('Connection timeout - server did not respond'));
+      }, 10000);
 
       // Set up authenticated listener FIRST (before any events can fire)
       this.socket.on('authenticated', () => {
@@ -128,7 +141,8 @@ class SocketClient {
           return;
         }
 
-        this.socket.emit('authenticate', { campaignId });
+        // Sent again on every (re)connect, with the same quiet flag
+        this.socket.emit('authenticate', quiet ? { campaignId, quiet: true } : { campaignId });
       });
 
       // Connection error
@@ -187,7 +201,7 @@ class SocketClient {
     setTimeout(() => {
       this.reconnectAttempts++;
       if (this.campaignId) {
-        this.connect(this.campaignId).catch((error) => {
+        this.connect(this.campaignId, { quiet: this.quiet }).catch((error) => {
           console.error('[Socket] Reconnection error:', error);
         });
       }
@@ -200,6 +214,7 @@ class SocketClient {
       this.socket.disconnect();
       this.socket = null;
       this.campaignId = null;
+      this.quiet = false;
     }
 
     // Reset connection state to allow reconnection
@@ -208,6 +223,11 @@ class SocketClient {
 
   isConnected(): boolean {
     return this.socket?.connected ?? false;
+  }
+
+  /** Campaign the client is connected (or connecting) to, if any. */
+  getCampaignId(): string | null {
+    return this.campaignId;
   }
 
   // ============================================
