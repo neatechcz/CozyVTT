@@ -109,6 +109,9 @@ export default function CharacterEditorPage() {
   const liveCampaignId =
     isDnd5e && !loading && !permissionError ? character?.campaignId ?? null : null;
   const [liveStatus, setLiveStatus] = useState<'connecting' | 'live' | 'offline'>('connecting');
+  // The socket client gave up because the server rejects this session:
+  // retrying cannot help until the user signs in again
+  const [liveSessionExpired, setLiveSessionExpired] = useState(false);
   // Bumped whenever the client creates a new underlying socket. The client
   // re-attaches listeners added through socketClient.on() by itself; the hook
   // resubscribing on a new generation is a harmless off/on of one handler.
@@ -175,7 +178,7 @@ export default function CharacterEditorPage() {
         });
     };
 
-    const unsubscribe = socketClient.onLifecycle((event) => {
+    const unsubscribe = socketClient.onLifecycle((event, detail) => {
       if (!active) return;
       if (event === 'replaced') {
         setSocketGeneration((generation) => generation + 1);
@@ -187,6 +190,7 @@ export default function CharacterEditorPage() {
         warned = false;
         window.clearTimeout(retryTimer);
         retryTimer = undefined;
+        setLiveSessionExpired(false);
         setLiveStatus('live');
         // Catch up on anything whose broadcast was missed (before the join
         // or while disconnected); merged like any remote change
@@ -197,10 +201,19 @@ export default function CharacterEditorPage() {
         setLiveStatus('offline');
       } else if (event === 'failed') {
         setLiveStatus('offline');
+        if (detail?.error === 'Unauthorized') {
+          // Expired session: stop, and ask the user to sign in again
+          window.clearTimeout(retryTimer);
+          retryTimer = undefined;
+          setLiveSessionExpired(true);
+          return;
+        }
+        // Timeout or network failure: keep trying with backoff
         scheduleRetry();
       }
     });
 
+    setLiveSessionExpired(false);
     if (openedHere) {
       setLiveStatus('connecting');
       connectLive();
@@ -639,7 +652,9 @@ export default function CharacterEditorPage() {
             className="glass-panel mb-4 p-3 text-sm text-sunset-orange flex items-center gap-2"
           >
             <WifiOff className="w-4 h-4 shrink-0" />
-            Živé změny nejsou dostupné — změny ostatních se zobrazí po obnovení spojení.
+            {liveSessionExpired
+              ? 'Přihlášení vypršelo — přihlaste se znovu.'
+              : 'Živé změny nejsou dostupné — změny ostatních se zobrazí po obnovení spojení.'}
           </div>
         )}
         {isDnd5e && (

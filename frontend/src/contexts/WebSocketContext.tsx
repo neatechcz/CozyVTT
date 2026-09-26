@@ -24,6 +24,8 @@ import api from '@/services/api';
 
 export type ConnectionStatus = 'disconnected' | 'connecting' | 'connected' | 'error';
 
+const CONNECTION_LOST_MESSAGE = 'Connection lost. Click Retry to try again.';
+
 interface WebSocketContextState {
   // Connection State
   status: ConnectionStatus;
@@ -152,7 +154,7 @@ export function WebSocketProvider({ children }: WebSocketProviderProps) {
       if (!isMountedRef.current) return;
       isAwaitingReconnectRef.current = false;
       setStatus('error');
-      setError('Connection lost. Click Retry to try again.');
+      setError(CONNECTION_LOST_MESSAGE);
     };
 
     const handleSocketError = (payload: unknown) => {
@@ -170,7 +172,7 @@ export function WebSocketProvider({ children }: WebSocketProviderProps) {
               'message' in payload &&
               typeof payload.message === 'string'
             ? payload.message
-            : 'Connection lost. Click Retry to try again.';
+            : CONNECTION_LOST_MESSAGE;
 
       setStatus('error');
       setError(message);
@@ -305,22 +307,35 @@ export function WebSocketProvider({ children }: WebSocketProviderProps) {
     };
   }, [campaignId, clearSocketLifecycleListeners]); // connect is stable - no need in deps (causes premature cleanup)
 
-  // The socket client builds a new socket by itself after a server-forced
-  // disconnect ('io server disconnect'); the lifecycle listeners above sit on
-  // the old one. Follow the replacement while this provider is connected to
-  // the campaign the new socket belongs to — manual paths (Retry, back
-  // online, campaign switch) clear connectedCampaignRef first and attach in
-  // connect() instead. The drop already set isAwaitingReconnectRef, so the
-  // new socket's `authenticated` restores the badge and ticks reconnectCount.
+  // Signals of the socket client about the connection this provider holds.
+  // Manual paths (Retry, back online, campaign switch) clear
+  // connectedCampaignRef first and are handled by connect() instead.
+  //
+  // - 'replaced': the client built a new socket by itself after a
+  //   server-forced disconnect ('io server disconnect'); the lifecycle
+  //   listeners above sit on the old one, so follow the replacement. The drop
+  //   already set isAwaitingReconnectRef, so the new socket's `authenticated`
+  //   restores the badge and ticks reconnectCount.
+  // - 'failed': the client gave up without socket.io's reconnect_failed —
+  //   the replacement socket timed out, or the retries after server-forced
+  //   disconnects ran out (e.g. an expired session: "Unauthorized"). Nothing
+  //   retries any more; show the failure with Retry instead of a spinner.
   useEffect(() => {
-    return socketClient.onLifecycle((event) => {
-      if (event !== 'replaced' || !isMountedRef.current) return;
+    return socketClient.onLifecycle((event, detail) => {
+      if (!isMountedRef.current) return;
       const id = connectedCampaignRef.current;
       if (!id || socketClient.getCampaignId() !== id) return;
-      const socket = socketClient.getSocket();
-      if (!socket) return;
-      isAwaitingReconnectRef.current = true;
-      attachSocketLifecycleListeners(socket);
+
+      if (event === 'replaced') {
+        const socket = socketClient.getSocket();
+        if (!socket) return;
+        isAwaitingReconnectRef.current = true;
+        attachSocketLifecycleListeners(socket);
+      } else if (event === 'failed') {
+        isAwaitingReconnectRef.current = false;
+        setStatus('error');
+        setError(detail?.error ?? CONNECTION_LOST_MESSAGE);
+      }
     });
   }, [attachSocketLifecycleListeners]);
 

@@ -13,7 +13,7 @@ const mocks = vi.hoisted(() => ({
   getCampaign: vi.fn(),
   apiGetCharacter: vi.fn(),
   user: { id: 'owner', displayName: 'Owner' },
-  lifecycle: new Set<(event: string) => void>(),
+  lifecycle: new Set<(event: string, detail?: { error?: string }) => void>(),
   socket: {
     on: vi.fn(),
     off: vi.fn(),
@@ -67,6 +67,7 @@ function renderPage() {
 }
 
 const OFFLINE = 'Živé změny nejsou dostupné — změny ostatních se zobrazí po obnovení spojení.';
+const SESSION_EXPIRED = 'Přihlášení vypršelo — přihlaste se znovu.';
 
 /** The currently subscribed character.updated listener (latest on(), not yet off()) */
 function characterUpdatedHandler() {
@@ -76,9 +77,15 @@ function characterUpdatedHandler() {
   return live[live.length - 1] as ((payload: unknown) => void) | undefined;
 }
 
-function lifecycle(event: 'replaced' | 'authenticated' | 'disconnected' | 'failed') {
+function lifecycle(
+  event: 'replaced' | 'authenticated' | 'disconnected' | 'failed',
+  detail?: { error?: string },
+) {
   act(() => {
-    for (const listener of [...mocks.lifecycle]) listener(event);
+    for (const listener of [...mocks.lifecycle]) {
+      if (detail) listener(event, detail);
+      else listener(event);
+    }
   });
 }
 
@@ -104,7 +111,7 @@ beforeEach(() => {
   mocks.socket.getCampaignId.mockReturnValue(null);
   mocks.socket.getSocket.mockReturnValue(null);
   mocks.lifecycle.clear();
-  mocks.socket.onLifecycle.mockImplementation((listener: (event: string) => void) => {
+  mocks.socket.onLifecycle.mockImplementation((listener: (event: string, detail?: { error?: string }) => void) => {
     mocks.lifecycle.add(listener);
     return () => mocks.lifecycle.delete(listener);
   });
@@ -278,6 +285,67 @@ describe('CharacterEditorPage live socket', () => {
         await vi.advanceTimersByTimeAsync(2_000);
       });
       expect(mocks.socket.connect).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps retrying with backoff when the client gave up on a timeout', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    mocks.socket.getCampaignId.mockReturnValue('camp-1');
+    try {
+      renderPage();
+      await waitFor(() => expect(mocks.socket.connect).toHaveBeenCalledTimes(1));
+
+      lifecycle('failed', { error: 'Connection timeout - server did not respond' });
+      expect(screen.getByText(OFFLINE)).toBeInTheDocument();
+      expect(screen.queryByText(SESSION_EXPIRED)).not.toBeInTheDocument();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000);
+      });
+      expect(mocks.socket.connect).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('stops reconnecting and asks to sign in again when the session expired', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    mocks.socket.getCampaignId.mockReturnValue('camp-1');
+    try {
+      renderPage();
+      await waitFor(() => expect(mocks.socket.connect).toHaveBeenCalledTimes(1));
+
+      // The server kept rejecting the connection; the client gave up
+      lifecycle('failed', { error: 'Unauthorized' });
+
+      expect(screen.getByRole('status')).toHaveTextContent(SESSION_EXPIRED);
+      expect(screen.queryByText(OFFLINE)).not.toBeInTheDocument();
+      expect(screen.getByText('sheet')).toBeInTheDocument();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5 * 60_000);
+      });
+      expect(mocks.socket.connect).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a pending retry is cancelled when the session turns out to be expired', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    mocks.socket.getCampaignId.mockReturnValue('camp-1');
+    try {
+      renderPage();
+      await waitFor(() => expect(mocks.socket.connect).toHaveBeenCalledTimes(1));
+
+      lifecycle('failed', { error: 'Connection timeout - server did not respond' });
+      lifecycle('failed', { error: 'Unauthorized' });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5 * 60_000);
+      });
+
+      expect(mocks.socket.connect).toHaveBeenCalledTimes(1);
+      expect(screen.getByRole('status')).toHaveTextContent(SESSION_EXPIRED);
     } finally {
       vi.useRealTimers();
     }
