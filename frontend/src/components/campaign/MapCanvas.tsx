@@ -774,10 +774,23 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
   const onWallsChanged = useCallback(() => {
     wallCacheValidRef.current = false;
   }, []);
+  // An authoritative remote/sync change landed while a wall-endpoint drag was
+  // in progress: its captured preDragState (from before the drag started, so
+  // also from before this change) now predates the change. Left alone,
+  // finishing the drag would restore that stale snapshot on top of the just-
+  // applied remote change (mouseup's `if (preDrag) replaceWallHistory(preDrag)`),
+  // and the drag's own walls:replace commit would then erase the remote
+  // change for everyone. Clearing it makes that restore a no-op.
+  const onRemoteWallsReset = useCallback(() => {
+    if (wallDragEndpointRef.current) {
+      wallDragEndpointRef.current.preDragState = null;
+    }
+  }, []);
   useWallSocketEvents(socket, currentMapId, isDM, wallSegmentsRef, {
     replaceWalls: replaceWallHistory,
     resetWalls: resetWallHistory,
     onWallsChanged,
+    onRemoteReset: onRemoteWallsReset,
   });
 
   // ============================================
