@@ -154,19 +154,12 @@ const spellSlotSchema = z.object({
 });
 
 /**
- * Spell slots for all levels
+ * Spell slots for the levels present on a character sheet
  */
-const spellSlotsSchema = z.object({
-  '1': spellSlotSchema,
-  '2': spellSlotSchema,
-  '3': spellSlotSchema,
-  '4': spellSlotSchema,
-  '5': spellSlotSchema,
-  '6': spellSlotSchema,
-  '7': spellSlotSchema,
-  '8': spellSlotSchema,
-  '9': spellSlotSchema,
-});
+const spellSlotsSchema = z.partialRecord(
+  z.enum(['1', '2', '3', '4', '5', '6', '7', '8', '9']),
+  spellSlotSchema,
+);
 
 /**
  * Spell

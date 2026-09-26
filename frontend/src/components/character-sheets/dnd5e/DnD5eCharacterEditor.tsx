@@ -25,7 +25,12 @@ import {
   getFormValue,
   type CharacterFormStore,
 } from '../../../utils/characterFormStore';
-import { buildDnd5eFormData, prepareDnd5eFormForSave, saveFormInputsOf } from './dnd5eFormData';
+import {
+  buildDnd5eFormData,
+  categorizeProficiencies,
+  prepareDnd5eFormForSave,
+  saveFormInputsOf,
+} from './dnd5eFormData';
 
 interface DnD5eCharacterEditorProps {
   character: Character;
@@ -468,6 +473,24 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
   // remote change landed on this field since, the remote value stays and the
   // user's value is listed in the reset panel (never dropped silently).
   const updateField = (path: string, value: any) => {
+    const keys = path.split('.');
+    // A sheet without structured proficiencies (legacy flat list): seed every
+    // category from its current display value, then edit one — the whole
+    // category object is the edit, so no other category is lost.
+    if (keys[0] === 'proficiencies' && keys.length === 2 && !formData.proficiencies) {
+      store.editIn(formData, 'proficiencies', { ...getProficienciesByCategory(), [keys[1]]: value });
+      return;
+    }
+    // First edit of a spell slot level the sheet has no record for: create
+    // the complete { total, expended } record (partial slots are valid).
+    if (keys[0] === 'spellcasting' && keys[1] === 'slots' && keys.length === 4) {
+      const slotPath = keys.slice(0, 3).join('.');
+      const slot = getFormValue(formData, slotPath);
+      if (!slot || typeof slot !== 'object' || Array.isArray(slot)) {
+        store.editIn(formData, slotPath, { total: 0, expended: 0, [keys[3]]: value });
+        return;
+      }
+    }
     store.editIn(formData, path, value);
   };
 
@@ -1582,21 +1605,13 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
     }
 
     // Backwards compatibility: parse from flat array
-    const all = formData.proficienciesAndLanguages || [];
-    const languages = ['Common', 'Elvish', 'Dwarvish', 'Draconic', 'Giant', 'Gnomish', 'Goblin', 'Halfling', 'Orc', 'Abyssal', 'Celestial', 'Deep Speech', 'Infernal', 'Primordial', 'Sylvan', 'Undercommon'];
-    const armorKeywords = ['Armor', 'Shield'];
-    const toolKeywords = ['Tools', 'Supplies', 'Kit', 'Instruments', 'Vehicles', 'Vehicle'];
-
-    const armorList = all.filter((p: string) => armorKeywords.some(k => p.includes(k)));
-    const weaponsList = all.filter((p: string) => !armorKeywords.some(k => p.includes(k)) && !toolKeywords.some(k => p.includes(k)) && !languages.includes(p) && (p.includes('Weapon') || ['Dagger', 'Sword', 'Bow', 'Axe', 'Mace', 'Staff', 'Crossbow', 'Spear', 'Hammer'].some(w => p.includes(w))));
-    const toolsList = all.filter((p: string) => toolKeywords.some(k => p.includes(k)));
-    const languagesList = all.filter((p: string) => languages.includes(p));
+    const categories = categorizeProficiencies(formData.proficienciesAndLanguages || []);
 
     return {
-      armor: armorList.join(', '),
-      weapons: weaponsList.join(', '),
-      tools: toolsList.join(', '),
-      languages: languagesList.join(', '),
+      armor: categories.armor.join(', '),
+      weapons: categories.weapons.join(', '),
+      tools: categories.tools.join(', '),
+      languages: categories.languages.join(', '),
     };
   };
 

@@ -18,6 +18,7 @@ jest.mock('../../config/database', () => {
 
 jest.mock('../../websocket/utils', () => ({
   broadcastToCampaign: jest.fn(),
+  broadcastToCharacterViewers: jest.fn(async () => undefined),
 }));
 
 import { Prisma } from '@prisma/client';
@@ -25,7 +26,7 @@ import express from 'express';
 import request from 'supertest';
 import characterRoutes, { characterDataPatchBodyParser } from '../characters';
 import { prisma } from '../../config/database';
-import { broadcastToCampaign } from '../../websocket/utils';
+import { broadcastToCharacterViewers } from '../../websocket/utils';
 import { GameSystem } from '../../game-systems';
 import { getBlankCharacterTemplate } from '../../validators/game-systems';
 
@@ -48,16 +49,20 @@ const db = prisma as unknown as {
   campaignMembership: { findUnique: jest.Mock };
   user: { findUnique: jest.Mock };
 };
-const broadcast = broadcastToCampaign as jest.Mock;
+/** character.updated goes to the sheet's viewers (owner, DMs, assigned player), not the campaign room */
+const broadcast = broadcastToCharacterViewers as jest.Mock;
 
 const OWNER = 'user-owner';
 const DM = 'user-dm';
 const PLAYER = 'user-player';
 const STRANGER = 'user-stranger';
+/** a campaign PLAYER the character is assigned to (delegated character control) */
+const ASSIGNED = 'user-assigned';
 
 let rows: Map<string, Row>;
 let clock: number;
 let memberships: Record<string, string>;
+let assignments: Record<string, string[]>;
 let displayNames: Record<string, string>;
 
 function clone<T>(value: T): T {
@@ -115,7 +120,8 @@ beforeEach(() => {
   jest.clearAllMocks();
   rows = new Map();
   clock = Date.parse('2026-09-26T10:00:00.000Z');
-  memberships = { [DM]: 'DM', [PLAYER]: 'PLAYER' };
+  memberships = { [DM]: 'DM', [PLAYER]: 'PLAYER', [ASSIGNED]: 'PLAYER' };
+  assignments = { [ASSIGNED]: ['char-1'] };
   displayNames = { [OWNER]: 'Václav', [DM]: 'Codex DM', [PLAYER]: 'Player One' };
 
   // Row lock: no-op by default; tests override it to simulate a writer that
@@ -141,7 +147,7 @@ beforeEach(() => {
   db.campaignMembership.findUnique.mockImplementation(async ({ where }: any) => {
     const { userId, campaignId } = where.userId_campaignId;
     const role = campaignId === 'camp-1' ? memberships[userId] : undefined;
-    return role ? { userId, campaignId, role, characterIds: [] } : null;
+    return role ? { userId, campaignId, role, characterIds: [...(assignments[userId] ?? [])] } : null;
   });
   db.user.findUnique.mockImplementation(async ({ where }: any) =>
     displayNames[where.id] ? { displayName: displayNames[where.id] } : null
@@ -173,8 +179,8 @@ describe('PATCH /api/characters/:id/data', () => {
     expect(rows.get('char-1')!.data.hp).toEqual({ maximum: 10, current: 4, temporary: 0 });
 
     expect(broadcast).toHaveBeenCalledTimes(1);
-    const [campaignId, event, payload] = broadcast.mock.calls[0];
-    expect(campaignId).toBe('camp-1');
+    const [target, event, payload] = broadcast.mock.calls[0];
+    expect(target).toEqual(expect.objectContaining({ id: 'char-1', campaignId: 'camp-1', userId: OWNER }));
     expect(event).toBe('character.updated');
     expect(payload).toEqual({
       characterId: 'char-1',
@@ -454,8 +460,8 @@ describe('PUT /api/characters/:id', () => {
     expect(res.status).toBe(200);
     expect(res.body.message).toBe('Character updated successfully');
     expect(broadcast).toHaveBeenCalledTimes(1);
-    const [campaignId, event, payload] = broadcast.mock.calls[0];
-    expect(campaignId).toBe('camp-1');
+    const [target, event, payload] = broadcast.mock.calls[0];
+    expect(target).toEqual(expect.objectContaining({ id: 'char-1', campaignId: 'camp-1', userId: OWNER }));
     expect(event).toBe('character.updated');
     expect(payload).toEqual({
       characterId: 'char-1',
@@ -512,8 +518,9 @@ describe('PUT /api/characters/:id', () => {
     });
   });
 
-  test('permissions are unchanged: player 403, DM and owner allowed', async () => {
+  test('permissions: unassigned player 403, DM, owner and assigned player allowed', async () => {
     seed();
+    expect((await put(ASSIGNED, { name: 'Z' })).status).toBe(200);
     expect((await put(PLAYER, { name: 'X' })).status).toBe(403);
     expect((await put(STRANGER, { name: 'X' })).status).toBe(403);
     expect((await put(DM, { name: 'X' })).status).toBe(200);
@@ -585,5 +592,70 @@ describe('row lock busy (Prisma transaction timeout P2028)', () => {
     for (const call of db.$transaction.mock.calls) {
       expect(call[1]).toEqual({ maxWait: 5000, timeout: 10000 });
     }
+  });
+});
+
+describe('delegated character control (production permission rules inside the row lock)', () => {
+  function put(userId: string, body: unknown) {
+    return request(app).put('/api/characters/char-1').set('x-test-user', userId).send(body as object);
+  }
+
+  /** The DM moves the character away from ASSIGNED while the request waits for the row lock. */
+  function unassignWhileWaitingForLock() {
+    db.$queryRaw.mockImplementationOnce(async () => {
+      assignments[ASSIGNED] = [];
+      return [];
+    });
+  }
+
+  test('PATCH: the assigned player may edit; an unassigned player may not', async () => {
+    seed();
+
+    const ok = await patch(ASSIGNED, { changes: [{ path: 'hp.current', base: 10, value: 7 }] });
+    expect(ok.status).toBe(200);
+    expect(rows.get('char-1')!.data.hp).toEqual({ maximum: 10, current: 7, temporary: 0 });
+    expect(broadcast).toHaveBeenCalledTimes(1);
+
+    const denied = await patch(PLAYER, { changes: [{ path: 'hp.current', base: 7, value: 1 }] });
+    expect(denied.status).toBe(403);
+    expect(rows.get('char-1')!.data.hp).toEqual({ maximum: 10, current: 7, temporary: 0 });
+  });
+
+  test('PATCH: assignment removed while waiting for the lock → 403, nothing written or broadcast', async () => {
+    seed();
+    unassignWhileWaitingForLock();
+
+    const res = await patch(ASSIGNED, { changes: [{ path: 'hp.current', base: 10, value: 1 }] });
+
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({
+      error: 'Forbidden',
+      message: 'You do not have permission to edit this character',
+    });
+    expect(db.character.updateMany).not.toHaveBeenCalled();
+    expect(broadcast).not.toHaveBeenCalled();
+  });
+
+  test('PUT: assignment removed while waiting for the lock → 403, nothing written or broadcast', async () => {
+    seed();
+    unassignWhileWaitingForLock();
+
+    const res = await put(ASSIGNED, { name: 'Hijacked' });
+
+    expect(res.status).toBe(403);
+    expect(db.character.update).not.toHaveBeenCalled();
+    expect(rows.get('char-1')!.name).toBe('Robin');
+    expect(broadcast).not.toHaveBeenCalled();
+  });
+
+  test('PUT: the permission re-check reads the membership after taking the lock', async () => {
+    seed();
+
+    await put(ASSIGNED, { name: 'Robin II' });
+
+    const lockOrder = db.$queryRaw.mock.invocationCallOrder[0];
+    const membershipReads = db.campaignMembership.findUnique.mock.invocationCallOrder;
+    expect(membershipReads.some((order) => order > lockOrder)).toBe(true);
+    expect(db.character.update.mock.invocationCallOrder[0]).toBeGreaterThan(Math.max(...membershipReads));
   });
 });

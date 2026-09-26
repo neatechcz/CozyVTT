@@ -8,6 +8,7 @@ import { AuthenticatedSocket } from '../auth';
 import { prisma } from '../../config/database';
 import { withCharacterRowLock, isCharacterLockTimeout, CHARACTER_BUSY_MESSAGE } from '../../services/characterLock';
 import { resolveUpdatedBy } from '../../services/characterPatch';
+import { getCharacterSheetRecipientIds } from '../utils';
 import logger from '../../utils/logger';
 
 type HpChange =
@@ -72,21 +73,20 @@ export function registerCharacterHandlers(io: Server, socket: AuthenticatedSocke
           return { error: 'Character not found' };
         }
 
-        // Verify character belongs to this campaign (the full sheet is broadcast)
-        if (character.campaignId !== campaignId) {
-          return { error: 'Character is not in this campaign' };
-        }
-
-        const membership = await tx.campaignMembership.findFirst({
-          where: { campaignId, characterIds: { has: characterId } },
+        // Resolve the caller's current membership (read under the lock):
+        // assignment may have changed since the socket first authenticated.
+        const membership = await tx.campaignMembership.findUnique({
+          where: { userId_campaignId: { userId: socket.userId!, campaignId } },
         });
 
-        if (!membership) {
+        // Verify character belongs to this campaign (the full sheet is broadcast)
+        if (!membership || character.campaignId !== campaignId) {
           return { error: 'Character is not in this campaign' };
         }
 
-        // Permission: character owner or DM
-        if (character.userId !== socket.userId && socket.role !== 'DM') {
+        // Permission: owner, DM, or the PLAYER explicitly assigned this character.
+        if (character.userId !== socket.userId && membership.role !== 'DM' &&
+          !(membership.role === 'PLAYER' && membership.characterIds.includes(characterId))) {
           return { error: 'You do not have permission to update this character\'s HP' };
         }
 
@@ -118,17 +118,19 @@ export function registerCharacterHandlers(io: Server, socket: AuthenticatedSocke
         return;
       }
 
-      // Committed — broadcast updated HP to all campaign members
+      // Committed. HP and the full sheet are sheet data: send them only to the
+      // owner, the campaign DMs and the assigned player — never the campaign room.
       const { current, max, temp, hpPath, saved } = outcome;
-      io.to(campaignId).emit('character.hp.updated', {
-        characterId,
-        hp: { current, max, temp },
-      });
-
-      // Same event as PUT/PATCH so open sheet editors merge the HP change
       try {
+        const recipients = await getCharacterSheetRecipientIds(campaignId, characterId, saved.userId);
+        io.to(recipients).emit('character.hp.updated', {
+          characterId,
+          hp: { current, max, temp },
+        });
+
+        // Same event as PUT/PATCH so open sheet editors merge the HP change
         const updatedBy = await resolveUpdatedBy(prisma, socket.userId!);
-        io.to(campaignId).emit('character.updated', {
+        io.to(recipients).emit('character.updated', {
           characterId,
           character: saved,
           userId: socket.userId,
@@ -136,7 +138,7 @@ export function registerCharacterHandlers(io: Server, socket: AuthenticatedSocke
           updatedBy,
         });
       } catch (error) {
-        logger.error('Failed to broadcast character update', { err: error });
+        logger.error('Failed to broadcast character HP update', { err: error });
       }
 
     } catch (error) {

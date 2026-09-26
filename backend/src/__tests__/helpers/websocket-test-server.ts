@@ -24,6 +24,7 @@ import request from 'supertest';
 import { io as ioc, Socket as ClientSocket } from 'socket.io-client';
 import { registerEventHandlers } from '../../websocket/events';
 import { setSocketInstance } from '../../websocket/utils';
+import characterRoutes from '../../routes/characters';
 
 export interface WsTestServer {
   httpServer: HTTPServer;
@@ -55,6 +56,7 @@ export async function createWsTestServer(): Promise<WsTestServer> {
     (req.session as any).userId = req.body.userId;
     res.json({ ok: true });
   });
+  app.use('/api/characters', characterRoutes);
 
   const httpServer = createServer(app);
   const io = new IOServer(httpServer, {

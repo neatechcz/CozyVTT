@@ -50,6 +50,47 @@ export function broadcastToUser(userId: string, event: string, data: any): void 
   io.to(userId).emit(event, data);
 }
 
+/**
+ * Users who may see a campaign character's full sheet: its owner, every DM
+ * of the campaign and every PLAYER the character is assigned to. Sheet data
+ * (the whole character, its HP) goes only to these users' personal rooms,
+ * never to the campaign room — other players and spectators must not see it.
+ */
+export async function getCharacterSheetRecipientIds(
+  campaignId: string,
+  characterId: string,
+  ownerId: string
+): Promise<string[]> {
+  const memberships = await prisma.campaignMembership.findMany({
+    where: {
+      campaignId,
+      OR: [
+        { role: 'DM' },
+        { role: 'PLAYER', characterIds: { has: characterId } },
+      ],
+    },
+    select: { userId: true },
+  });
+  return [...new Set([ownerId, ...memberships.map((m) => m.userId)])];
+}
+
+/**
+ * Emit a sheet event (`character.updated`, …) to everyone who may see the
+ * character's full sheet (getCharacterSheetRecipientIds). A character outside
+ * any campaign broadcasts nothing. One emit to all recipient rooms, so a
+ * socket in several of them receives it once.
+ */
+export async function broadcastToCharacterViewers(
+  character: { id: string; campaignId: string | null; userId: string },
+  event: string,
+  data: unknown,
+  io: Pick<Server, 'to'> = getSocketInstance()
+): Promise<void> {
+  if (!character.campaignId) return;
+  const recipients = await getCharacterSheetRecipientIds(character.campaignId, character.id, character.userId);
+  io.to(recipients).emit(event, data);
+}
+
 /** A token as stored in a map's `tokens` JSON array (only `id` is read directly). */
 type StoredToken = { id: string };
 

@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { GameSystem } from '../game-systems';
 import { ValidationResult } from '../validators/game-systems';
 import { deepEqual, isPlainObject, isSafePath, resolvePath, setAtPath } from '../utils/character-paths';
-import { withCharacterRowLock } from './characterLock';
+import { CharacterTx, withCharacterRowLock } from './characterLock';
 
 /**
  * Character Field-Level PATCH
@@ -118,6 +118,7 @@ type PatchedCharacter = Prisma.CharacterGetPayload<{ include: typeof characterIn
 
 export type PatchCharacterResult =
   | { status: 'not_found' }
+  | { status: 'forbidden' }
   | { status: 'invalid'; errors: z.ZodError }
   | {
       status: 'ok';
@@ -144,10 +145,23 @@ export type PatchCharacterResult =
  */
 export async function patchCharacterData(
   deps: CharacterPatchDeps,
-  input: { id: string; changes: Change[]; atomic?: boolean }
+  input: {
+    id: string;
+    changes: Change[];
+    atomic?: boolean;
+    /**
+     * Edit permission evaluated against the row read under the lock (its
+     * campaign / the caller's assignment cannot change while it is held).
+     * false → { status: 'forbidden' }, nothing written.
+     */
+    authorize?: (
+      character: { id: string; userId: string; campaignId: string | null },
+      tx: CharacterTx
+    ) => Promise<boolean>;
+  }
 ): Promise<PatchCharacterResult> {
   const { prisma, validate } = deps;
-  const { id, changes, atomic = false } = input;
+  const { id, changes, atomic = false, authorize } = input;
 
   // Reject malformed requests before touching the database.
   applyCharacterChanges({}, changes);
@@ -156,6 +170,9 @@ export async function patchCharacterData(
     const character = await tx.character.findUnique({ where: { id }, include: characterInclude });
     if (!character) {
       return { status: 'not_found' };
+    }
+    if (authorize && !(await authorize(character, tx))) {
+      return { status: 'forbidden' };
     }
 
     const currentData = isPlainObject(character.data) ? character.data : {};

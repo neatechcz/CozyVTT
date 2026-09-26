@@ -8,7 +8,12 @@ import { diffPaths, isSafePath } from '../utils/character-paths';
 import { GameSystem } from '../game-systems';
 import { validateCharacterData } from '../validators/game-systems';
 import { CreateCharacterSchema, UpdateCharacterSchema } from '../validators/characters';
-import { withCharacterRowLock, isCharacterLockTimeout, CHARACTER_BUSY_MESSAGE } from '../services/characterLock';
+import {
+  CharacterTx,
+  withCharacterRowLock,
+  isCharacterLockTimeout,
+  CHARACTER_BUSY_MESSAGE,
+} from '../services/characterLock';
 import {
   InvalidPathError,
   MAX_CHANGES,
@@ -16,7 +21,7 @@ import {
   patchCharacterData,
   resolveUpdatedBy,
 } from '../services/characterPatch';
-import { broadcastToCampaign } from '../websocket/utils';
+import { broadcastToCampaign, broadcastToCharacterViewers } from '../websocket/utils';
 import logger from '../utils/logger';
 
 const router = Router();
@@ -50,23 +55,24 @@ const PatchCharacterDataSchema = z.object({
 });
 
 /**
- * Edit permission shared by PUT and PATCH:
- * character owner, or DM of the campaign the character is in.
+ * Edit permission shared by PUT and PATCH: the character owner, a DM of the
+ * campaign the character is in, or a PLAYER of that campaign the character is
+ * assigned to (delegated character control). Pass the transaction client to
+ * evaluate it against the row read under the character row lock.
  */
 async function canEditCharacter(
-  req: AuthenticatedRequest,
-  character: { userId: string; campaignId: string | null }
+  userId: string,
+  character: { id: string; userId: string; campaignId: string | null },
+  db: Pick<CharacterTx, 'campaignMembership'> = prisma
 ): Promise<boolean> {
-  const userId = req.session.userId!;
-
   // Owner can always edit
   if (character.userId === userId) {
     return true;
   }
 
-  // If character is in a campaign, check if requester is the DM
+  // In a campaign: its DM, or the player the character is assigned to
   if (character.campaignId) {
-    const membership = await prisma.campaignMembership.findUnique({
+    const membership = await db.campaignMembership.findUnique({
       where: {
         userId_campaignId: {
           userId,
@@ -75,7 +81,8 @@ async function canEditCharacter(
       },
     });
 
-    if (membership && membership.role === 'DM') {
+    if (membership && (membership.role === 'DM' ||
+      (membership.role === 'PLAYER' && membership.characterIds.includes(character.id)))) {
       return true;
     }
   }
@@ -84,14 +91,15 @@ async function canEditCharacter(
 }
 
 /**
- * Broadcast `character.updated` to the character's campaign (if any).
+ * Send `character.updated` to everyone who may open the character's full
+ * sheet (owner, campaign DMs, assigned player) — never the campaign room.
  * Payload: { characterId, character, userId, changedPaths, updatedBy }.
  * `changedPaths` may contain "" meaning "the whole document changed".
  * Call only after the write has committed. Never throws — a failed broadcast
  * must not fail the request.
  */
 async function broadcastCharacterUpdated(
-  character: { id: string; campaignId: string | null },
+  character: { id: string; campaignId: string | null; userId: string },
   userId: string,
   changedPaths: string[]
 ): Promise<void> {
@@ -99,7 +107,7 @@ async function broadcastCharacterUpdated(
 
   try {
     const updatedBy = await resolveUpdatedBy(prisma, userId);
-    broadcastToCampaign(character.campaignId, 'character.updated', {
+    await broadcastToCharacterViewers(character, 'character.updated', {
       characterId: character.id,
       character,
       userId,
@@ -214,15 +222,28 @@ router.post('/', authenticated, async (req: AuthenticatedRequest, res: Response)
 
 /**
  * GET /api/characters
- * List all characters owned by the authenticated user
+ * List characters owned by the user, assigned to the player, or in a campaign they DM
  * Requires: Authentication
  */
 router.get('/', authenticated, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.session.userId!;
+    const memberships = await prisma.campaignMembership.findMany({
+      where: { userId, role: { in: ['PLAYER', 'DM'] } },
+      select: { campaignId: true, characterIds: true, role: true },
+    });
 
     const characters = await prisma.character.findMany({
-      where: { userId },
+      where: {
+        OR: [
+          { userId },
+          ...memberships.map((membership) =>
+            membership.role === 'DM'
+              ? { campaignId: membership.campaignId }
+              : { campaignId: membership.campaignId, id: { in: membership.characterIds } },
+          ),
+        ],
+      },
       include: {
         campaign: {
           select: {
@@ -332,8 +353,7 @@ router.get('/:id', authenticated, async (req: AuthenticatedRequest, res: Respons
             id: true,
             displayName: true,
             avatarUrl: true,
-            // SECURITY: never embed `email` — this endpoint can be hit by
-            // any campaign member viewing another player's character.
+            // SECURITY: never embed email in a player-facing response.
           },
         },
       },
@@ -351,8 +371,7 @@ router.get('/:id', authenticated, async (req: AuthenticatedRequest, res: Respons
       return res.status(200).json({ character });
     }
 
-    // If character is in a campaign, check if requester is a campaign member
-    // All campaign members can VIEW characters, but only owner/DM can EDIT
+    // A campaign DM or assigned player may view the full sheet.
     if (character.campaignId) {
       const membership = await prisma.campaignMembership.findUnique({
         where: {
@@ -363,8 +382,8 @@ router.get('/:id', authenticated, async (req: AuthenticatedRequest, res: Respons
         },
       });
 
-      // Any campaign member (DM, PLAYER, SPECTATOR) can view characters in the campaign
-      if (membership) {
+      if (membership && (membership.role === 'DM' ||
+        (membership.role === 'PLAYER' && membership.characterIds.includes(id)))) {
         return res.status(200).json({ character });
       }
     }
@@ -476,7 +495,8 @@ router.get('/:id/validate', authenticated, async (req: AuthenticatedRequest, res
  * PUT /api/characters/:id
  * Update a character
  * Requires: Authentication
- * Authorization: Character owner OR campaign DM (if character is in a campaign)
+ * Authorization: Character owner OR campaign DM OR the campaign PLAYER the
+ * character is assigned to — checked early and again under the row lock
  */
 router.put('/:id', authenticated, async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -512,8 +532,9 @@ router.put('/:id', authenticated, async (req: AuthenticatedRequest, res: Respons
       });
     }
 
-    // Check authorization
-    if (!(await canEditCharacter(req, character))) {
+    // Check authorization (early, unlocked: no validation feedback or lock
+    // wait for someone who may not edit; re-checked under the row lock below)
+    if (!(await canEditCharacter(userId, character))) {
       return res.status(403).json({
         error: 'Forbidden',
         message: 'You do not have permission to edit this character',
@@ -544,9 +565,15 @@ router.put('/:id', authenticated, async (req: AuthenticatedRequest, res: Respons
     // Read and write under the character row lock (serialised with PATCH and
     // the HP socket handler); diff against the locked row, not the unlocked
     // read above, so changes this PUT overwrites show up in changedPaths.
+    // The permission rules are evaluated again against the locked row: the
+    // character's campaign or the caller's assignment may have changed since
+    // the unlocked read, and nothing can change them while the lock is held.
     const locked = await withCharacterRowLock(prisma, id, async (tx) => {
       const lockedCharacter = await tx.character.findUnique({ where: { id } });
-      if (!lockedCharacter) return null;
+      if (!lockedCharacter) return { status: 'not_found' as const };
+      if (!(await canEditCharacter(userId, lockedCharacter, tx))) {
+        return { status: 'forbidden' as const };
+      }
 
       const updated = await tx.character.update({
         where: { id },
@@ -560,18 +587,24 @@ router.put('/:id', authenticated, async (req: AuthenticatedRequest, res: Respons
           },
         },
       });
-      return { before: lockedCharacter, updated };
+      return { status: 'ok' as const, before: lockedCharacter, updated };
     });
 
-    if (!locked) {
+    if (locked.status === 'not_found') {
       return res.status(404).json({
         error: 'Not Found',
         message: 'Character not found',
       });
     }
+    if (locked.status === 'forbidden') {
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'You do not have permission to edit this character',
+      });
+    }
     const updatedCharacter = locked.updated;
 
-    // Broadcast character update to campaign if character is in a campaign.
+    // Send the update to everyone who may open the sheet (campaign characters).
     // changedPaths may contain "" — the whole document changed (its root is
     // not a path-addressable object); clients must treat that as "reload all".
     await broadcastCharacterUpdated(
@@ -610,7 +643,8 @@ router.put('/:id', authenticated, async (req: AuthenticatedRequest, res: Respons
  * — 400 with validationErrors when the merged data fails the game-system
  * schema (nothing written).
  * Requires: Authentication
- * Authorization: same as PUT (owner OR campaign DM)
+ * Authorization: same as PUT (owner OR campaign DM OR assigned campaign
+ * PLAYER), checked early and again under the row lock
  */
 router.patch('/:id/data', characterDataPatchBodyParser, authenticated, async (req: AuthenticatedRequest, res: Response) => {
   try {
@@ -636,7 +670,8 @@ router.patch('/:id/data', characterDataPatchBodyParser, authenticated, async (re
       });
     }
 
-    if (!(await canEditCharacter(req, character))) {
+    // Early, unlocked check; patchCharacterData re-checks under the row lock
+    if (!(await canEditCharacter(userId, character))) {
       return res.status(403).json({
         error: 'Forbidden',
         message: 'You do not have permission to edit this character',
@@ -651,6 +686,7 @@ router.patch('/:id/data', characterDataPatchBodyParser, authenticated, async (re
           id,
           changes: parsed.data.changes.map(({ path, base, value }) => ({ path, base, value })),
           atomic: parsed.data.atomic ?? false,
+          authorize: (lockedCharacter, tx) => canEditCharacter(userId, lockedCharacter, tx),
         }
       );
     } catch (error) {
@@ -667,6 +703,13 @@ router.patch('/:id/data', characterDataPatchBodyParser, authenticated, async (re
       return res.status(404).json({
         error: 'Not Found',
         message: 'Character not found',
+      });
+    }
+
+    if (result.status === 'forbidden') {
+      return res.status(403).json({
+        error: 'Forbidden',
+        message: 'You do not have permission to edit this character',
       });
     }
 

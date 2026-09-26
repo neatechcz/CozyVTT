@@ -6,7 +6,7 @@ import { authenticated, campaignMember, campaignDM, adminOnly } from '../middlew
 import { prisma } from '../config/database';
 import { canDeleteCampaign } from '../services/permissions';
 import { captureGameState, restoreGameState, getNextSessionNumber, getLastSession } from '../services/sessionState';
-import { sendSystemMessage, broadcastToUser, broadcastToCampaign } from '../websocket/utils';
+import { sendSystemMessage, broadcastToUser, broadcastToCampaign, broadcastTokenEvent } from '../websocket/utils';
 import { isSmtpConfigured, sendCampaignInvitationEmail } from '../services/email';
 import { DEFAULT_VIBE_SETTINGS, validateVibeSettings, findVibePeriod, VibeSettings } from '../utils/vibe-presets';
 import { GameSystem } from '../game-systems';
@@ -87,6 +87,10 @@ router.get('/', authenticated, async (req: AuthenticatedRequest, res: Response) 
 
     const campaigns = memberships.map((m) => ({
       ...m.campaign,
+      memberships: m.role === 'DM' ? m.campaign.memberships : m.campaign.memberships.map((member) => ({
+        ...member,
+        characterIds: member.userId === userId ? member.characterIds : [],
+      })),
       userRole: m.role,
       characterIds: m.characterIds,
     }));
@@ -261,9 +265,18 @@ router.get('/:campaignId', campaignMember, async (req: AuthenticatedRequest, res
 
     // Flatten sessions array → activeSession (first open session, or null)
     const { sessions: _sessions, ...campaignRest } = campaign;
+    const isDM = req.campaignMembership!.role === 'DM';
+    const userId = req.session.userId!;
+    const visibleIds = new Set(req.campaignMembership!.characterIds);
     return res.status(200).json({
       campaign: {
         ...campaignRest,
+        characters: isDM ? campaignRest.characters : campaignRest.characters.filter((character) =>
+          character.userId === userId || visibleIds.has(character.id)),
+        memberships: isDM ? campaignRest.memberships : campaignRest.memberships.map((member) => ({
+          ...member,
+          characterIds: member.userId === userId ? member.characterIds : [],
+        })),
         activeSession: (_sessions && _sessions.length > 0) ? _sessions[0] : null,
         userRole: req.campaignMembership!.role,
       },
@@ -321,9 +334,79 @@ function extractCharacterHp(
   }
 }
 
+/** Assign one campaign character to a player without changing its owner. */
+router.put('/:campaignId/characters/:characterId/controller', campaignDM, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { campaignId, characterId } = req.params;
+    const { userId } = req.body ?? {};
+    if (userId !== null && (typeof userId !== 'string' || !userId)) {
+      return res.status(400).json({ error: 'Validation Error', message: 'userId must be a player ID or null' });
+    }
+
+    const character = await prisma.character.findUnique({ where: { id: characterId }, select: { campaignId: true } });
+    if (!character || character.campaignId !== campaignId) {
+      return res.status(404).json({ error: 'Not Found', message: 'Character not found in this campaign' });
+    }
+
+    // Tokens whose controller changed: broadcast after commit like any other
+    // REST token write (token.updated, filtered per recipient)
+    const tokenChanges: Array<{ mapId: string; before: { id: string }; after: { id: string } }> = [];
+    const result = await prisma.$transaction(async (tx) => {
+      const players = await tx.campaignMembership.findMany({ where: { campaignId, role: 'PLAYER' } });
+      const target = userId === null ? null : players.find((player) => player.userId === userId);
+      if (userId !== null && !target) return false;
+
+      for (const player of players) {
+        const nextIds = player.characterIds.filter((id) => id !== characterId);
+        if (player.userId === userId) nextIds.push(characterId);
+        if (nextIds.length !== player.characterIds.length || nextIds.some((id, index) => id !== player.characterIds[index])) {
+          await tx.campaignMembership.update({ where: { id: player.id }, data: { characterIds: nextIds } });
+        }
+      }
+      const maps = await tx.map.findMany({ where: { campaignId }, select: { id: true, tokens: true } });
+      for (const map of maps) {
+        if (!Array.isArray(map.tokens)) continue;
+        let changed = false;
+        const tokens = map.tokens.map((value) => {
+          if (!value || typeof value !== 'object' || Array.isArray(value) || value.characterId !== characterId) return value;
+          if (value.controlledBy === userId) return value;
+          changed = true;
+          const next = { ...value, controlledBy: userId };
+          if (typeof value.id === 'string') {
+            tokenChanges.push({ mapId: map.id, before: value as unknown as { id: string }, after: next as unknown as { id: string } });
+          }
+          return next;
+        });
+        if (changed) await tx.map.update({ where: { id: map.id }, data: { tokens } });
+      }
+      return true;
+    });
+    if (!result) {
+      return res.status(400).json({ error: 'Validation Error', message: 'Controller must be a player in this campaign' });
+    }
+
+    try {
+      broadcastToCampaign(campaignId, 'roster.updated', { action: 'character.controller.updated', characterId, userId });
+    } catch (error) {
+      logger.error('Failed to broadcast character controller update', { err: error });
+    }
+    // Never throws (logs its own failures)
+    for (const { mapId, before, after } of tokenChanges) {
+      await broadcastTokenEvent(campaignId, mapId, before, after);
+    }
+    return res.status(200).json({ characterId, controllerUserId: userId });
+  } catch (error) {
+    logger.error('Failed to update character controller', { err: error });
+    return res.status(500).json({ error: 'Internal Server Error', message: 'Failed to update character controller' });
+  }
+});
+
 router.get('/:campaignId/characters', campaignMember, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { campaignId } = req.params;
+    const isDM = req.campaignMembership!.role === 'DM';
+    const userId = req.session.userId!;
+    const visibleIds = new Set(req.campaignMembership!.characterIds);
 
     // Fetch all memberships with their character assignments
     const memberships = await prisma.campaignMembership.findMany({
@@ -346,6 +429,7 @@ router.get('/:campaignId/characters', campaignMember, async (req: AuthenticatedR
     const characters = await prisma.character.findMany({
       where: {
         id: { in: allCharacterIds },
+        campaignId,
       },
       select: {
         id: true,
@@ -357,10 +441,18 @@ router.get('/:campaignId/characters', campaignMember, async (req: AuthenticatedR
       },
     });
 
+    // Player assignments take display priority; DMs retain their complete
+    // characterIds for authorization without duplicating PCs in the roster.
+    const playerCharacterIds = new Set(
+      memberships.filter((membership) => membership.role === 'PLAYER').flatMap((membership) => membership.characterIds)
+    );
+
     // Build response — extract HP from character data, never expose raw data
     const roster = memberships.map((membership) => {
       const memberCharacters = characters
-        .filter((c) => membership.characterIds.includes(c.id))
+        .filter((c) => membership.characterIds.includes(c.id) &&
+          (membership.role !== 'DM' || !playerCharacterIds.has(c.id)) &&
+          (isDM || c.userId === userId || visibleIds.has(c.id)))
         .map(({ data, ...char }) => ({
           ...char,
           hp: extractCharacterHp(char.gameSystem, data),

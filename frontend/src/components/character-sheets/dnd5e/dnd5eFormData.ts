@@ -8,41 +8,70 @@
  */
 
 /**
+ * Sort a flat proficiency list into the editor's categories. Entries that fit
+ * no category (e.g. "Saving Throws: Strength") are in none of the lists.
+ */
+export const categorizeProficiencies = (all: string[]) => {
+  const languages = ['Common', 'Elvish', 'Dwarvish', 'Draconic', 'Giant', 'Gnomish', 'Goblin', 'Halfling', 'Orc', 'Abyssal', 'Celestial', 'Deep Speech', 'Infernal', 'Primordial', 'Sylvan', 'Undercommon'];
+  const armorKeywords = ['Armor', 'Shield'];
+  const toolKeywords = ['Tools', 'Supplies', 'Kit', 'Instruments', 'Vehicles', 'Vehicle'];
+
+  const armor = all.filter((proficiency) => armorKeywords.some((keyword) => proficiency.includes(keyword)));
+  const weapons = all.filter((proficiency) =>
+    !armorKeywords.some((keyword) => proficiency.includes(keyword))
+    && !toolKeywords.some((keyword) => proficiency.includes(keyword))
+    && !languages.includes(proficiency)
+    && (proficiency.includes('Weapon') || ['Dagger', 'Sword', 'Bow', 'Axe', 'Mace', 'Staff', 'Crossbow', 'Spear', 'Hammer'].some((weapon) => proficiency.includes(weapon))),
+  );
+  const tools = all.filter((proficiency) => toolKeywords.some((keyword) => proficiency.includes(keyword)));
+  const languageProficiencies = all.filter((proficiency) => languages.includes(proficiency));
+
+  return { armor, weapons, tools, languages: languageProficiencies };
+};
+
+/**
  * Normalize stored character data into the editor's form shape
  * (ensures nested objects exist). Used on mount and for live updates.
+ * Never invents data the sheet does not have: no default `spellcasting`
+ * block for a non-spellcaster, and a legacy flat `proficiencies` array is
+ * shown through `proficienciesAndLanguages` — the structured category
+ * object exists only when the sheet has one (or the user edits a category).
  */
-export const buildDnd5eFormData = (data: any): any => ({
-  ...data,
-  // Ensure nested objects exist
-  stats: data.stats || {},
-  savingThrows: data.savingThrows || {},
-  skills: data.skills || {},
-  hp: data.hp || { maximum: 0, current: 0, temporary: 0 },
-  deathSaves: data.deathSaves || { successes: 0, failures: 0 },
-  spellcasting: data.spellcasting || {
-    ability: '',
-    spellSaveDC: 0,
-    spellAttackBonus: 0,
-    cantrips: [],
-    slots: {},
-    spells: [],
-  },
-  currency: data.currency || { cp: 0, sp: 0, ep: 0, gp: 0, pp: 0 },
-  inventory: data.inventory || [],
-  attacks: data.attacks || [],
-  hitDice: data.hitDice || [],
-  conditions: data.conditions || [],
-  proficienciesAndLanguages: data.proficienciesAndLanguages || [],
-  // Always use a structured object for proficiencies so the textarea fields work correctly.
-  // If legacy data stored proficiencies as an array, ignore it and start with empty strings.
-  proficiencies: (data.proficiencies && !Array.isArray(data.proficiencies))
-    ? { armor: '', weapons: '', tools: '', languages: '', ...data.proficiencies }
-    : { armor: '', weapons: '', tools: '', languages: '' },
-  featuresAndTraits: data.featuresAndTraits || [],
-  appearance: data.appearance || {},
-  personality: data.personality || {},
-  alliesAndOrganizations: data.alliesAndOrganizations || { name: '', description: '' },
-});
+export const buildDnd5eFormData = (data: any): any => {
+  const { proficiencies: sourceProficiencies, ...characterData } = data;
+  const proficienciesAndLanguages = Array.isArray(data.proficienciesAndLanguages)
+    ? data.proficienciesAndLanguages
+    : Array.isArray(sourceProficiencies)
+      ? sourceProficiencies
+      : [];
+  const structuredProficiencies = sourceProficiencies
+    && typeof sourceProficiencies === 'object'
+    && !Array.isArray(sourceProficiencies)
+    ? { proficiencies: { armor: '', weapons: '', tools: '', languages: '', ...sourceProficiencies } }
+    : {};
+
+  return {
+    ...characterData,
+    // Ensure nested objects exist
+    stats: data.stats || {},
+    savingThrows: data.savingThrows || {},
+    skills: data.skills || {},
+    hp: data.hp || { maximum: 0, current: 0, temporary: 0 },
+    deathSaves: data.deathSaves || { successes: 0, failures: 0 },
+    ...(data.spellcasting ? { spellcasting: data.spellcasting } : {}),
+    currency: data.currency || { cp: 0, sp: 0, ep: 0, gp: 0, pp: 0 },
+    inventory: data.inventory || [],
+    attacks: data.attacks || [],
+    hitDice: data.hitDice || [],
+    conditions: data.conditions || [],
+    proficienciesAndLanguages,
+    ...structuredProficiencies,
+    featuresAndTraits: data.featuresAndTraits || [],
+    appearance: data.appearance || {},
+    personality: data.personality || {},
+    alliesAndOrganizations: data.alliesAndOrganizations || { name: '', description: '' },
+  };
+};
 
 /** Parse comma-separated string into array */
 export const parseCommaSeparated = (value: string | string[] | undefined): string[] => {
@@ -79,6 +108,14 @@ export const prepareDnd5eFormForSave = (form: any, defaultThemeColor: string): a
     const weaponsArray = parseCommaSeparated(updatedData.proficiencies.weapons);
     const toolsArray = parseCommaSeparated(updatedData.proficiencies.tools);
     const languagesArray = parseCommaSeparated(updatedData.proficiencies.languages);
+    // Entries that fit no category (e.g. "Saving Throws: Strength") have no
+    // field of their own: keep them from the current list
+    const originalProficiencies: string[] = Array.isArray(updatedData.proficienciesAndLanguages)
+      ? updatedData.proficienciesAndLanguages
+      : [];
+    const categorizedOriginals = new Set(Object.values(categorizeProficiencies(originalProficiencies)).flat());
+    const uncategorizedOriginals = originalProficiencies
+      .filter((proficiency) => !categorizedOriginals.has(proficiency));
 
     // Flatten to backwards-compatible array
     updatedData.proficienciesAndLanguages = [
@@ -86,6 +123,7 @@ export const prepareDnd5eFormForSave = (form: any, defaultThemeColor: string): a
       ...weaponsArray,
       ...toolsArray,
       ...languagesArray,
+      ...uncategorizedOriginals,
     ];
   }
 

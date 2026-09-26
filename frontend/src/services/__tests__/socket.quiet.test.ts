@@ -8,8 +8,13 @@ class FakeManager {
     this.listeners.set(event, [...(this.listeners.get(event) ?? []), listener]);
     return this;
   }
+  // The client detaches its reconnect_* handlers from a replaced socket's Manager
+  off(event: string, listener?: Listener) {
+    this.listeners.set(event, listener ? (this.listeners.get(event) ?? []).filter((l) => l !== listener) : []);
+    return this;
+  }
   fire(event: string, ...args: unknown[]) {
-    for (const listener of this.listeners.get(event) ?? []) listener(...args);
+    for (const listener of [...(this.listeners.get(event) ?? [])]) listener(...args);
   }
 }
 
@@ -216,5 +221,28 @@ describe('socketClient lifecycle signals', () => {
     created[0].io.fire('reconnect_failed');
 
     expect(events.slice(-1)).toEqual(['failed']);
+  });
+
+  it('keeps one reconnect_* handler per Manager and detaches it from a replaced socket', async () => {
+    vi.useFakeTimers();
+    const client = await freshClient();
+    const events: string[] = [];
+    client.onLifecycle((event) => events.push(event));
+    const connecting = client.connect('camp-1');
+    handshake(created[0]);
+    await connecting;
+    expect(created[0].io.listeners.get('reconnect_failed')).toHaveLength(1);
+
+    created[0].fire('disconnect', 'io server disconnect');
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(created).toHaveLength(2);
+    expect(created[0].io.listeners.get('reconnect_failed')).toHaveLength(0);
+    expect(created[1].io.listeners.get('reconnect_failed')).toHaveLength(1);
+
+    // The old Manager giving up no longer reports the current connection as failed
+    created[0].io.fire('reconnect_failed');
+    expect(events).not.toContain('failed');
+    created[1].io.fire('reconnect_failed');
+    expect(events.filter((event) => event === 'failed')).toHaveLength(1);
   });
 });

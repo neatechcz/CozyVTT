@@ -5,12 +5,16 @@ import {
   PlatformRole,
   type Campaign,
   type CampaignMembership,
+  type Character,
   type User,
 } from '../types';
 import {
   canDeleteCampaign,
+  canEditCharacter,
+  canViewCharacter,
   canManageDmRoles,
   canRemoveCampaignMember,
+  canRollAsCharacter,
   isCampaignDm,
 } from './permissions';
 
@@ -107,5 +111,30 @@ describe('campaign DM permissions', () => {
     expect(canRemoveCampaignMember(campaign, coDm, playerMembership)).toBe(true);
     expect(canRemoveCampaignMember(campaign, coDm, ownerMembership)).toBe(false);
     expect(canRemoveCampaignMember(campaign, coDm, coDmMembership)).toBe(false);
+  });
+});
+
+describe('delegated character access', () => {
+  const character = { id: 'mich', userId: 'mcp-owner' } as Character;
+
+  it('lets only the assigned player edit an MCP-owned character', () => {
+    expect(canEditCharacter(player, character, { ...playerMembership, characterIds: ['mich'] })).toBe(true);
+    expect(canEditCharacter(player, character, playerMembership)).toBe(false);
+    expect(canEditCharacter(player, character, { ...playerMembership, role: CampaignRole.SPECTATOR, characterIds: ['mich'] })).toBe(false);
+    expect(canEditCharacter(coDm, character, coDmMembership)).toBe(true);
+  });
+
+  it('shows a full sheet only to its owner, a DM or its assigned player', () => {
+    expect(canViewCharacter(player, character, { ...playerMembership, characterIds: ['mich'] })).toBe(true);
+    expect(canViewCharacter(player, character, playerMembership)).toBe(false);
+    expect(canViewCharacter(player, character, { ...playerMembership, role: CampaignRole.SPECTATOR, characterIds: ['mich'] })).toBe(false);
+    expect(canViewCharacter(coDm, character, coDmMembership)).toBe(true);
+  });
+
+  it('offers sheet rolls to the owner, DM and assigned player only', () => {
+    expect(canRollAsCharacter(player, character, { ...playerMembership, characterIds: ['mich'] })).toBe(true);
+    expect(canRollAsCharacter(player, character, playerMembership)).toBe(false);
+    expect(canRollAsCharacter(coDm, character, coDmMembership)).toBe(true);
+    expect(canRollAsCharacter({ ...player, id: 'mcp-owner' }, character)).toBe(true);
   });
 });

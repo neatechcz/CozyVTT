@@ -17,8 +17,15 @@ class FakeManager {
     this.listeners.set(event, [...(this.listeners.get(event) ?? []), listener]);
     return this;
   }
+  off(event: string, listener?: Listener) {
+    this.listeners.set(event, listener ? (this.listeners.get(event) ?? []).filter((l) => l !== listener) : []);
+    return this;
+  }
   fire(event: string, ...args: unknown[]) {
-    for (const listener of this.listeners.get(event) ?? []) listener(...args);
+    for (const listener of [...(this.listeners.get(event) ?? [])]) listener(...args);
+  }
+  listenerCount(event: string) {
+    return this.listeners.get(event)?.length ?? 0;
   }
 }
 

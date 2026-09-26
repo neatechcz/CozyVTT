@@ -49,6 +49,7 @@ import { useTokenSocketEvents } from './map/useTokenSocketEvents';
 import type { TokenAnimation } from './map/layers/types';
 import { useRenderLoop, type MapLayer } from './map/useRenderLoop';
 import api from '@/services/api';
+import { canViewCharacter } from '@/services/permissions';
 import CharacterSheetViewerModal from '@/components/character/CharacterSheetViewerModal';
 import CharacterRollPicker from '@/components/campaign/CharacterRollPicker';
 import NpcRollPicker from '@/components/campaign/NpcRollPicker';
@@ -3124,7 +3125,10 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
         >
           {contextMenu.token.characterId && (
             <>
-              <button
+              {(user && canViewCharacter(user, {
+                id: contextMenu.token.characterId,
+                userId: campaign?.characters?.find((character) => character.id === contextMenu.token.characterId)?.userId ?? '',
+              }, campaign?.memberships?.find((membership) => membership.userId === user.id))) && <button
                 className="w-full px-4 py-2 text-left text-sm text-stone-gray hover:bg-moss-green/10 transition-colors"
                 onClick={async () => {
                   const characterId = contextMenu.token.characterId!;
@@ -3138,8 +3142,12 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
                 }}
               >
                 View Character Sheet
-              </button>
-              <button
+              </button>}
+              {(userRole === 'DM' || campaign?.memberships?.some((membership) =>
+                membership.userId === user?.id &&
+                membership.role === 'PLAYER' &&
+                membership.characterIds.includes(contextMenu.token.characterId!)
+              ) || contextMenu.token.controlledBy === user?.id) && <button
                 className="w-full px-4 py-2 text-left text-sm text-stone-gray hover:bg-moss-green/10 transition-colors"
                 onClick={() => {
                   const { characterId, x, y } = { characterId: contextMenu.token.characterId!, x: contextMenu.x, y: contextMenu.y };
@@ -3148,7 +3156,7 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
                 }}
               >
                 Roll...
-              </button>
+              </button>}
             </>
           )}
 
@@ -3451,7 +3459,7 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
           characterId={rollPicker.characterId}
           anchorX={rollPicker.x}
           anchorY={rollPicker.y}
-          onRoll={(expression, purpose) => socket?.emitDiceRoll({ expression, purpose })}
+          onRoll={(expression, purpose) => socket?.emitDiceRoll({ characterId: rollPicker.characterId, expression, purpose })}
           onClose={() => setRollPicker(null)}
         />
       )}

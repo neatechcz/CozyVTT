@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, FormEvent, KeyboardEvent } from 'react';
+import { useState, useEffect, useMemo, useRef, FormEvent, KeyboardEvent } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Dices, Send, AlertCircle, RotateCcw, ChevronLeft, ChevronRight, Trash2, EyeOff, X } from 'lucide-react';
 import { useWebSocket } from '@/contexts/WebSocketContext';
@@ -128,6 +128,7 @@ export default function DiceRoller() {
   // Form state
   const [expression, setExpression] = useState('');
   const [characterName, setCharacterName] = useState('');
+  const [selectedCharacterId, setSelectedCharacterId] = useState('');
   const [purpose, setPurpose] = useState('');
   const [isSecret, setIsSecret] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -142,6 +143,27 @@ export default function DiceRoller() {
 
   // Secret roll popup state
   const [secretRollResult, setSecretRollResult] = useState<DiceRolledEvent | null>(null);
+
+  const playerCharacters = useMemo(() => {
+    if (userRole !== 'PLAYER' || !campaign || !user) return [];
+
+    const playerMembership = campaign.memberships?.find(
+      (membership) => membership.userId === user.id && membership.role === 'PLAYER',
+    );
+    const assignedCharacterIds = new Set(playerMembership?.characterIds ?? []);
+
+    return (campaign.characters ?? []).filter((character) =>
+      character.campaignId === campaign.id &&
+      (character.userId === user.id || assignedCharacterIds.has(character.id)),
+    );
+  }, [campaign, user, userRole]);
+  const selectedCharacter = playerCharacters.find((character) => character.id === selectedCharacterId);
+
+  useEffect(() => {
+    if (selectedCharacterId && !selectedCharacter) {
+      setSelectedCharacterId('');
+    }
+  }, [selectedCharacter, selectedCharacterId]);
 
   // Rate limit state
   const [rateLimitCooldown, setRateLimitCooldown] = useState(0);
@@ -346,7 +368,10 @@ export default function DiceRoller() {
       if (validationError) { setError(validationError); return; }
       setError(null);
       setIsRolling(true);
-      const localResult = evaluateLocalRoll(expr, user, characterName.trim(), purpose.trim());
+      // Paused campaigns are offline for players; the player selector is backed by
+      // the same owned/assigned character list as online rolls.
+      const localCharacterName = selectedCharacter?.name ?? '';
+      const localResult = evaluateLocalRoll(expr, user, localCharacterName, purpose.trim());
       if (localResult) {
         setRolls((prev) => [localResult, ...prev]);
         setCurrentRollIndex(0);
@@ -378,9 +403,13 @@ export default function DiceRoller() {
 
     console.log('[DiceRoller] Rolling dice:', expr, 'secret:', isSecret);
 
+    const characterAttribution = userRole === 'DM'
+      ? { characterName: characterName.trim() || undefined }
+      : selectedCharacter ? { characterId: selectedCharacter.id } : {};
+
     socket.emitDiceRoll({
       expression: expr.trim(),
-      characterName: characterName.trim() || undefined,
+      ...characterAttribution,
       purpose: purpose.trim() || undefined,
       secret: isSecret,
     });
@@ -411,6 +440,7 @@ export default function DiceRoller() {
   const handleClear = () => {
     setExpression('');
     setCharacterName('');
+    setSelectedCharacterId('');
     setPurpose('');
     setError(null);
   };
@@ -606,15 +636,32 @@ export default function DiceRoller() {
           </div>
 
           <div className="grid grid-cols-2 gap-1.5">
-            <input
-              id="characterName"
-              type="text"
-              value={characterName}
-              onChange={(e) => setCharacterName(e.target.value)}
-              placeholder="Character"
-              disabled={isRolling}
-              className="input-cozy px-2 py-1.5 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
-            />
+            {userRole === 'DM' ? (
+              <input
+                id="characterName"
+                type="text"
+                value={characterName}
+                onChange={(e) => setCharacterName(e.target.value)}
+                placeholder="Character"
+                aria-label="Character"
+                disabled={isRolling}
+                className="input-cozy px-2 py-1.5 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+              />
+            ) : (
+              <select
+                id="characterId"
+                value={selectedCharacterId}
+                onChange={(e) => setSelectedCharacterId(e.target.value)}
+                aria-label="Character"
+                disabled={isRolling}
+                className="input-cozy px-2 py-1.5 text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <option value="">No character</option>
+                {playerCharacters.map((character) => (
+                  <option key={character.id} value={character.id}>{character.name}</option>
+                ))}
+              </select>
+            )}
 
             <input
               id="purpose"

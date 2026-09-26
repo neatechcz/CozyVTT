@@ -9,7 +9,7 @@ jest.mock('../../config/database', () => ({
   prisma: {
     $transaction: jest.fn(),
     character: { findUnique: jest.fn(), update: jest.fn() },
-    campaignMembership: { findFirst: jest.fn() },
+    campaignMembership: { findMany: jest.fn() },
     user: { findUnique: jest.fn() },
   },
 }));
@@ -21,7 +21,7 @@ import { registerCharacterHandlers } from '../handlers/characters';
 const db = prisma as unknown as {
   $transaction: jest.Mock;
   character: { findUnique: jest.Mock; update: jest.Mock };
-  campaignMembership: { findFirst: jest.Mock };
+  campaignMembership: { findMany: jest.Mock };
   user: { findUnique: jest.Mock };
 };
 
@@ -49,6 +49,14 @@ function setup(gameSystem: string, data: Record<string, unknown>, overrides: Par
     ...overrides,
   };
   const order: string[] = [];
+  const memberships: Record<string, { role: string; campaignId: string; characterIds: string[] }> = {
+    owner: { role: 'PLAYER', campaignId: 'camp-1', characterIds: [] },
+    dm: { role: 'DM', campaignId: 'camp-1', characterIds: ['char-1'] },
+    assigned: { role: 'PLAYER', campaignId: 'camp-1', characterIds: ['char-1'] },
+    other: { role: 'PLAYER', campaignId: 'camp-1', characterIds: [] },
+  };
+  // Sheet recipients (after commit): the campaign DMs and the assigned player.
+  db.campaignMembership.findMany.mockResolvedValue([{ userId: 'dm' }, { userId: 'assigned' }]);
 
   // The transaction client is the only place character reads/writes may go.
   const tx = {
@@ -70,8 +78,10 @@ function setup(gameSystem: string, data: Record<string, unknown>, overrides: Par
         };
       }),
     },
+    // The caller's own membership, read under the lock (production rule:
+    // owner, DM, or the PLAYER the character is assigned to).
     campaignMembership: {
-      findFirst: jest.fn(async () => ({ campaignId: 'camp-1', characterIds: ['char-1'] })),
+      findUnique: jest.fn(async ({ where }: any) => memberships[where.userId_campaignId.userId] ?? null),
     },
   };
   db.$transaction.mockImplementation(async (fn: (client: unknown) => Promise<unknown>) => {
@@ -120,7 +130,9 @@ test('emits character.updated with changedPaths ["hp.current"] after character.h
   await handler({ characterId: 'char-1', delta: -3 });
 
   expect(socket.emit).not.toHaveBeenCalled();
-  expect(io.to).toHaveBeenCalledWith('camp-1');
+  // Sheet data goes to the owner, DMs and assigned player — never the campaign room
+  expect(io.to).not.toHaveBeenCalledWith('camp-1');
+  expect(io.to).toHaveBeenCalledWith(['owner', 'dm', 'assigned']);
   expect(roomEmit.mock.calls.map(([event]) => event)).toEqual([
     'character.hp.updated',
     'character.updated',
@@ -259,4 +271,65 @@ test('the row lock transaction uses explicit maxWait / timeout', async () => {
   await handler({ characterId: 'char-1', delta: -1 });
 
   expect(db.$transaction).toHaveBeenCalledWith(expect.any(Function), { maxWait: 5000, timeout: 10000 });
+});
+
+describe('delegated character control (permission read under the row lock)', () => {
+  test('the PLAYER the character is assigned to may change its HP', async () => {
+    const { socket, handler, stored, order } = setup('DND_5E', { hp: { current: 8, maximum: 10 } });
+    socket.userId = 'assigned';
+
+    await handler({ characterId: 'char-1', delta: -2 });
+
+    expect(socket.emit).not.toHaveBeenCalled();
+    expect(stored().data.hp.current).toBe(6);
+    expect(order.slice(0, 4)).toEqual(['begin', 'lock', 'read', 'write']);
+  });
+
+  test('a campaign DM may change HP of a character they do not own', async () => {
+    const { socket, handler, stored } = setup('DND_5E', { hp: { current: 8, maximum: 10 } });
+    socket.userId = 'dm';
+
+    await handler({ characterId: 'char-1', delta: 1 });
+
+    expect(socket.emit).not.toHaveBeenCalled();
+    expect(stored().data.hp.current).toBe(9);
+  });
+
+  test('another PLAYER of the campaign is refused with a permission error, nothing written', async () => {
+    const { socket, handler, stored, roomEmit, tx } = setup('DND_5E', { hp: { current: 8, maximum: 10 } });
+    socket.userId = 'other';
+
+    await handler({ characterId: 'char-1', delta: -2 });
+
+    expect(socket.emit).toHaveBeenCalledWith('error', {
+      message: 'You do not have permission to update this character\'s HP',
+    });
+    expect(tx.character.update).not.toHaveBeenCalled();
+    expect(roomEmit).not.toHaveBeenCalled();
+    expect(stored().data.hp.current).toBe(8);
+  });
+
+  test('the caller membership is read with the transaction client, not the unlocked client', async () => {
+    const { tx, handler } = setup('DND_5E', { hp: { current: 8, maximum: 10 } });
+
+    await handler({ characterId: 'char-1', delta: -1 });
+
+    expect(tx.campaignMembership.findUnique).toHaveBeenCalledWith({
+      where: { userId_campaignId: { userId: 'owner', campaignId: 'camp-1' } },
+    });
+  });
+
+  test('recipients are the owner, campaign DMs and the PLAYERs assigned the character', async () => {
+    const { handler } = setup('DND_5E', { hp: { current: 8, maximum: 10 } });
+
+    await handler({ characterId: 'char-1', delta: -1 });
+
+    expect(db.campaignMembership.findMany).toHaveBeenCalledWith({
+      where: {
+        campaignId: 'camp-1',
+        OR: [{ role: 'DM' }, { role: 'PLAYER', characterIds: { has: 'char-1' } }],
+      },
+      select: { userId: true },
+    });
+  });
 });

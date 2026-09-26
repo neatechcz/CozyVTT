@@ -69,9 +69,16 @@ class SocketClient {
    * attached again, so subscribers never go deaf after a replacement.
    */
   private listenerRegistry = new Map<string, Set<EventCallback>>();
+  /** Removes this client's own reconnect_* handlers from the current socket's Manager. */
+  private reconnectManagerCleanup: (() => void) | null = null;
 
   constructor() {
     // Socket will be initialized when connect() is called
+  }
+
+  private clearReconnectManagerListeners() {
+    this.reconnectManagerCleanup?.();
+    this.reconnectManagerCleanup = null;
   }
 
   // ============================================
@@ -103,6 +110,7 @@ class SocketClient {
 
       // Disconnect and clean up any existing socket first
       if (this.socket) {
+        this.clearReconnectManagerListeners();
         this.socket.removeAllListeners();
         this.socket.disconnect();
         this.socket = null;
@@ -133,6 +141,7 @@ class SocketClient {
         }
         console.error('[Socket] Connection timeout - server did not respond within 10 seconds');
         this.isConnecting = false;
+        this.clearReconnectManagerListeners();
         socket.removeAllListeners();
         socket.disconnect();
         this.socket = null;
@@ -183,28 +192,37 @@ class SocketClient {
         }
       });
 
-      // Reconnection attempt
-      this.socket.on('reconnect_attempt', (attemptNumber) => {
+      // Socket.IO emits retry lifecycle events on the Manager, not the
+      // namespace Socket. Keep these handlers scoped so replaced sockets do
+      // not leave listeners on their Managers.
+      const manager = socket.io;
+      const handleReconnectAttempt = (attemptNumber: number) => {
         this.reconnectAttempts = attemptNumber;
-      });
+      };
 
-      // Reconnection successful
-      this.socket.on('reconnect', () => {
+      const handleReconnect = () => {
         this.reconnectAttempts = 0;
         // Re-authentication happens automatically when backend emits 'connected' event
-      });
+      };
 
-      // Reconnection failed
-      this.socket.on('reconnect_failed', () => {
+      const handleReconnectFailed = () => {
         console.error('[Socket] Reconnection failed after max attempts');
         clearTimeout(connectionTimeout);
+        this.isConnecting = false;
         reject(new Error('Failed to reconnect after maximum attempts'));
-      });
-
-      // socket.io v4 emits reconnect_* on the Manager, not on the socket
-      socket.io?.on('reconnect_failed', () => {
+        // socket.io gave up on this (still current) socket
         if (this.socket === socket) this.emitLifecycle('failed');
-      });
+      };
+
+      manager.on('reconnect_attempt', handleReconnectAttempt);
+      manager.on('reconnect', handleReconnect);
+      manager.on('reconnect_failed', handleReconnectFailed);
+
+      this.reconnectManagerCleanup = () => {
+        manager.off('reconnect_attempt', handleReconnectAttempt);
+        manager.off('reconnect', handleReconnect);
+        manager.off('reconnect_failed', handleReconnectFailed);
+      };
 
       // Error events from server
       this.socket.on('error', (error) => {
@@ -236,6 +254,8 @@ class SocketClient {
   }
 
   disconnect() {
+    this.clearReconnectManagerListeners();
+
     if (this.socket) {
       this.socket.removeAllListeners();
       this.socket.disconnect();

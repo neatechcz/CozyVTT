@@ -859,6 +859,7 @@ export interface TokenMovedEvent {
 // Dice Roll Events
 export interface DiceRollEvent {
   expression: string;
+  characterId?: string;
   characterName?: string;
   purpose?: string;
   secret?: boolean;

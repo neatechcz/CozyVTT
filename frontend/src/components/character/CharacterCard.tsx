@@ -12,6 +12,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 interface CharacterCardProps {
   character: Character;
   campaign?: Campaign | null;
+  canManage: boolean;
   onEdit: (character: Character) => void;
   onCopy: (character: Character) => void;
   onDelete: (character: Character) => void;
@@ -22,6 +23,7 @@ interface CharacterCardProps {
 function CharacterCardInner({
   character,
   campaign,
+  canManage,
   onEdit,
   onCopy,
   onDelete,
@@ -131,23 +133,23 @@ function CharacterCardInner({
                     Edit Character
                   </button>
 
-                  <button
+                  {canManage && <button
                     onClick={(e) => handleMenuItemClick(e, () => onCopy(character))}
                     className="w-full px-4 py-2 text-left text-sm text-stone-gray hover:bg-moss-green/10
                              flex items-center gap-2 transition-colors"
                   >
                     <Copy className="w-4 h-4" />
                     Copy/Duplicate
-                  </button>
+                  </button>}
 
-                  <button
+                  {canManage && <button
                     onClick={(e) => handleMenuItemClick(e, () => onAssign(character))}
                     className="w-full px-4 py-2 text-left text-sm text-stone-gray hover:bg-moss-green/10
                              flex items-center gap-2 transition-colors"
                   >
                     <LinkIcon className="w-4 h-4" />
                     {campaign ? 'Reassign Campaign' : 'Assign to Campaign'}
-                  </button>
+                  </button>}
 
                   <button
                     onClick={(e) => handleMenuItemClick(e, () => onExport(character))}
@@ -158,16 +160,16 @@ function CharacterCardInner({
                     Export as JSON
                   </button>
 
-                  <div className="border-t border-moss-green/20 my-1" />
+                  {canManage && <div className="border-t border-moss-green/20 my-1" />}
 
-                  <button
+                  {canManage && <button
                     onClick={(e) => handleMenuItemClick(e, () => onDelete(character))}
                     className="w-full px-4 py-2 text-left text-sm text-spirit-red hover:bg-spirit-red/10
                              flex items-center gap-2 transition-colors"
                   >
                     <Trash2 className="w-4 h-4" />
                     Delete Character
-                  </button>
+                  </button>}
                 </div>
               </motion.div>
             )}
