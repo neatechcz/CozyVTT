@@ -9,6 +9,7 @@ import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import { sessionConfig } from './config/session';
+import { trustProxyHops } from './config/proxy';
 import { requireSetupComplete } from './middleware/setup';
 import setupRoutes from './routes/setup';
 import authRoutes from './routes/auth';
@@ -29,12 +30,15 @@ const app = express();
 const httpServer = createServer(app);
 const PORT = process.env.PORT || 4000;
 
-// Trust the first proxy hop (Nginx).
+// Trust the reverse-proxy hops in front of the backend (default 1: one Nginx).
 // Required so that:
 //   - express-rate-limit can read X-Forwarded-For for accurate IP identification
 //   - Session cookies are issued with secure:true when the request arrives over HTTPS
 //   - req.protocol reflects https rather than http
-app.set('trust proxy', 1);
+// Set TRUST_PROXY_HOPS to the number of proxies that append X-Forwarded-For
+// (host Nginx + gateway = 2 in deploy/docker-compose.yml); a value lower than
+// the real number of hops makes every client share one rate-limit bucket.
+app.set('trust proxy', trustProxyHops(process.env.TRUST_PROXY_HOPS));
 
 // ============================================
 // SECURITY MIDDLEWARE
