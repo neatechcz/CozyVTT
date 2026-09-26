@@ -46,6 +46,33 @@ const authLimiter = rateLimit({
 });
 
 /**
+ * Login rate limiting: 5 failed attempts per 15 minutes per client IP.
+ * Successful logins are not counted, so legitimate re-logins (e.g. the MCP
+ * sidecar logging in on every restart) never lock an account out, while
+ * password guessing is limited exactly as before.
+ */
+export const loginLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // 5 failed attempts per window
+  skipSuccessfulRequests: true,
+  message: 'Too many authentication attempts, please try again later',
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+/**
+ * Loose cap on all login requests, successful ones included, so one valid
+ * account cannot be used to hammer bcrypt and the session table.
+ */
+export const loginVolumeLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 30, // 30 login requests per window, whatever the outcome
+  message: 'Too many authentication attempts, please try again later',
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+/**
  * POST /api/auth/register
  * Register a new user account
  * First user automatically becomes ADMIN
@@ -136,7 +163,7 @@ router.post('/register', authLimiter, async (req: Request, res: Response) => {
  * POST /api/auth/login
  * Authenticate user and create session
  */
-router.post('/login', authLimiter, async (req: Request, res: Response) => {
+router.post('/login', loginVolumeLimiter, loginLimiter, async (req: Request, res: Response) => {
   try {
     const { email, password, rememberMe } = req.body;
 
