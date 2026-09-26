@@ -6,9 +6,12 @@ import { useState } from 'react';
 import { X } from 'lucide-react';
 import { useFocusTrap } from '@/hooks/useFocusTrap';
 import { useToast } from '@/contexts/ToastContext';
+import { useWebSocket } from '@/contexts/WebSocketContext';
+import { useLiveCharacterSync } from '@/hooks/useLiveCharacterSync';
 import { api } from '@/services/api';
-import type { Character } from '@/types';
+import { GameSystem, type Character } from '@/types';
 import ConfirmDialog from '@/components/common/ConfirmDialog';
+import SheetResetPanel from './SheetResetPanel';
 
 // Import editor components
 import DnD5eCharacterEditor from '../character-sheets/dnd5e/DnD5eCharacterEditor';
@@ -30,6 +33,12 @@ export default function CharacterSheetEditorModal({
   const [saving, setSaving] = useState(false);
   const [confirmClose, setConfirmClose] = useState(false);
   const { showToast } = useToast();
+  const { socket } = useWebSocket();
+
+  // Live sync (D&D 5e only): other people's changes flow into the open
+  // editor; saving sends only the changed fields.
+  const isDnd5e = character.gameSystem === GameSystem.DND_5E;
+  const liveSync = useLiveCharacterSync({ character, socket, isDnd5e });
 
   // Handle save. The editors pass a freshly-uploaded token image URL as the
   // third argument — forward it so the character's token actually updates.
@@ -38,6 +47,30 @@ export default function CharacterSheetEditorModal({
   const handleSave = async (data: any, _showToast?: boolean, tokenImageUrl?: string) => {
     try {
       setSaving(true);
+
+      if (isDnd5e) {
+        const outcome = await liveSync.save(data);
+
+        // The token image is not part of `data` — persist it separately
+        if (tokenImageUrl !== undefined) {
+          await api.updateCharacter(character.id, { tokenImageUrl });
+        }
+
+        if (onSaved) {
+          onSaved();
+        }
+
+        if (outcome.status === 'conflicts') {
+          // Keep the editor open so the user can re-enter the reset fields
+          showToast('Některé změny kolidovaly — viz panel', 'warning');
+          return;
+        }
+
+        showToast('Character saved!', 'success');
+        onClose();
+        return;
+      }
+
       await api.updateCharacter(character.id, {
         data,
         ...(tokenImageUrl !== undefined ? { tokenImageUrl } : {}),
@@ -80,11 +113,19 @@ export default function CharacterSheetEditorModal({
     switch (character.gameSystem) {
       case 'DND_5E':
         return (
-          <DnD5eCharacterEditor
-            character={character}
-            onSave={handleSave}
-            onCancel={handleCancel}
-          />
+          <>
+            <div className="px-4 pt-4 pr-16 empty:hidden">
+              <SheetResetPanel resets={liveSync.resets} onDismiss={liveSync.dismissResets} />
+            </div>
+            <DnD5eCharacterEditor
+              character={character}
+              onSave={handleSave}
+              onCancel={handleCancel}
+              externalData={liveSync.externalData}
+              externalDataVersion={liveSync.externalDataVersion}
+              onLocalChange={liveSync.reportLocalChange}
+            />
+          </>
         );
       case 'PATHFINDER_2E':
         return (

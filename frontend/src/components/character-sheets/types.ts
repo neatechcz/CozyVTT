@@ -27,4 +27,13 @@ export interface CharacterSheetProps {
 
   /** Callback when edit mode is cancelled */
   onCancel?: () => void;
+
+  /**
+   * Live sync (D&D 5e editor only; other systems ignore these): data from a
+   * remote update, applied whenever `externalDataVersion` changes, and a
+   * callback reporting every local form change.
+   */
+  externalData?: object;
+  externalDataVersion?: number;
+  onLocalChange?: (data: any, origin: 'user' | 'system') => void;
 }

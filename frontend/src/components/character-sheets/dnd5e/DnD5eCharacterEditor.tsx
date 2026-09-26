@@ -5,7 +5,7 @@
  * color customization, and token upload functionality.
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Swords,
   Package,
@@ -25,6 +25,11 @@ interface DnD5eCharacterEditorProps {
   character: Character;
   onSave: (data: any, showToast?: boolean, tokenImageUrl?: string) => Promise<void>;
   onCancel: () => void;
+  /** Data from a live update (someone else changed the character); applied when `externalDataVersion` changes */
+  externalData?: object;
+  externalDataVersion?: number;
+  /** Called on every form data change; `origin` tells user edits from derived/adopted changes */
+  onLocalChange?: (data: any, origin: 'user' | 'system') => void;
 }
 
 type TabId = 'stats' | 'combat' | 'spells' | 'inventory' | 'features' | 'bio';
@@ -95,12 +100,52 @@ const shouldUseWhiteText = (hexColor: string): boolean => {
 };
 
 /**
+ * Normalize stored character data into the editor's form shape
+ * (ensures nested objects exist). Used on mount and for live updates.
+ */
+const buildFormData = (data: any): any => ({
+  ...data,
+  // Ensure nested objects exist
+  stats: data.stats || {},
+  savingThrows: data.savingThrows || {},
+  skills: data.skills || {},
+  hp: data.hp || { maximum: 0, current: 0, temporary: 0 },
+  deathSaves: data.deathSaves || { successes: 0, failures: 0 },
+  spellcasting: data.spellcasting || {
+    ability: '',
+    spellSaveDC: 0,
+    spellAttackBonus: 0,
+    cantrips: [],
+    slots: {},
+    spells: [],
+  },
+  currency: data.currency || { cp: 0, sp: 0, ep: 0, gp: 0, pp: 0 },
+  inventory: data.inventory || [],
+  attacks: data.attacks || [],
+  hitDice: data.hitDice || [],
+  conditions: data.conditions || [],
+  proficienciesAndLanguages: data.proficienciesAndLanguages || [],
+  // Always use a structured object for proficiencies so the textarea fields work correctly.
+  // If legacy data stored proficiencies as an array, ignore it and start with empty strings.
+  proficiencies: (data.proficiencies && !Array.isArray(data.proficiencies))
+    ? { armor: '', weapons: '', tools: '', languages: '', ...data.proficiencies }
+    : { armor: '', weapons: '', tools: '', languages: '' },
+  featuresAndTraits: data.featuresAndTraits || [],
+  appearance: data.appearance || {},
+  personality: data.personality || {},
+  alliesAndOrganizations: data.alliesAndOrganizations || { name: '', description: '' },
+});
+
+/**
  * DnD5eCharacterEditor - Editable D&D 5e character sheet
  */
 export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
   character,
   onSave,
   onCancel,
+  externalData,
+  externalDataVersion,
+  onLocalChange,
 }) => {
   const [activeTab, setActiveTab] = useState<TabId>('stats');
   const [isSaving, setIsSaving] = useState(false);
@@ -111,38 +156,26 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
   const data = character.data as any;
 
   // Form state - initialize with character data
-  const [formData, setFormData] = useState<any>(() => ({
-    ...data,
-    // Ensure nested objects exist
-    stats: data.stats || {},
-    savingThrows: data.savingThrows || {},
-    skills: data.skills || {},
-    hp: data.hp || { maximum: 0, current: 0, temporary: 0 },
-    deathSaves: data.deathSaves || { successes: 0, failures: 0 },
-    spellcasting: data.spellcasting || {
-      ability: '',
-      spellSaveDC: 0,
-      spellAttackBonus: 0,
-      cantrips: [],
-      slots: {},
-      spells: [],
-    },
-    currency: data.currency || { cp: 0, sp: 0, ep: 0, gp: 0, pp: 0 },
-    inventory: data.inventory || [],
-    attacks: data.attacks || [],
-    hitDice: data.hitDice || [],
-    conditions: data.conditions || [],
-    proficienciesAndLanguages: data.proficienciesAndLanguages || [],
-    // Always use a structured object for proficiencies so the textarea fields work correctly.
-    // If legacy data stored proficiencies as an array, ignore it and start with empty strings.
-    proficiencies: (data.proficiencies && !Array.isArray(data.proficiencies))
-      ? { armor: '', weapons: '', tools: '', languages: '', ...data.proficiencies }
-      : { armor: '', weapons: '', tools: '', languages: '' },
-    featuresAndTraits: data.featuresAndTraits || [],
-    appearance: data.appearance || {},
-    personality: data.personality || {},
-    alliesAndOrganizations: data.alliesAndOrganizations || { name: '', description: '' },
-  }));
+  const [formData, setFormData] = useState<any>(() => buildFormData(data));
+
+  // Live updates: replace the form with external data whenever its version
+  // changes (no remount — tab, colour picker and token preview are kept).
+  const appliedExternalVersionRef = useRef(externalDataVersion);
+  useEffect(() => {
+    if (externalDataVersion === undefined || externalDataVersion === appliedExternalVersionRef.current) return;
+    appliedExternalVersionRef.current = externalDataVersion;
+    if (externalData) {
+      setFormData(buildFormData(externalData));
+    }
+  }, [externalDataVersion]);
+
+  // Report every form change; changes made through updateField are the user's.
+  const userEditRef = useRef(false);
+  useEffect(() => {
+    const origin = userEditRef.current ? 'user' : 'system';
+    userEditRef.current = false;
+    onLocalChange?.(formData, origin);
+  }, [formData]);
 
   // Token image state (file will be uploaded on save)
   const [tokenImageFile, setTokenImageFile] = useState<File | null>(null);
@@ -471,6 +504,7 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
 
   // Update form field
   const updateField = (path: string, value: any) => {
+    userEditRef.current = true;
     setFormData((prev: any) => {
       const newData = { ...prev };
       const keys = path.split('.');

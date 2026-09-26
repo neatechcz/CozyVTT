@@ -44,6 +44,28 @@ import type {
   UserPreferences,
 } from '@/types';
 
+/** One field-level change for `PATCH /api/characters/:id/data`. */
+export interface CharacterDataChange {
+  path: string;
+  base: unknown;
+  value: unknown;
+}
+
+export interface CharacterDataConflict {
+  path: string;
+  base: unknown;
+  current: unknown;
+  attempted: unknown;
+}
+
+export interface CharacterPatchResult {
+  character: Character;
+  applied: string[];
+  conflicts: CharacterDataConflict[];
+  /** HTTP status: 200, or 409 when nothing was applied */
+  status: number;
+}
+
 // ============================================
 // API Client Configuration
 // ============================================
@@ -505,6 +527,22 @@ class ApiClient {
   async updateCharacter(id: string, data: UpdateCharacterRequest): Promise<{ message: string; character: Character }> {
     const response = await this.client.put(`/api/characters/${id}`, data);
     return response.data;
+  }
+
+  /**
+   * Field-level update of character data. Only the listed paths are written;
+   * a change whose `base` no longer matches the server is reported in
+   * `conflicts`. 409 (nothing applied) is returned, not thrown — callers
+   * handle it like a partial success. Other errors (400 validation, 403…)
+   * throw as usual.
+   */
+  async patchCharacterData(id: string, changes: CharacterDataChange[]): Promise<CharacterPatchResult> {
+    const response = await this.client.patch<Omit<CharacterPatchResult, 'status'>>(
+      `/api/characters/${id}/data`,
+      { changes },
+      { validateStatus: (status) => (status >= 200 && status < 300) || status === 409 },
+    );
+    return { ...response.data, status: response.status };
   }
 
   async deleteCharacter(id: string): Promise<{ message: string }> {
