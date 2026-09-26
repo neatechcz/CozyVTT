@@ -21,6 +21,7 @@ jest.mock('../../config/database', () => ({
     map: { findUnique: jest.fn() },
     campaignMembership: { findMany: jest.fn() },
     campaign: { findUnique: jest.fn() },
+    character: { findMany: jest.fn(async () => []) },
   },
 }));
 

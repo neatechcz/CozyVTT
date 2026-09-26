@@ -19,6 +19,7 @@ jest.mock('../../config/database', () => ({
     map: { findUnique: jest.fn(), update: jest.fn() },
     campaignMembership: { findMany: jest.fn() },
     campaign: { findUnique: jest.fn() },
+    character: { findMany: jest.fn(async () => []) },
   },
 }));
 
@@ -327,5 +328,94 @@ describe('token.move.start / token.move', () => {
     await moveFrame(dm, 'orc', 3, 7);
     expect(receivedTokenIds(alice)).toEqual(['orc']);
     expect(receivedTokenIds(bob)).toEqual(['orc']);
+  });
+});
+
+describe('drag frame cost and ordering', () => {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+  function deferred<T>() {
+    let resolve!: (value: T) => void;
+    const promise = new Promise<T>((r) => (resolve = r));
+    return { promise, resolve };
+  }
+
+  function movedXs(s: FakeSocket): number[] {
+    return s.emit.mock.calls.filter(([event]) => event === 'token.moved').map(([, p]) => p.x);
+  }
+
+  it('reads the map once per drag: identical and further frames reuse it', async () => {
+    useMap(true);
+    registerTokenHandlers(io as any, dm as any);
+    await dm.handlers['token.move.start']({ tokenId: 'orc', mapId: MAP_ID });
+    const readsAfterStart = db.map.findUnique.mock.calls.length;
+    const membershipReadsAfterStart = db.campaignMembership.findMany.mock.calls.length;
+
+    for (let i = 0; i < 3; i++) {
+      dm.handlers['token.move']({ tokenId: 'orc', mapId: MAP_ID, x: 3, y: 7 });
+      await sleep(20); // past the 16 ms throttle
+      await flush();
+    }
+    dm.handlers['token.move']({ tokenId: 'orc', mapId: MAP_ID, x: 4, y: 7 });
+    await sleep(20);
+    await flush();
+
+    expect(db.map.findUnique.mock.calls.length).toBe(readsAfterStart);
+    expect(db.campaignMembership.findMany.mock.calls.length).toBe(membershipReadsAfterStart);
+    // Identical frames are sent once.
+    expect(movedXs(alice)).toEqual([3, 4]);
+  });
+
+  it('does not re-send an identical frame', async () => {
+    useMap(false);
+    registerTokenHandlers(io as any, dm as any);
+    dm.handlers['token.move']({ tokenId: 'orc', mapId: MAP_ID, x: 3, y: 7 });
+    await sleep(20);
+    await flush();
+    dm.handlers['token.move']({ tokenId: 'orc', mapId: MAP_ID, x: 3, y: 7 });
+    await sleep(20);
+    await flush();
+
+    expect(movedXs(alice)).toEqual([3]);
+    expect(db.map.findUnique).toHaveBeenCalledTimes(1);
+  });
+
+  it('processes frames one at a time, in order, dropping stale waiting frames', async () => {
+    const slowRead = deferred<unknown>();
+    db.map.findUnique.mockImplementationOnce(() => slowRead.promise);
+    db.map.findUnique.mockResolvedValue(mapWith(false));
+    registerTokenHandlers(io as any, dm as any);
+
+    dm.handlers['token.move']({ tokenId: 'orc', mapId: MAP_ID, x: 1, y: 7 }); // A: in flight, map read hangs
+    await sleep(20);
+    dm.handlers['token.move']({ tokenId: 'orc', mapId: MAP_ID, x: 2, y: 7 }); // B: waits
+    await sleep(20);
+    dm.handlers['token.move']({ tokenId: 'orc', mapId: MAP_ID, x: 3, y: 7 }); // C: replaces B
+    await sleep(20);
+    expect(movedXs(alice)).toEqual([]);
+
+    slowRead.resolve(mapWith(false));
+    await flush();
+
+    expect(movedXs(alice)).toEqual([1, 3]);
+  });
+
+  it('sends the final position after any frame still being processed', async () => {
+    const slowRead = deferred<unknown>();
+    db.map.findUnique.mockImplementationOnce(() => slowRead.promise);
+    db.map.findUnique.mockResolvedValue(mapWith(false));
+    registerTokenHandlers(io as any, dm as any);
+
+    dm.handlers['token.move']({ tokenId: 'orc', mapId: MAP_ID, x: 1, y: 7 }); // in flight
+    await sleep(20);
+    dm.handlers['token.move']({ tokenId: 'orc', mapId: MAP_ID, x: 2, y: 7 }); // waiting: dropped by move.end
+    const end = dm.handlers['token.move.end']({ tokenId: 'orc', mapId: MAP_ID, x: 4, y: 7 });
+    await sleep(5);
+    slowRead.resolve(mapWith(false));
+    await end;
+    await sleep(20);
+    await flush();
+
+    expect(movedXs(alice)).toEqual([1, 4]);
   });
 });

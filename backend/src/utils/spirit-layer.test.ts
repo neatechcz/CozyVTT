@@ -6,7 +6,7 @@
  * raycasting visibility polygon (or tokens controlled by the player themselves).
  */
 
-import { filterTokensByLighting } from './spirit-layer';
+import { filterTokensByLighting, filterTokensForViewer } from './spirit-layer';
 import type { WallSegment } from '../types/walls';
 
 // Minimal token factory
@@ -50,14 +50,13 @@ describe('filterTokensByLighting', () => {
     expect(result).toHaveLength(2);
   });
 
-  it('returns only visible tokens when player has no controlled tokens', () => {
+  it('returns nothing when the player has no controlled tokens and no lights (no vision source)', () => {
     const tokens = [
       makeToken('a', 2, 2),
       { ...makeToken('b', 5, 5), visible: false },
     ];
     const result = filterTokensByLighting(tokens, 'user-nobody', NO_WALLS, MAP_WIDTH, MAP_HEIGHT, GRID_SIZE, true);
-    expect(result).toHaveLength(1);
-    expect(result[0].id).toBe('a');
+    expect(result).toEqual([]);
   });
 
   it('always includes the player\'s own token regardless of sight', () => {
@@ -152,5 +151,102 @@ describe('filterTokensByLighting', () => {
     // Both NPCs visible because combined sight covers the whole map
     expect(result.some((t) => t.id === 'leftNPC')).toBe(true);
     expect(result.some((t) => t.id === 'rightNPC')).toBe(true);
+  });
+});
+
+describe('vision sources and own tokens (fix round 1)', () => {
+  it('gives a player with no vision source only their own tokens (none)', () => {
+    const tokens = [makeToken('a', 2, 2), makeToken('b', 7, 7)];
+    const result = filterTokensByLighting(tokens, 'user-nobody', NO_WALLS, MAP_WIDTH, MAP_HEIGHT, GRID_SIZE, true);
+    expect(result).toEqual([]);
+  });
+
+  it('treats a character-linked token assigned to the player as own: kept and a vision source', () => {
+    const wall = makeWall('wall1', 500, 0, 500, 1000);
+    // Assigned PC token (controlledBy null, as MCP creates it) west of the wall.
+    const pcToken = { ...makeToken('pc', 2, 5, null, 0), characterId: 'char-robin' };
+    const westNpc = makeToken('west', 3, 5);
+    const eastNpc = makeToken('east', 7, 5);
+
+    const result = filterTokensByLighting(
+      [pcToken, westNpc, eastNpc],
+      'alice',
+      [wall],
+      MAP_WIDTH,
+      MAP_HEIGHT,
+      GRID_SIZE,
+      true,
+      [],
+      { ownCharacterIds: new Set(['char-robin']) }
+    );
+
+    expect(result.map((t) => t.id).sort()).toEqual(['pc', 'west']);
+  });
+
+  it('does not treat another player\'s character token as own', () => {
+    const pcToken = { ...makeToken('pc', 2, 5, null, 0), characterId: 'char-other' };
+    const result = filterTokensByLighting(
+      [pcToken, makeToken('npc', 3, 5)],
+      'alice',
+      NO_WALLS,
+      MAP_WIDTH,
+      MAP_HEIGHT,
+      GRID_SIZE,
+      true,
+      [],
+      { ownCharacterIds: new Set(['char-robin']) }
+    );
+    expect(result).toEqual([]);
+  });
+
+  it('keeps own tokens but nothing else when the only vision is an enabled light reaching nothing', () => {
+    const light = { id: 'l', x: 950, y: 950, brightRadius: 0.5, dimRadius: 0.5, color: '#fff', enabled: true };
+    const mine = makeToken('mine', 0, 9, 'user1', 0.01);
+    const result = filterTokensByLighting(
+      [mine, makeToken('far', 5, 5)],
+      'user1',
+      NO_WALLS,
+      MAP_WIDTH,
+      MAP_HEIGHT,
+      GRID_SIZE,
+      true,
+      [light]
+    );
+    expect(result.map((t) => t.id)).toEqual(['mine']);
+  });
+});
+
+describe('filterTokensForViewer', () => {
+  const map = { lightingEnabled: false, wallSegments: [], lights: [], width: 10, height: 10, gridSize: 100 };
+
+  it('gives a non-DM viewer without a userId nothing (fails closed)', () => {
+    expect(filterTokensForViewer([makeToken('a', 1, 1)], map, { role: 'PLAYER', spiritVisible: false })).toEqual([]);
+    expect(
+      filterTokensForViewer([makeToken('a', 1, 1)], { ...map, lightingEnabled: true }, { role: 'SPECTATOR', spiritVisible: false })
+    ).toEqual([]);
+  });
+
+  it('gives a DM every token', () => {
+    const tokens = [makeToken('a', 1, 1), { ...makeToken('b', 2, 2), visible: false }];
+    expect(filterTokensForViewer(tokens, { ...map, lightingEnabled: true }, { role: 'DM', spiritVisible: true })).toHaveLength(2);
+  });
+
+  it('uses the viewer\'s assigned characters as vision sources on a lighting map', () => {
+    const pcToken = { ...makeToken('pc', 2, 5, null, 0), characterId: 'char-robin' };
+    const result = filterTokensForViewer(
+      [pcToken, makeToken('npc', 3, 5)],
+      { ...map, lightingEnabled: true },
+      { role: 'PLAYER', spiritVisible: false, userId: 'alice', characterIds: new Set(['char-robin']) }
+    );
+    expect(result.map((t) => t.id).sort()).toEqual(['npc', 'pc']);
+  });
+
+  it('gives a spectator on a lighting map with no lights nothing', () => {
+    const result = filterTokensForViewer(
+      [makeToken('npc', 3, 5)],
+      { ...map, lightingEnabled: true },
+      { role: 'SPECTATOR', spiritVisible: false, userId: 'watcher' }
+    );
+    expect(result).toEqual([]);
   });
 });

@@ -11,6 +11,7 @@ import { WallSegmentSchema, WallSegmentsArraySchema } from '../../validators/wal
 import type { WallSegment } from '../../types/walls';
 import logger from '../../utils/logger';
 import { mapEditLimiter } from '../shared';
+import { broadcastMapViewChange } from '../utils';
 
 export function registerWallHandlers(io: Server, socket: AuthenticatedSocket): void {
   /**
@@ -49,6 +50,8 @@ export function registerWallHandlers(io: Server, socket: AuthenticatedSocket): v
       await prisma.map.update({ where: { id: mapId }, data: { wallSegments: [...existing, parsed.data] as any } });
 
       io.to(socket.campaignId).emit('wall:added', { mapId, segment: parsed.data });
+      // A new wall can hide tokens from players on a lighting map.
+      await broadcastMapViewChange(socket.campaignId, mapId, { wallSegments: existing });
     } catch (error) {
       logger.error('wall:add failed', { err: error });
       socket.emit('error', { message: 'Failed to add wall segment' });
@@ -82,6 +85,7 @@ export function registerWallHandlers(io: Server, socket: AuthenticatedSocket): v
       await prisma.map.update({ where: { id: mapId }, data: { wallSegments: filtered as any } });
 
       io.to(socket.campaignId).emit('wall:removed', { mapId, segmentId });
+      await broadcastMapViewChange(socket.campaignId, mapId, { wallSegments: existing });
     } catch (error) {
       logger.error('wall:remove failed', { err: error });
       socket.emit('error', { message: 'Failed to remove wall segment' });
@@ -140,10 +144,13 @@ export function registerWallHandlers(io: Server, socket: AuthenticatedSocket): v
         }
       }
 
+      const previous = [...existing];
       existing[idx] = parsed.data;
       await prisma.map.update({ where: { id: mapId }, data: { wallSegments: existing as any } });
 
       io.to(socket.campaignId).emit('wall:updated', { mapId, segment: parsed.data });
+      // An opened or closed door changes what players see on a lighting map.
+      await broadcastMapViewChange(socket.campaignId, mapId, { wallSegments: previous });
     } catch (error) {
       logger.error('wall:update failed', { err: error });
       socket.emit('error', { message: 'Failed to update wall segment' });
@@ -171,7 +178,7 @@ export function registerWallHandlers(io: Server, socket: AuthenticatedSocket): v
         return;
       }
 
-      const map = await prisma.map.findUnique({ where: { id: mapId }, select: { campaignId: true } });
+      const map = await prisma.map.findUnique({ where: { id: mapId }, select: { campaignId: true, wallSegments: true } });
       if (!map || map.campaignId !== socket.campaignId) {
         socket.emit('error', { message: 'Map not found' });
         return;
@@ -180,6 +187,7 @@ export function registerWallHandlers(io: Server, socket: AuthenticatedSocket): v
       await prisma.map.update({ where: { id: mapId }, data: { wallSegments: parsed.data as any } });
 
       io.to(socket.campaignId).emit('walls:replaced', { mapId, segments: parsed.data });
+      await broadcastMapViewChange(socket.campaignId, mapId, { wallSegments: map.wallSegments });
     } catch (error) {
       logger.error('walls:replace failed', { err: error });
       socket.emit('error', { message: 'Failed to replace wall segments' });

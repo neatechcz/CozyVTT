@@ -1,5 +1,5 @@
 import { prisma } from '../config/database';
-import { computeVisibility, isPointVisible } from './serverRaycasting';
+import { computeVisibility, isPointVisible, type VisibilityPolygon } from './serverRaycasting';
 import type { WallSegment, LightSource } from '../types/walls';
 import logger from './logger';
 
@@ -251,10 +251,65 @@ export function filterTokensByRole(
 }
 
 /**
+ * Whether `token` is the viewer's own: controlled by them (`controlledBy`),
+ * or linked (`characterId`) to a character they own or are assigned through
+ * their campaign membership `characterIds` (pass both as `ownCharacterIds`).
+ *
+ * The one ownership rule for dynamic lighting on the server: own tokens are
+ * always visible to the viewer and are their vision sources. The client's
+ * darkness rendering (MapCanvas isOwnToken) uses the same rule.
+ */
+export function isOwnToken(
+  token: { controlledBy?: string | null; characterId?: string | null },
+  userId: string,
+  ownCharacterIds?: ReadonlySet<string>
+): boolean {
+  if (token.controlledBy === userId) return true;
+  return !!(token.characterId && ownCharacterIds?.has(token.characterId));
+}
+
+/**
+ * Visibility polygons of a map's enabled light sources (dim radius). They do
+ * not depend on the viewer, so a broadcast computes them once and passes them
+ * to every viewer's filterTokensByLighting call.
+ */
+export function computeLightPolygons(
+  walls: unknown,
+  mapWidth: number,
+  mapHeight: number,
+  gridSize: number,
+  lights: unknown
+): VisibilityPolygon[] {
+  const wallSegs = (Array.isArray(walls) ? walls : []) as unknown as WallSegment[];
+  const lightSources = (Array.isArray(lights) ? lights : []) as unknown as LightSource[];
+  const mapWidthPx = mapWidth * gridSize;
+  const mapHeightPx = mapHeight * gridSize;
+  // Uses dimRadius (outer edge) — anything within dim range is "visible" for token filtering.
+  // Light positions are already in map-space pixels (Y=0 at top), no flip needed.
+  return lightSources
+    .filter((l) => l.enabled)
+    .map((light) => {
+      const dimRadiusPx = (light.dimRadius ?? light.brightRadius ?? 3) * gridSize;
+      return computeVisibility({ x: light.x, y: light.y }, wallSegs, mapWidthPx, mapHeightPx, dimRadiusPx);
+    });
+}
+
+/** Options of filterTokensByLighting. */
+export interface LightingFilterOptions {
+  /** Character ids the viewer owns or is assigned (see isOwnToken). */
+  ownCharacterIds?: ReadonlySet<string>;
+  /** Precomputed computeLightPolygons() for this map (skips recomputing them). */
+  lightPolygons?: VisibilityPolygon[];
+}
+
+/**
  * Filter tokens by dynamic lighting visibility for a non-DM player.
  *
  * When lightingEnabled is true on a map, players should only
  * receive tokens that are within their character's line of sight.
+ * A viewer's own tokens (isOwnToken) are always kept and are the vision
+ * sources, together with the map's enabled lights. A viewer with no vision
+ * source gets only their own tokens.
  *
  * @param tokens         Tokens already filtered by role/spirit rules
  * @param playerUserId   The player's user ID
@@ -263,6 +318,8 @@ export function filterTokensByRole(
  * @param mapHeight      Map pixel height
  * @param gridSize       Map grid size in pixels (to convert position to map-space)
  * @param lightingEnabled Whether dynamic lighting is active
+ * @param lights         Map light sources
+ * @param options        Own character ids, precomputed light polygons
  * @returns Tokens visible to this player
  */
 export function filterTokensByLighting(
@@ -273,21 +330,16 @@ export function filterTokensByLighting(
   mapHeight: number,
   gridSize: number,
   lightingEnabled: boolean,
-  lights?: unknown
+  lights?: unknown,
+  options: LightingFilterOptions = {}
 ): Token[] {
   if (!lightingEnabled) return tokens;
 
+  const isOwn = (t: Token) => isOwnToken(t, playerUserId, options.ownCharacterIds);
   const wallSegs = (Array.isArray(walls) ? walls : []) as unknown as WallSegment[];
-  const lightSources = (Array.isArray(lights) ? lights : []) as unknown as LightSource[];
-  const enabledLights = lightSources.filter((l) => l.enabled);
 
-  // Find all tokens controlled by this player
-  const myTokens = tokens.filter((t) => t.controlledBy === playerUserId);
-
-  if (myTokens.length === 0 && enabledLights.length === 0) {
-    // No controlled tokens and no lights — only return tokens explicitly marked visible
-    return tokens.filter((t) => t.visible);
-  }
+  // Find all tokens owned by this player — their vision sources
+  const myTokens = tokens.filter(isOwn);
 
   const startMs = Date.now();
   const mapWidthPx = mapWidth * gridSize;
@@ -303,25 +355,20 @@ export function filterTokensByLighting(
     return computeVisibility({ x: cx, y: cy }, wallSegs, mapWidthPx, mapHeightPx, radiusPx);
   });
 
-  // Additive visibility: also compute visibility polygons from each enabled light source.
-  // Uses dimRadius (outer edge) — anything within dim range is "visible" for token filtering.
-  // Light positions are already in map-space pixels (Y=0 at top), no flip needed.
-  for (const light of enabledLights) {
-    const dimRadiusPx = (light.dimRadius ?? light.brightRadius ?? 3) * gridSize;
-    visPolygons.push(
-      computeVisibility({ x: light.x, y: light.y }, wallSegs, mapWidthPx, mapHeightPx, dimRadiusPx)
-    );
-  }
+  // Additive visibility: also the visibility polygons of each enabled light source.
+  const lightPolygons = options.lightPolygons ?? computeLightPolygons(walls, mapWidth, mapHeight, gridSize, lights);
+  visPolygons.push(...lightPolygons);
 
   const elapsed = Date.now() - startMs;
   if (elapsed > 50) {
-    logger.warn(`[lighting] filterTokensByLighting took ${elapsed}ms for userId=${playerUserId} (${myTokens.length} tokens, ${enabledLights.length} lights)`);
+    logger.warn(`[lighting] filterTokensByLighting took ${elapsed}ms for userId=${playerUserId} (${myTokens.length} tokens, ${lightPolygons.length} lights)`);
   }
 
-  // Keep tokens that are inside any of the visibility polygons (token or light)
+  // Keep own tokens and tokens inside any of the visibility polygons (token or light).
+  // No vision source at all → only own tokens (none).
   return tokens.filter((t) => {
-    // Always include the player's own tokens
-    if (t.controlledBy === playerUserId) return true;
+    if (isOwn(t)) return true;
+    if (visPolygons.length === 0) return false;
 
     const cx = (t.position.x + (t.size?.width ?? 1) / 2) * gridSize;
     const cy = (mapHeight - 1 - t.position.y + (t.size?.height ?? 1) / 2) * gridSize;
@@ -333,36 +380,121 @@ export function filterTokensByLighting(
 export type TokenViewMap = Pick<
   MapData,
   'lightingEnabled' | 'wallSegments' | 'lights' | 'width' | 'height' | 'gridSize'
->;
+> & {
+  /** Precomputed light polygons (withLightPolygons) shared by every viewer of one broadcast. */
+  lightPolygons?: VisibilityPolygon[];
+};
+
+/**
+ * The map with its light polygons computed once (only when lighting is on),
+ * for a broadcast that filters the same map for many viewers.
+ */
+export function withLightPolygons<T extends TokenViewMap>(map: T): T {
+  if (!map.lightingEnabled || map.lightPolygons) return map;
+  return {
+    ...map,
+    lightPolygons: computeLightPolygons(map.wallSegments, map.width, map.height, map.gridSize, map.lights),
+  };
+}
+
+/** Who is looking at a map: the inputs of one viewer's token view. */
+export interface TokenViewer {
+  role: string;
+  spiritVisible: boolean;
+  userId?: string;
+  /** Character ids the viewer owns or is assigned (isOwnToken). */
+  characterIds?: ReadonlySet<string>;
+}
 
 /**
  * The tokens one viewer may receive from a map: filterTokensByRole, then —
- * for a non-DM viewer with a userId on a map with dynamic lighting —
- * filterTokensByLighting from that viewer's line of sight.
+ * for a non-DM viewer on a map with dynamic lighting — filterTokensByLighting
+ * from that viewer's line of sight (own tokens per isOwnToken). A non-DM
+ * viewer without a userId gets nothing (fails closed).
  *
  * The single token pipeline shared by filterMapData (map GET, map.changed),
- * the REST token-event broadcast (broadcastTokenEvent) and the token
- * movement socket handlers (token.move.start / token.move / token.move.end).
+ * the REST token-event broadcast (broadcastTokenEvent), the map view-change
+ * broadcast (broadcastMapViewChange) and the token movement socket handlers.
  */
-export function filterTokensForViewer(
-  tokens: unknown,
-  map: TokenViewMap,
-  userRole: string,
-  spiritVisible: boolean,
-  userId?: string
-): Token[] {
-  const roleFiltered = filterTokensByRole(tokens, userRole, spiritVisible);
-  if (userRole === 'DM' || !map.lightingEnabled || !userId) return roleFiltered;
+export function filterTokensForViewer(tokens: unknown, map: TokenViewMap, viewer: TokenViewer): Token[] {
+  if (viewer.role === 'DM') return filterTokensByRole(tokens, 'DM', true);
+  if (!viewer.userId) return [];
+  const roleFiltered = filterTokensByRole(tokens, viewer.role, viewer.spiritVisible);
+  if (!map.lightingEnabled) return roleFiltered;
   return filterTokensByLighting(
     roleFiltered,
-    userId,
+    viewer.userId,
     map.wallSegments,
     map.width,
     map.height,
     map.gridSize,
     true,
-    map.lights
+    map.lights,
+    { ownCharacterIds: viewer.characterIds, lightPolygons: map.lightPolygons }
   );
+}
+
+/**
+ * Character ids each user owns in the campaign or is assigned through their
+ * campaign membership `characterIds` — the `characterIds` of TokenViewer.
+ */
+export async function getOwnCharacterIdsBatch(
+  campaignId: string,
+  userIds: string[]
+): Promise<Map<string, Set<string>>> {
+  const result = new Map<string, Set<string>>();
+  const uniqueIds = [...new Set(userIds)];
+  if (uniqueIds.length === 0) return result;
+  for (const id of uniqueIds) result.set(id, new Set());
+
+  const [memberships, characters] = await Promise.all([
+    prisma.campaignMembership.findMany({
+      where: { campaignId, userId: { in: uniqueIds } },
+      select: { userId: true, characterIds: true },
+    }),
+    prisma.character.findMany({
+      where: { campaignId, userId: { in: uniqueIds } },
+      select: { id: true, userId: true },
+    }),
+  ]);
+  for (const m of memberships ?? []) {
+    for (const id of m.characterIds ?? []) result.get(m.userId)?.add(id);
+  }
+  for (const c of characters ?? []) result.get(c.userId)?.add(c.id);
+  return result;
+}
+
+/**
+ * Resolve TokenViewer inputs (spirit visibility, own characters) for the
+ * given sockets' users in one batch. DMs need neither.
+ */
+export async function getTokenViewersFor<S extends { role?: string; userId?: string }>(
+  campaignId: string,
+  sockets: S[]
+): Promise<Array<{ socket: S; viewer: TokenViewer }>> {
+  const playerIds = sockets
+    .filter((s) => s.role !== 'DM' && s.userId)
+    .map((s) => s.userId as string);
+  const [visibility, characterIds] = playerIds.length
+    ? await Promise.all([getSpiritVisibilityBatch(campaignId, playerIds), getOwnCharacterIdsBatch(campaignId, playerIds)])
+    : [new Map<string, boolean>(), new Map<string, Set<string>>()];
+  return sockets.map((socket) => ({
+    socket,
+    viewer:
+      socket.role === 'DM'
+        ? { role: 'DM', spiritVisible: true, userId: socket.userId }
+        : {
+            role: socket.role ?? 'SPECTATOR',
+            spiritVisible: !!(socket.userId && visibility.get(socket.userId)),
+            userId: socket.userId,
+            characterIds: socket.userId ? characterIds.get(socket.userId) : undefined,
+          },
+  }));
+}
+
+/** Cache key of a viewer's token view (a user's sockets share one computation). */
+export function tokenViewerKey(viewer: TokenViewer): string {
+  return `${viewer.role}|${viewer.spiritVisible}|${viewer.userId ?? ''}`;
 }
 
 /** How one viewer's token view changed between two filtered views. */
@@ -377,20 +509,22 @@ export interface TokenViewDiff<T extends { id: string }> {
 
 /**
  * Compare a viewer's filtered token view before and after a change to one
- * token (`tokenId`). Other tokens can enter or leave the view too — e.g. when
- * the changed token is the viewer's own and their line of sight moved.
+ * token (`tokenId`; null when no token changed, e.g. a wall or light did).
+ * Other tokens can enter or leave the view too — e.g. when the changed token
+ * is the viewer's own and their line of sight moved.
  */
 export function diffTokenViews<T extends { id: string }>(
   before: T[],
   after: T[],
-  tokenId: string
+  tokenId: string | null
 ): TokenViewDiff<T> {
   const beforeIds = new Set(before.map((t) => t.id));
   const afterIds = new Set(after.map((t) => t.id));
-  const eventAfter = after.find((t) => t.id === tokenId);
+  const eventAfter = tokenId === null ? undefined : after.find((t) => t.id === tokenId);
+  const seenBefore = tokenId !== null && beforeIds.has(tokenId);
   const eventToken: TokenViewDiff<T>['eventToken'] = eventAfter
-    ? { kind: beforeIds.has(tokenId) ? 'updated' : 'added', token: eventAfter }
-    : beforeIds.has(tokenId)
+    ? { kind: seenBefore ? 'updated' : 'added', token: eventAfter }
+    : seenBefore
       ? { kind: 'removed' }
       : null;
   return {
@@ -419,9 +553,15 @@ export function filterMapData(
   mapData: MapData,
   userRole: string,
   spiritVisible: boolean,
-  userId?: string
+  userId?: string,
+  characterIds?: ReadonlySet<string>
 ): MapData & { tokens: Token[] } {
-  const filteredTokens = filterTokensForViewer(mapData.tokens, mapData, userRole, spiritVisible, userId);
+  const filteredTokens = filterTokensForViewer(mapData.tokens, mapData, {
+    role: userRole,
+    spiritVisible,
+    userId,
+    characterIds,
+  });
 
   return {
     ...mapData,
