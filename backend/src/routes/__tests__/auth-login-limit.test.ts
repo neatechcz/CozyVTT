@@ -4,7 +4,7 @@ import request from 'supertest';
 jest.mock('../../config/database', () => ({ prisma: {} }));
 jest.mock('../../services/email', () => ({ isSmtpConfigured: jest.fn(), sendPasswordResetEmail: jest.fn() }));
 
-import authRouter, { loginLimiter } from '../auth';
+import authRouter, { loginLimiter, loginVolumeLimiter } from '../auth';
 import { trustProxyHops } from '../../config/proxy';
 
 /** Stand-in login: 200 for the right password, 401 otherwise, behind the real limiter. */
@@ -26,6 +26,18 @@ describe('login rate limiter', () => {
     const layer = (authRouter as unknown as { stack: Array<{ route?: { path: string; methods: Record<string, boolean>; stack: Array<{ handle: unknown }> } }> })
       .stack.find((l) => l.route?.path === '/login' && l.route.methods.post);
     expect(layer?.route?.stack.map((s) => s.handle)).toContain(loginLimiter);
+    expect(layer?.route?.stack.map((s) => s.handle)).toContain(loginVolumeLimiter);
+  });
+
+  it('caps all login requests, successful ones included, at 30 per window', async () => {
+    const a = express();
+    a.post('/login', loginVolumeLimiter, (_req, res) => { res.sendStatus(200); });
+    const codes: number[] = [];
+    for (let i = 0; i < 31; i++) codes.push((await request(a).post('/login')).status);
+    expect(codes.slice(0, 30).every((c) => c === 200)).toBe(true);
+    expect(codes[30]).toBe(429);
+    await loginVolumeLimiter.resetKey('::ffff:127.0.0.1');
+    await loginVolumeLimiter.resetKey('127.0.0.1');
   });
 
   it('never counts successful logins (e.g. MCP restarts)', async () => {
