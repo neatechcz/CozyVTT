@@ -11,6 +11,8 @@ import {
   getAtPath,
   isSafePath,
   isSafeSegment,
+  PathBlockedError,
+  resolvePath,
   setAtPath,
 } from '../character-paths';
 
@@ -110,6 +112,35 @@ describe('character-paths', () => {
     });
   });
 
+  describe('resolvePath', () => {
+    test('finds existing values', () => {
+      expect(resolvePath({ hp: { current: 3 } }, 'hp.current')).toEqual({ kind: 'value', value: 3 });
+      expect(resolvePath({ spellcasting: null }, 'spellcasting')).toEqual({ kind: 'value', value: null });
+      expect(resolvePath({ inventory: ['a'] }, 'inventory')).toEqual({ kind: 'value', value: ['a'] });
+    });
+
+    test('reports missing keys and missing intermediates as missing', () => {
+      expect(resolvePath({ hp: { current: 3 } }, 'hp.temporary')).toEqual({ kind: 'missing' });
+      expect(resolvePath({}, 'spellcasting.slots.1.expended')).toEqual({ kind: 'missing' });
+      expect(resolvePath({ hp: undefined }, 'hp.current')).toEqual({ kind: 'missing' });
+      expect(resolvePath({}, 'toString')).toEqual({ kind: 'missing' });
+    });
+
+    test('reports a path that passes through an array, null or primitive as blocked', () => {
+      expect(resolvePath({ inventory: ['a', 'b'] }, 'inventory.0')).toEqual({
+        kind: 'blocked',
+        prefix: 'inventory',
+        value: ['a', 'b'],
+      });
+      expect(resolvePath({ spellcasting: null }, 'spellcasting.ability')).toEqual({
+        kind: 'blocked',
+        prefix: 'spellcasting',
+        value: null,
+      });
+      expect(resolvePath({ a: { b: 5 } }, 'a.b.c.d')).toEqual({ kind: 'blocked', prefix: 'a.b', value: 5 });
+    });
+  });
+
   describe('setAtPath', () => {
     test('sets a nested value without mutating the input', () => {
       const input = { hp: { current: 3, maximum: 7 }, name: 'Robin' };
@@ -131,6 +162,18 @@ describe('character-paths', () => {
         spellcasting: { slots: { 1: { expended: 1 } } },
       });
       expect(input).toEqual({ name: 'Robin' });
+    });
+
+    test('refuses to write into or through arrays, null and primitives', () => {
+      const input = { inventory: ['a'], spellcasting: null, hp: 3 };
+      expect(() => setAtPath(input, 'inventory.0', 'b')).toThrow(PathBlockedError);
+      expect(() => setAtPath(input, 'spellcasting.ability', 'INT')).toThrow(PathBlockedError);
+      expect(() => setAtPath(input, 'hp.current', 1)).toThrow(PathBlockedError);
+      expect(input).toEqual({ inventory: ['a'], spellcasting: null, hp: 3 });
+    });
+
+    test('ignores inherited Object.prototype members when creating intermediates', () => {
+      expect(setAtPath({}, 'toString.x', 1)).toEqual({ toString: { x: 1 } });
     });
 
     test('replaces a whole array leaf', () => {

@@ -2,7 +2,8 @@ import { Prisma, PrismaClient } from '@prisma/client';
 import { z } from 'zod';
 import { GameSystem } from '../game-systems';
 import { ValidationResult } from '../validators/game-systems';
-import { deepEqual, getAtPath, isPlainObject, isSafePath, setAtPath } from '../utils/character-paths';
+import { deepEqual, isPlainObject, isSafePath, resolvePath, setAtPath } from '../utils/character-paths';
+import { withCharacterRowLock } from './characterLock';
 
 /**
  * Character Field-Level PATCH
@@ -12,7 +13,6 @@ import { deepEqual, getAtPath, isPlainObject, isSafePath, setAtPath } from '../u
  */
 
 export const MAX_CHANGES = 200;
-export const MAX_ATTEMPTS = 3;
 
 export interface Change {
   path: string;
@@ -42,10 +42,23 @@ export class TooManyChangesError extends Error {
 }
 
 /**
+ * The value a conflict reports as `current`: the value at the path, or — when
+ * the path is blocked by an existing array / null / primitive — that value.
+ */
+function currentForConflict(data: unknown, path: string): unknown {
+  const resolved = resolvePath(data, path);
+  if (resolved.kind === 'missing') return undefined;
+  return resolved.value;
+}
+
+/**
  * Apply changes in order. A change applies when the current value at its path
  * deep-equals `base`; when the current value already equals `value` it counts
- * as applied (idempotent retry); otherwise it is a conflict. Changes are
- * evaluated against the data as modified by the preceding changes.
+ * as applied (idempotent retry); otherwise it is a conflict. A path that
+ * passes through an existing array, `null` or primitive is always a conflict
+ * whose `current` is that blocking value — nothing is ever written into or
+ * through it; only missing intermediate objects are created.
+ * Changes are evaluated against the data as modified by the preceding changes.
  * Throws before applying anything if a path is unsafe or there are too many.
  * Never mutates `data`.
  */
@@ -67,7 +80,13 @@ export function applyCharacterChanges(
   const conflicts: Conflict[] = [];
 
   for (const { path, base, value } of changes) {
-    const current = getAtPath(next, path);
+    const resolved = resolvePath(next, path);
+    if (resolved.kind === 'blocked') {
+      conflicts.push({ path, base, current: resolved.value, attempted: value });
+      continue;
+    }
+
+    const current = resolved.kind === 'value' ? resolved.value : undefined;
     if (deepEqual(current, base)) {
       next = setAtPath(next, path, value);
       applied.push(path);
@@ -82,7 +101,7 @@ export function applyCharacterChanges(
 }
 
 export interface CharacterPatchDeps {
-  prisma: Pick<PrismaClient, 'character'>;
+  prisma: Pick<PrismaClient, '$transaction'>;
   validate: (gameSystem: GameSystem, data: unknown) => ValidationResult<unknown>;
 }
 
@@ -110,11 +129,18 @@ export type PatchCharacterResult =
     };
 
 /**
- * Read → merge → validate → conditional write on `updatedAt`. When the write
- * hits 0 rows (someone else wrote in between) the whole algorithm re-runs on a
- * fresh read, up to MAX_ATTEMPTS; after that every change is a conflict.
+ * Lock the row → read → merge → validate → write, all in one transaction
+ * (withCharacterRowLock), so concurrent PATCH / PUT / HP writers serialise
+ * and each sees the previous one's result. Broadcast after this resolves,
+ * i.e. after commit.
  * With `atomic`, any conflict aborts the whole change set: nothing is written
  * and `applied` is empty.
+ *
+ * The write keeps the `updatedAt` condition as defence in depth. While the
+ * row lock is held no other UPDATE of the row can commit, so it cannot hit
+ * 0 rows; if it ever does (a future code path that bypasses the lock), every
+ * change is reported as a conflict against a fresh read and the client
+ * re-reads — there is no retry loop.
  */
 export async function patchCharacterData(
   deps: CharacterPatchDeps,
@@ -126,8 +152,8 @@ export async function patchCharacterData(
   // Reject malformed requests before touching the database.
   applyCharacterChanges({}, changes);
 
-  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-    const character = await prisma.character.findUnique({ where: { id }, include: characterInclude });
+  return withCharacterRowLock(prisma, id, async (tx): Promise<PatchCharacterResult> => {
+    const character = await tx.character.findUnique({ where: { id }, include: characterInclude });
     if (!character) {
       return { status: 'not_found' };
     }
@@ -136,13 +162,7 @@ export async function patchCharacterData(
     const result = applyCharacterChanges(currentData, changes);
 
     if (atomic && result.conflicts.length > 0) {
-      return {
-        status: 'ok',
-        written: false,
-        character,
-        applied: [],
-        conflicts: result.conflicts,
-      };
+      return { status: 'ok', written: false, character, applied: [], conflicts: result.conflicts };
     }
 
     if (deepEqual(result.data, currentData)) {
@@ -162,44 +182,40 @@ export async function patchCharacterData(
       }
     }
 
-    const { count } = await prisma.character.updateMany({
+    const { count } = await tx.character.updateMany({
       where: { id, updatedAt: character.updatedAt },
       data: { data: result.data as Prisma.InputJsonValue },
     });
 
-    if (count === 1) {
-      const saved = await prisma.character.findUnique({ where: { id }, include: characterInclude });
-      if (!saved) {
-        return { status: 'not_found' };
-      }
+    const saved = await tx.character.findUnique({ where: { id }, include: characterInclude });
+    if (!saved) {
+      return { status: 'not_found' };
+    }
+
+    if (count !== 1) {
+      const savedData = isPlainObject(saved.data) ? saved.data : {};
       return {
         status: 'ok',
-        written: true,
+        written: false,
         character: saved,
-        applied: result.applied,
-        conflicts: result.conflicts,
+        applied: [],
+        conflicts: changes.map(({ path, base, value }) => ({
+          path,
+          base,
+          current: currentForConflict(savedData, path),
+          attempted: value,
+        })),
       };
     }
-  }
 
-  // Lost the race MAX_ATTEMPTS times: report every change against the latest state.
-  const latest = await prisma.character.findUnique({ where: { id }, include: characterInclude });
-  if (!latest) {
-    return { status: 'not_found' };
-  }
-  const latestData = isPlainObject(latest.data) ? latest.data : {};
-  return {
-    status: 'ok',
-    written: false,
-    character: latest,
-    applied: [],
-    conflicts: changes.map(({ path, base, value }) => ({
-      path,
-      base,
-      current: getAtPath(latestData, path),
-      attempted: value,
-    })),
-  };
+    return {
+      status: 'ok',
+      written: true,
+      character: saved,
+      applied: result.applied,
+      conflicts: result.conflicts,
+    };
+  });
 }
 
 /**

@@ -1,4 +1,4 @@
-import { Router, Response } from 'express';
+import { Router, Response, json } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../middleware/rbac';
 import { authenticated } from '../middleware/compose';
@@ -8,6 +8,7 @@ import { diffPaths, isSafePath } from '../utils/character-paths';
 import { GameSystem } from '../game-systems';
 import { validateCharacterData } from '../validators/game-systems';
 import { CreateCharacterSchema, UpdateCharacterSchema } from '../validators/characters';
+import { withCharacterRowLock } from '../services/characterLock';
 import {
   InvalidPathError,
   MAX_CHANGES,
@@ -24,6 +25,14 @@ const router = Router();
  * Character Management Routes
  * Character Management
  */
+
+/**
+ * Body parser for PATCH /api/characters/:id/data: a full change set (up to
+ * 200 whole-array values) can exceed the global 100kb JSON limit. server.ts
+ * mounts it before the global express.json(), which then skips the
+ * already-parsed body; the route mounts it too (a no-op after the first).
+ */
+export const characterDataPatchBodyParser = json({ limit: '1mb' });
 
 /** PATCH /api/characters/:id/data body */
 const PatchCharacterDataSchema = z.object({
@@ -76,7 +85,10 @@ async function canEditCharacter(
 
 /**
  * Broadcast `character.updated` to the character's campaign (if any).
- * Never throws — a failed broadcast must not fail the request.
+ * Payload: { characterId, character, userId, changedPaths, updatedBy }.
+ * `changedPaths` may contain "" meaning "the whole document changed".
+ * Call only after the write has committed. Never throws — a failed broadcast
+ * must not fail the request.
  */
 async function broadcastCharacterUpdated(
   character: { id: string; campaignId: string | null },
@@ -529,24 +541,43 @@ router.put('/:id', authenticated, async (req: AuthenticatedRequest, res: Respons
       updateData.tokenImageUrl = tokenImageUrl ? normalizeAssetUrl(tokenImageUrl, 'tokens') : null;
     }
 
-    const updatedCharacter = await prisma.character.update({
-      where: { id },
-      data: updateData,
-      include: {
-        campaign: {
-          select: {
-            id: true,
-            name: true,
+    // Read and write under the character row lock (serialised with PATCH and
+    // the HP socket handler); diff against the locked row, not the unlocked
+    // read above, so changes this PUT overwrites show up in changedPaths.
+    const locked = await withCharacterRowLock(prisma, id, async (tx) => {
+      const lockedCharacter = await tx.character.findUnique({ where: { id } });
+      if (!lockedCharacter) return null;
+
+      const updated = await tx.character.update({
+        where: { id },
+        data: updateData,
+        include: {
+          campaign: {
+            select: {
+              id: true,
+              name: true,
+            },
           },
         },
-      },
+      });
+      return { before: lockedCharacter, updated };
     });
 
-    // Broadcast character update to campaign if character is in a campaign
+    if (!locked) {
+      return res.status(404).json({
+        error: 'Not Found',
+        message: 'Character not found',
+      });
+    }
+    const updatedCharacter = locked.updated;
+
+    // Broadcast character update to campaign if character is in a campaign.
+    // changedPaths may contain "" — the whole document changed (its root is
+    // not a path-addressable object); clients must treat that as "reload all".
     await broadcastCharacterUpdated(
       updatedCharacter,
       userId,
-      diffPaths(character.data, updatedCharacter.data)
+      diffPaths(locked.before.data, updatedCharacter.data)
     );
 
     return res.status(200).json({
@@ -573,7 +604,7 @@ router.put('/:id', authenticated, async (req: AuthenticatedRequest, res: Respons
  * Requires: Authentication
  * Authorization: same as PUT (owner OR campaign DM)
  */
-router.patch('/:id/data', authenticated, async (req: AuthenticatedRequest, res: Response) => {
+router.patch('/:id/data', characterDataPatchBodyParser, authenticated, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const userId = req.session.userId!;
     const { id } = req.params;

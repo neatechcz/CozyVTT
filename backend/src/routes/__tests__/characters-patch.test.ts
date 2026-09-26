@@ -4,13 +4,17 @@
  * a mocked WebSocket broadcaster — no database required.
  */
 
-jest.mock('../../config/database', () => ({
-  prisma: {
+jest.mock('../../config/database', () => {
+  const prisma: any = {
+    $queryRaw: jest.fn(),
     character: { findUnique: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
     campaignMembership: { findUnique: jest.fn() },
     user: { findUnique: jest.fn() },
-  },
-}));
+  };
+  // Interactive transaction: the callback gets the same fake client as `tx`.
+  prisma.$transaction = jest.fn(async (fn: (tx: unknown) => Promise<unknown>) => fn(prisma));
+  return { prisma };
+});
 
 jest.mock('../../websocket/utils', () => ({
   broadcastToCampaign: jest.fn(),
@@ -18,7 +22,7 @@ jest.mock('../../websocket/utils', () => ({
 
 import express from 'express';
 import request from 'supertest';
-import characterRoutes from '../characters';
+import characterRoutes, { characterDataPatchBodyParser } from '../characters';
 import { prisma } from '../../config/database';
 import { broadcastToCampaign } from '../../websocket/utils';
 import { GameSystem } from '../../game-systems';
@@ -37,6 +41,8 @@ type Row = {
 };
 
 const db = prisma as unknown as {
+  $queryRaw: jest.Mock;
+  $transaction: jest.Mock;
   character: { findUnique: jest.Mock; update: jest.Mock; updateMany: jest.Mock };
   campaignMembership: { findUnique: jest.Mock };
   user: { findUnique: jest.Mock };
@@ -90,6 +96,8 @@ function seed(overrides: Partial<Row> = {}): Row {
 
 function buildApp() {
   const app = express();
+  // Same body-parser order as server.ts
+  app.patch('/api/characters/:id/data', characterDataPatchBodyParser);
   app.use(express.json());
   app.use((req, _res, next) => {
     const userId = req.header('x-test-user');
@@ -109,6 +117,9 @@ beforeEach(() => {
   memberships = { [DM]: 'DM', [PLAYER]: 'PLAYER' };
   displayNames = { [OWNER]: 'Václav', [DM]: 'Codex DM', [PLAYER]: 'Player One' };
 
+  // Row lock: no-op by default; tests override it to simulate a writer that
+  // commits while we wait for the lock.
+  db.$queryRaw.mockResolvedValue([]);
   db.character.findUnique.mockImplementation(async ({ where, include }: any) => {
     const row = rows.get(where.id);
     if (!row) return null;
@@ -345,25 +356,66 @@ describe('PATCH /api/characters/:id/data', () => {
     expect((await patch(null, { changes: [] })).status).toBe(401);
   });
 
-  test('retries on a concurrent write and keeps the other writer\'s change', async () => {
+  test('locks the row and reads under the lock: a change committed while waiting is kept', async () => {
     seed();
-    const realUpdateMany = db.character.updateMany.getMockImplementation()!;
-    // Simulate another writer landing between our read and our first write.
-    db.character.updateMany.mockImplementationOnce(async (args: any) => {
+    // Another writer commits hp.maximum while this request waits for the lock.
+    db.$queryRaw.mockImplementationOnce(async () => {
       const row = rows.get('char-1')!;
       rows.set('char-1', {
         ...row,
         data: { ...row.data, hp: { ...(row.data.hp as object), maximum: 12 } },
         updatedAt: nextTime(),
       });
-      return realUpdateMany(args);
+      return [];
     });
 
     const res = await patch(OWNER, { changes: [{ path: 'hp.current', base: 10, value: 6 }] });
 
     expect(res.status).toBe(200);
-    expect(db.character.updateMany).toHaveBeenCalledTimes(2);
+    expect(db.$transaction).toHaveBeenCalledTimes(1);
+    expect(db.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      db.character.updateMany.mock.invocationCallOrder[0]
+    );
+    expect(db.character.updateMany).toHaveBeenCalledTimes(1);
     expect(rows.get('char-1')!.data.hp).toEqual({ maximum: 12, current: 6, temporary: 0 });
+  });
+
+  test('a path through an array or null is a 409 conflict showing the blocking value', async () => {
+    seed({
+      data: {
+        ...(getBlankCharacterTemplate(GameSystem.DND_5E) as unknown as Record<string, unknown>),
+        inventory: [{ name: 'Rope', quantity: 1 }],
+        spellcasting: null,
+      },
+    });
+
+    const res = await patch(OWNER, {
+      changes: [
+        { path: 'inventory.0', value: { name: 'Torch', quantity: 1 } },
+        { path: 'spellcasting.ability', value: 'INT' },
+      ],
+    });
+
+    expect(res.status).toBe(409);
+    expect(res.body.applied).toEqual([]);
+    expect(res.body.conflicts).toEqual([
+      { path: 'inventory.0', current: [{ name: 'Rope', quantity: 1 }], attempted: { name: 'Torch', quantity: 1 } },
+      { path: 'spellcasting.ability', current: null, attempted: 'INT' },
+    ]);
+    expect(db.character.updateMany).not.toHaveBeenCalled();
+  });
+
+  test('accepts a ~200 kB body (1mb limit on this route only)', async () => {
+    const row = seed();
+    const backstory = 'x'.repeat(200 * 1024);
+
+    const res = await patch(OWNER, {
+      changes: [{ path: 'backstory', base: row.data.backstory, value: backstory }],
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.applied).toEqual(['backstory']);
+    expect(rows.get('char-1')!.data.backstory).toHaveLength(200 * 1024);
   });
 
   test('uses "Unknown" when the updating user has no display name record', async () => {
@@ -412,6 +464,39 @@ describe('PUT /api/characters/:id', () => {
       updatedBy: { userId: DM, displayName: 'Codex DM' },
     });
     expect([...payload.changedPaths].sort()).toEqual(['hp.current', 'inventory']);
+  });
+
+  test('diffs against the row read under the lock, not the earlier unlocked read', async () => {
+    const row = seed();
+    const data = clone(row.data) as any; // client's copy: temporary 0
+    data.hp.current = 2;
+    // Another writer commits hp.temporary while this PUT waits for the lock;
+    // the whole-document PUT reverts it, so it must appear in changedPaths.
+    db.$queryRaw.mockImplementationOnce(async () => {
+      const current = rows.get('char-1')!;
+      rows.set('char-1', {
+        ...current,
+        data: { ...current.data, hp: { ...(current.data.hp as object), temporary: 4 } },
+        updatedAt: nextTime(),
+      });
+      return [];
+    });
+
+    const res = await put(OWNER, { data });
+
+    expect(res.status).toBe(200);
+    expect(db.$transaction).toHaveBeenCalledTimes(1);
+    expect(db.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(
+      db.character.update.mock.invocationCallOrder[0]
+    );
+    expect([...broadcast.mock.calls[0][2].changedPaths].sort()).toEqual(['hp.current', 'hp.temporary']);
+  });
+
+  test('keeps the global 100kb JSON limit (413 for a ~200 kB PUT)', async () => {
+    const row = seed();
+    const data = { ...clone(row.data), backstory: 'x'.repeat(200 * 1024) };
+    const res = await put(OWNER, { data });
+    expect(res.status).toBe(413);
   });
 
   test('a name-only update broadcasts empty changedPaths', async () => {

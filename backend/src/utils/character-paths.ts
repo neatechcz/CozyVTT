@@ -89,37 +89,85 @@ function collectDiff(a: unknown, b: unknown, prefix: string, out: string[]): voi
   }
 }
 
+export type PathResolution =
+  | { kind: 'value'; value: unknown }
+  | { kind: 'missing' }
+  | { kind: 'blocked'; prefix: string; value: unknown };
+
+/**
+ * Resolve `path` against `obj`:
+ * - `value`: every segment exists (own keys of plain objects) — its value;
+ * - `missing`: a key on the way (or the last one) is absent or `undefined`,
+ *   so the path could be created without touching any existing value;
+ * - `blocked`: an existing array, `null` or primitive sits at `prefix` before
+ *   the end of the path — the path cannot be read or written through it.
+ */
+export function resolvePath(obj: unknown, path: string): PathResolution {
+  const segments = path.split('.');
+  let current: unknown = obj;
+
+  for (let i = 0; i < segments.length; i++) {
+    if (!isPlainObject(current)) {
+      return { kind: 'blocked', prefix: segments.slice(0, i).join('.'), value: current };
+    }
+    const segment = segments[i];
+    if (!Object.prototype.hasOwnProperty.call(current, segment) || current[segment] === undefined) {
+      return { kind: 'missing' };
+    }
+    current = current[segment];
+  }
+
+  return { kind: 'value', value: current };
+}
+
 /**
  * Read the value at `path`. Only plain objects are traversed (own keys only);
  * traversing through a leaf or a missing key yields `undefined`.
  */
 export function getAtPath(obj: unknown, path: string): unknown {
-  let current: unknown = obj;
-  for (const segment of path.split('.')) {
-    if (!isPlainObject(current) || !Object.prototype.hasOwnProperty.call(current, segment)) {
-      return undefined;
-    }
-    current = current[segment];
+  const resolved = resolvePath(obj, path);
+  return resolved.kind === 'value' ? resolved.value : undefined;
+}
+
+export class PathBlockedError extends Error {
+  constructor(public readonly path: string, public readonly prefix: string) {
+    super(`Path ${JSON.stringify(path)} is blocked by a non-object value at ${JSON.stringify(prefix)}`);
+    this.name = 'PathBlockedError';
   }
-  return current;
 }
 
 /**
  * Return a copy of `obj` with `value` at `path`. Never mutates the input:
  * every object on the path is shallow-copied; untouched branches are shared.
- * Missing or non-plain-object intermediates are replaced by new objects.
- * Callers must check `isSafePath(path)` first.
+ * Only missing (or `undefined`) intermediates are created; an existing array,
+ * `null` or primitive on the way throws PathBlockedError — never written into
+ * or through. Callers must check `isSafePath(path)` first.
  */
 export function setAtPath<T extends Record<string, unknown>>(obj: T, path: string, value: unknown): T {
-  const [head, ...rest] = path.split('.');
+  return setIn(obj, path.split('.'), 0, value) as T;
+}
+
+function setIn(
+  obj: Record<string, unknown>,
+  segments: string[],
+  index: number,
+  value: unknown
+): Record<string, unknown> {
+  const head = segments[index];
   const copy: Record<string, unknown> = { ...obj };
 
-  if (rest.length === 0) {
+  if (index === segments.length - 1) {
     copy[head] = value;
-  } else {
-    const child = isPlainObject(copy[head]) ? (copy[head] as Record<string, unknown>) : {};
-    copy[head] = setAtPath(child, rest.join('.'), value);
+    return copy;
   }
 
-  return copy as T;
+  const child = Object.prototype.hasOwnProperty.call(copy, head) ? copy[head] : undefined;
+  if (child === undefined) {
+    copy[head] = setIn({}, segments, index + 1, value);
+  } else if (isPlainObject(child)) {
+    copy[head] = setIn(child, segments, index + 1, value);
+  } else {
+    throw new PathBlockedError(segments.join('.'), segments.slice(0, index + 1).join('.'));
+  }
+  return copy;
 }

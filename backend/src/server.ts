@@ -14,7 +14,7 @@ import setupRoutes from './routes/setup';
 import authRoutes from './routes/auth';
 import campaignRoutes from './routes/campaigns';
 import userRoutes from './routes/users';
-import characterRoutes from './routes/characters';
+import characterRoutes, { characterDataPatchBodyParser } from './routes/characters';
 import invitationRoutes from './routes/invitations';
 import assetRoutes from './routes/assets';
 import mapRoutes from './routes/maps';
@@ -83,6 +83,10 @@ const generalApiLimiter = rateLimit({
 // BODY PARSING
 // ============================================
 
+// Character field-level PATCH may carry a full change set: 1mb for this
+// route only. It must run before the global parser (default 100kb), which
+// then skips the already-parsed body.
+app.patch('/api/characters/:id/data', characterDataPatchBodyParser);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
