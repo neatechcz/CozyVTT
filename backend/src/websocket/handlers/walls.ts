@@ -49,7 +49,12 @@ export function registerWallHandlers(io: Server, socket: AuthenticatedSocket): v
 
       await prisma.map.update({ where: { id: mapId }, data: { wallSegments: [...existing, parsed.data] as any } });
 
-      io.to(socket.campaignId).emit('wall:added', { mapId, segment: parsed.data });
+      io.to(socket.campaignId).emit('wall:added', {
+        mapId,
+        segment: parsed.data,
+        changedBy: socket.userId,
+        sourceSocketId: socket.id,
+      });
       // A new wall can hide tokens from players on a lighting map.
       await broadcastMapViewChange(socket.campaignId, mapId, { wallSegments: existing });
     } catch (error) {
@@ -84,7 +89,12 @@ export function registerWallHandlers(io: Server, socket: AuthenticatedSocket): v
 
       await prisma.map.update({ where: { id: mapId }, data: { wallSegments: filtered as any } });
 
-      io.to(socket.campaignId).emit('wall:removed', { mapId, segmentId });
+      io.to(socket.campaignId).emit('wall:removed', {
+        mapId,
+        segmentId,
+        changedBy: socket.userId,
+        sourceSocketId: socket.id,
+      });
       await broadcastMapViewChange(socket.campaignId, mapId, { wallSegments: existing });
     } catch (error) {
       logger.error('wall:remove failed', { err: error });
@@ -148,7 +158,12 @@ export function registerWallHandlers(io: Server, socket: AuthenticatedSocket): v
       existing[idx] = parsed.data;
       await prisma.map.update({ where: { id: mapId }, data: { wallSegments: existing as any } });
 
-      io.to(socket.campaignId).emit('wall:updated', { mapId, segment: parsed.data });
+      io.to(socket.campaignId).emit('wall:updated', {
+        mapId,
+        segment: parsed.data,
+        changedBy: socket.userId,
+        sourceSocketId: socket.id,
+      });
       // An opened or closed door changes what players see on a lighting map.
       await broadcastMapViewChange(socket.campaignId, mapId, { wallSegments: previous });
     } catch (error) {
@@ -186,7 +201,12 @@ export function registerWallHandlers(io: Server, socket: AuthenticatedSocket): v
 
       await prisma.map.update({ where: { id: mapId }, data: { wallSegments: parsed.data as any } });
 
-      io.to(socket.campaignId).emit('walls:replaced', { mapId, segments: parsed.data });
+      io.to(socket.campaignId).emit('walls:replaced', {
+        mapId,
+        segments: parsed.data,
+        changedBy: socket.userId,
+        sourceSocketId: socket.id,
+      });
       await broadcastMapViewChange(socket.campaignId, mapId, { wallSegments: map.wallSegments });
     } catch (error) {
       logger.error('walls:replace failed', { err: error });
