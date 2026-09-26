@@ -36,6 +36,8 @@ const PatchCharacterDataSchema = z.object({
       })
     )
     .max(MAX_CHANGES, `At most ${MAX_CHANGES} changes per request`),
+  /** true: any conflict aborts the whole change set (nothing written, 409) */
+  atomic: z.boolean().optional(),
 });
 
 /**
@@ -563,10 +565,11 @@ router.put('/:id', authenticated, async (req: AuthenticatedRequest, res: Respons
 /**
  * PATCH /api/characters/:id/data
  * Field-level compare-and-set update of character data.
- * Body: { changes: [{ path, base, value }] } (max 200)
+ * Body: { changes: [{ path, base, value }] (max 200), atomic?: boolean }
  * 200 { character, applied, conflicts } — 409 same body when nothing applied
- * and there are conflicts — 400 with validationErrors when the merged data
- * fails the game-system schema (nothing written).
+ * and there are conflicts (with atomic: any conflict → nothing written, 409)
+ * — 400 with validationErrors when the merged data fails the game-system
+ * schema (nothing written).
  * Requires: Authentication
  * Authorization: same as PUT (owner OR campaign DM)
  */
@@ -605,7 +608,11 @@ router.patch('/:id/data', authenticated, async (req: AuthenticatedRequest, res: 
     try {
       result = await patchCharacterData(
         { prisma, validate: validateCharacterData },
-        { id, changes: parsed.data.changes.map(({ path, base, value }) => ({ path, base, value })) }
+        {
+          id,
+          changes: parsed.data.changes.map(({ path, base, value }) => ({ path, base, value })),
+          atomic: parsed.data.atomic ?? false,
+        }
       );
     } catch (error) {
       if (error instanceof InvalidPathError || error instanceof TooManyChangesError) {

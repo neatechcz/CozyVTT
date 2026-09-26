@@ -113,13 +113,15 @@ export type PatchCharacterResult =
  * Read → merge → validate → conditional write on `updatedAt`. When the write
  * hits 0 rows (someone else wrote in between) the whole algorithm re-runs on a
  * fresh read, up to MAX_ATTEMPTS; after that every change is a conflict.
+ * With `atomic`, any conflict aborts the whole change set: nothing is written
+ * and `applied` is empty.
  */
 export async function patchCharacterData(
   deps: CharacterPatchDeps,
-  input: { id: string; changes: Change[] }
+  input: { id: string; changes: Change[]; atomic?: boolean }
 ): Promise<PatchCharacterResult> {
   const { prisma, validate } = deps;
-  const { id, changes } = input;
+  const { id, changes, atomic = false } = input;
 
   // Reject malformed requests before touching the database.
   applyCharacterChanges({}, changes);
@@ -132,6 +134,16 @@ export async function patchCharacterData(
 
     const currentData = isPlainObject(character.data) ? character.data : {};
     const result = applyCharacterChanges(currentData, changes);
+
+    if (atomic && result.conflicts.length > 0) {
+      return {
+        status: 'ok',
+        written: false,
+        character,
+        applied: [],
+        conflicts: result.conflicts,
+      };
+    }
 
     if (deepEqual(result.data, currentData)) {
       return {

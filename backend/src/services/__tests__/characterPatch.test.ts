@@ -289,6 +289,83 @@ describe('patchCharacterData', () => {
     expect(result).toMatchObject({ status: 'ok', written: true, applied: ['notes'] });
   });
 
+  test('atomic: one conflict means nothing is written and applied is empty', async () => {
+    const current = row({ hp: { current: 3, maximum: 7 }, notes: 'a' }, t1);
+    const { deps, updateMany, validate } = makeDeps({ reads: [current] });
+
+    const result = await patchCharacterData(deps, {
+      id: 'char-1',
+      atomic: true,
+      changes: [
+        { path: 'notes', base: 'a', value: 'b' }, // would apply
+        { path: 'hp.current', base: 4, value: 1 }, // conflict
+      ],
+    });
+
+    expect(updateMany).not.toHaveBeenCalled();
+    expect(validate).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      status: 'ok',
+      written: false,
+      character: current,
+      applied: [],
+      conflicts: [{ path: 'hp.current', base: 4, current: 3, attempted: 1 }],
+    });
+  });
+
+  test('atomic: without conflicts every change is applied and written', async () => {
+    const saved = row({ hp: { current: 1, maximum: 7 }, notes: 'b' }, t2);
+    const { deps, updateMany } = makeDeps({
+      reads: [row({ hp: { current: 3, maximum: 7 }, notes: 'a' }, t1), saved],
+      writes: [1],
+    });
+
+    const result = await patchCharacterData(deps, {
+      id: 'char-1',
+      atomic: true,
+      changes: [
+        { path: 'notes', base: 'a', value: 'b' },
+        { path: 'hp.current', base: 3, value: 1 },
+      ],
+    });
+
+    expect(updateMany).toHaveBeenCalledWith({
+      where: { id: 'char-1', updatedAt: t1 },
+      data: { data: { hp: { current: 1, maximum: 7 }, notes: 'b' } },
+    });
+    expect(result).toEqual({
+      status: 'ok',
+      written: true,
+      character: saved,
+      applied: ['notes', 'hp.current'],
+      conflicts: [],
+    });
+  });
+
+  test('atomic: a conflict introduced by a concurrent writer aborts the retry', async () => {
+    const first = row({ hp: { current: 3, maximum: 7 }, notes: 'a' }, t1);
+    const second = row({ hp: { current: 2, maximum: 7 }, notes: 'a' }, t2);
+    const { deps, updateMany } = makeDeps({ reads: [first, second], writes: [0] });
+
+    const result = await patchCharacterData(deps, {
+      id: 'char-1',
+      atomic: true,
+      changes: [
+        { path: 'notes', base: 'a', value: 'b' },
+        { path: 'hp.current', base: 3, value: 1 },
+      ],
+    });
+
+    expect(updateMany).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      status: 'ok',
+      written: false,
+      character: second,
+      applied: [],
+      conflicts: [{ path: 'hp.current', base: 3, current: 2, attempted: 1 }],
+    });
+  });
+
   test('propagates InvalidPathError before touching the database', async () => {
     const { deps, findUnique } = makeDeps({ reads: [] });
     await expect(

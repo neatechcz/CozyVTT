@@ -218,6 +218,53 @@ describe('PATCH /api/characters/:id/data', () => {
     expect(broadcast).not.toHaveBeenCalled();
   });
 
+  test('atomic: one conflict → 409, nothing written or broadcast', async () => {
+    const before = seed();
+
+    const res = await patch(OWNER, {
+      atomic: true,
+      changes: [
+        { path: 'hp.temporary', base: 0, value: 5 },
+        { path: 'hp.current', base: 7, value: 3 },
+      ],
+    });
+
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({
+      character: expect.objectContaining({ id: 'char-1' }),
+      applied: [],
+      conflicts: [{ path: 'hp.current', base: 7, current: 10, attempted: 3 }],
+    });
+    expect(db.character.updateMany).not.toHaveBeenCalled();
+    expect(rows.get('char-1')!.data.hp).toEqual({ maximum: 10, current: 10, temporary: 0 });
+    expect(rows.get('char-1')!.updatedAt).toEqual(before.updatedAt);
+    expect(broadcast).not.toHaveBeenCalled();
+  });
+
+  test('atomic: no conflict → 200, all applied and broadcast', async () => {
+    seed();
+
+    const res = await patch(OWNER, {
+      atomic: true,
+      changes: [
+        { path: 'hp.temporary', base: 0, value: 5 },
+        { path: 'hp.current', base: 10, value: 3 },
+      ],
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.applied).toEqual(['hp.temporary', 'hp.current']);
+    expect(res.body.conflicts).toEqual([]);
+    expect(rows.get('char-1')!.data.hp).toEqual({ maximum: 10, current: 3, temporary: 5 });
+    expect(broadcast.mock.calls[0][2].changedPaths).toEqual(['hp.temporary', 'hp.current']);
+  });
+
+  test('400 when atomic is not a boolean', async () => {
+    seed();
+    const res = await patch(OWNER, { atomic: 'yes', changes: [] });
+    expect(res.status).toBe(400);
+  });
+
   test('200 for an idempotent retry (current already equals value)', async () => {
     seed();
 
