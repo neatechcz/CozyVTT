@@ -30,6 +30,7 @@ import api from '@/services/api';
 import type { CreatureTemplate, NpcStatBlock } from '@/types';
 import { TokenType, GameSystem, AssetType, AssetScope } from '@/types';
 import { StatBlockViewer } from './npc-stat-blocks';
+import { statBlockHpFromForm, tokenHpForCreature } from '@/utils/creatureHp';
 import Button from '@/components/ui/Button';
 
 // ============================================
@@ -188,8 +189,8 @@ export default function CreatureLibrary({ isOpen, onClose }: CreatureLibraryProp
       y: Math.floor(currentMap.height / 2),
     };
 
-    // Default HP — DM can adjust after placement via NpcQuickEditor
-    const hpMax = 10;
+    // Stat block average HP (default 10 when absent) — DM can adjust after placement via NpcQuickEditor
+    const hp = tokenHpForCreature(creature.statBlock);
 
     try {
       const tokenPayload = {
@@ -200,7 +201,7 @@ export default function CreatureLibrary({ isOpen, onClose }: CreatureLibraryProp
         type: TokenType.NPC,
         displayMode: creature.displayMode || 'pog',
         disposition: creature.disposition || 'hostile',
-        hp: { current: hpMax, max: hpMax, temp: 0 },
+        hp,
         showHpBar: true,
         visible: true,
         controlledBy: null,
@@ -821,7 +822,7 @@ interface CreatureFormProps {
   onCancel: () => void;
 }
 
-function CreatureForm({ campaignId, gameSystem, editingCreature, onCreated, onEdited, onCancel }: CreatureFormProps) {
+export function CreatureForm({ campaignId, gameSystem, editingCreature, onCreated, onEdited, onCancel }: CreatureFormProps) {
   const isEdit = !!editingCreature;
   const sb = editingCreature?.statBlock;
 
@@ -832,7 +833,8 @@ function CreatureForm({ campaignId, gameSystem, editingCreature, onCreated, onEd
   const [cr, setCr] = useState(editingCreature?.challengeRating ?? sb?.challengeRating ?? '');
   const [ac, setAc] = useState(sb?.ac ?? 10);
   const [speed, setSpeed] = useState(sb?.speed ?? '30 ft.');
-  const [hpMax, setHpMax] = useState(10);
+  const [hpAverage, setHpAverage] = useState(sb?.hp ? String(sb.hp.average) : '');
+  const [hpFormula, setHpFormula] = useState(sb?.hp?.formula ?? '');
   const [str, setStr] = useState(sb?.abilities?.str ?? 10);
   const [dex, setDex] = useState(sb?.abilities?.dex ?? 10);
   const [con, setCon] = useState(sb?.abilities?.con ?? 10);
@@ -909,8 +911,11 @@ function CreatureForm({ campaignId, gameSystem, editingCreature, onCreated, onEd
     const filterPairs = (arr: Array<{ name: string; description: string }>) =>
       arr.filter((p) => p.name.trim() || p.description.trim());
 
+    const hp = statBlockHpFromForm(hpAverage, hpFormula);
+
     const statBlock: NpcStatBlock = {
       ac,
+      ...(hp && { hp }),
       speed,
       abilities: { str, dex, con, int, wis, cha },
       creatureType: creatureType || undefined,
@@ -1073,11 +1078,14 @@ function CreatureForm({ campaignId, gameSystem, editingCreature, onCreated, onEd
           />
         </div>
         <div>
-          <label className="text-[10px] text-stone-gray block mb-0.5">HP Max</label>
+          <label className="text-[10px] text-stone-gray block mb-0.5">HP</label>
           <input
             type="number"
-            value={hpMax}
-            onChange={(e) => setHpMax(parseInt(e.target.value, 10) || 1)}
+            min={1}
+            value={hpAverage}
+            onChange={(e) => setHpAverage(e.target.value)}
+            placeholder="10"
+            aria-label="Hit points average"
             className="input-cozy w-full text-xs"
           />
         </div>
@@ -1090,6 +1098,19 @@ function CreatureForm({ campaignId, gameSystem, editingCreature, onCreated, onEd
             className="input-cozy w-full text-xs"
           />
         </div>
+      </div>
+
+      {/* HP dice */}
+      <div>
+        <label className="text-[10px] text-stone-gray block mb-0.5">HP Dice (optional)</label>
+        <input
+          type="text"
+          value={hpFormula}
+          onChange={(e) => setHpFormula(e.target.value)}
+          placeholder="2d6"
+          aria-label="Hit dice formula"
+          className="input-cozy w-full text-xs"
+        />
       </div>
 
       {/* Ability scores */}

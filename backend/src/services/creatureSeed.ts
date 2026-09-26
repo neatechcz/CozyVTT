@@ -7,13 +7,13 @@
  * See OGL_ATTRIBUTION.md for details.
  */
 
-import { PrismaClient } from '@prisma/client';
+import { Prisma, PrismaClient } from '@prisma/client';
 import { randomUUID } from 'crypto';
 import logger from '../utils/logger';
 
 // ─── Open5e API Types ───────────────────────────────────────────
 
-interface Open5eMonster {
+export interface Open5eMonster {
   slug: string;
   name: string;
   size: string;
@@ -88,7 +88,23 @@ const CR_XP: Record<string, number> = {
 
 // ─── Transform Open5e monster to our stat block ─────────────────
 
-function transformMonster(m: Open5eMonster) {
+/** Hit points as stored in the stat block (matches NpcStatBlock.hp). */
+export type StatBlockHp = {
+  average: number;
+  formula?: string;
+};
+
+function mapHitPoints(m: Open5eMonster): StatBlockHp | undefined {
+  if (typeof m.hit_points !== 'number' || !Number.isFinite(m.hit_points)) return undefined;
+  const formula = typeof m.hit_dice === 'string' ? m.hit_dice.trim() : '';
+  return formula ? { average: m.hit_points, formula } : { average: m.hit_points };
+}
+
+/**
+ * Map one Open5e monster to the CreatureTemplate fields we store.
+ * Pure — no I/O. Exported for unit tests.
+ */
+export function mapOpen5eMonster(m: Open5eMonster) {
   const speedParts = Object.entries(m.speed)
     .map(([type, val]) => (type === 'walk' ? `${val} ft.` : `${type} ${val} ft.`));
   const speedStr = speedParts.join(', ') || '0 ft.';
@@ -107,6 +123,7 @@ function transformMonster(m: Open5eMonster) {
 
   const statBlock = {
     ac: m.armor_class,
+    hp: mapHitPoints(m),
     speed: speedStr,
     abilities: {
       str: m.strength, dex: m.dexterity, con: m.constitution,
@@ -133,7 +150,7 @@ function transformMonster(m: Open5eMonster) {
   };
 
   // Remove undefined keys for clean JSON storage
-  const cleanBlock = JSON.parse(JSON.stringify(statBlock));
+  const cleanBlock = JSON.parse(JSON.stringify(statBlock)) as Record<string, unknown> & { hp?: StatBlockHp };
 
   return {
     name: m.name,
@@ -177,33 +194,83 @@ export interface SeedResult {
   created: number;
   skipped: number;
   alreadyExisted: number;
+  /** Existing SRD templates whose missing `statBlock.hp` was backfilled. */
+  updatedHp: number;
+}
+
+type ExistingSrdTemplate = { id: string; name: string; gameSystem: string | null; statBlock: Prisma.JsonValue };
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 /**
  * Seed the CreatureTemplate table with D&D 5e SRD monsters from Open5e.
- * Safe to call multiple times — skips existing SRD creatures by name.
+ * Safe to call multiple times — skips existing SRD creatures by name, and
+ * backfills `statBlock.hp` on existing SRD templates (same name + game system)
+ * that do not have it yet. Custom templates are never touched.
+ *
+ * `fetchMonsters` is injectable for tests; production uses the Open5e API.
  */
-export async function seedSrdCreatures(prisma: PrismaClient): Promise<SeedResult> {
-  // Check how many SRD creatures already exist
-  const existing = await prisma.creatureTemplate.findMany({
+export async function seedSrdCreatures(
+  prisma: PrismaClient,
+  fetchMonsters: () => Promise<Open5eMonster[]> = fetchAllSrdMonsters,
+): Promise<SeedResult> {
+  // Check which SRD creatures already exist
+  const existing: ExistingSrdTemplate[] = await prisma.creatureTemplate.findMany({
     where: { source: 'srd' },
-    select: { name: true },
+    select: { id: true, name: true, gameSystem: true, statBlock: true },
   });
   const existingNames = new Set(existing.map((e) => e.name));
 
   // Fetch from Open5e
-  const monsters = await fetchAllSrdMonsters();
+  const monsters = await fetchMonsters();
 
   let created = 0;
   let skipped = 0;
+  let updatedHp = 0;
 
   for (const monster of monsters) {
-    if (existingNames.has(monster.name)) {
-      skipped++;
+    const alreadyExists = existingNames.has(monster.name);
+    if (alreadyExists) skipped++;
+
+    // Map per monster — one malformed Open5e entry must not abort the whole seed
+    let data: ReturnType<typeof mapOpen5eMonster>;
+    try {
+      data = mapOpen5eMonster(monster);
+    } catch (err) {
+      logger.error(`Failed to map Open5e monster "${monster?.name}"`, { err: err });
       continue;
     }
 
-    const data = transformMonster(monster);
+    if (alreadyExists) {
+      const hp = data.statBlock.hp;
+      if (!hp) continue;
+
+      // Backfill hp on matching SRD templates that lack it
+      const targets = existing.filter((e) =>
+        e.name === data.name
+        && e.gameSystem === data.gameSystem
+        && isPlainObject(e.statBlock)
+        && e.statBlock.hp == null,
+      );
+      for (const target of targets) {
+        try {
+          const statBlock = { ...(target.statBlock as Record<string, unknown>), hp };
+          await prisma.creatureTemplate.update({
+            where: { id: target.id },
+            data: { statBlock: statBlock as Prisma.InputJsonObject },
+          });
+          target.statBlock = statBlock as Prisma.JsonObject;
+          updatedHp++;
+        } catch (err) {
+          // Log but don't abort — skip problematic entries
+          logger.error(`Failed to backfill hp for "${monster.name}"`, { err: err });
+        }
+      }
+      continue;
+    }
+
     try {
       await prisma.creatureTemplate.create({
         data: {
@@ -215,7 +282,7 @@ export async function seedSrdCreatures(prisma: PrismaClient): Promise<SeedResult
           creatureType: data.creatureType,
           alignment: data.alignment,
           imageUrl: null,
-          statBlock: data.statBlock,
+          statBlock: data.statBlock as Prisma.InputJsonObject,
           size: data.size,
           disposition: data.disposition,
           displayMode: data.displayMode,
@@ -235,6 +302,7 @@ export async function seedSrdCreatures(prisma: PrismaClient): Promise<SeedResult
     created,
     skipped,
     alreadyExisted: existingNames.size,
+    updatedHp,
   };
 }
 

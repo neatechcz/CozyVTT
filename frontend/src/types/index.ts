@@ -89,6 +89,8 @@ export type TokenDisplayMode = 'pog' | 'top-down' | 'full-art';
 export interface NpcStatBlock {
   /** Armor Class / Defense rating */
   ac: number;
+  /** Hit points: average value and optional dice formula, e.g. { average: 7, formula: "2d6" } */
+  hp?: { average: number; formula?: string };
   /** Speed (e.g. "30 ft." or "30 ft., fly 60 ft.") */
   speed: string;
   /** Ability scores */

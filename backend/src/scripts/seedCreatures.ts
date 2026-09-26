@@ -18,6 +18,7 @@ async function main() {
   console.log(`Fetched: ${result.fetched}`);
   console.log(`Created: ${result.created}`);
   console.log(`Skipped (already existed): ${result.skipped}`);
+  console.log(`Hit points backfilled: ${result.updatedHp}`);
   console.log(`Previously in DB: ${result.alreadyExisted}`);
   console.log('\nDone. SRD creatures are available to all campaigns.');
 }
