@@ -13,20 +13,35 @@ import type { WallSegment } from '@/types/walls';
 
 const MAX_HISTORY = 50;
 
+/** Either the next value outright, or an updater computed from the current one. */
+export type WallsUpdate = WallSegment[] | ((current: WallSegment[]) => WallSegment[]);
+
+function resolveUpdate(next: WallsUpdate, current: WallSegment[]): WallSegment[] {
+  return typeof next === 'function' ? (next as (current: WallSegment[]) => WallSegment[])(current) : next;
+}
+
 export interface WallHistoryResult {
   walls: WallSegment[];
   /** Replace current walls and push to history (clears redo stack). */
   push: (next: WallSegment[]) => void;
-  /** Restore walls directly (e.g. from server sync) without pushing to history. */
-  replace: (next: WallSegment[]) => void;
+  /**
+   * Restore walls directly (e.g. from server sync) without pushing to
+   * history. Accepts an updater `(current) => next` — resolved inside the
+   * same `setWs(prev => ...)` functional update, so several `replace` calls
+   * fired back to back (e.g. two events delivered in the same macrotask,
+   * before React re-renders) each see the previous call's result rather than
+   * a stale render-time snapshot.
+   */
+  replace: (next: WallsUpdate) => void;
   /**
    * Restore walls and drop the entire history (undo and redo) — stack
    * becomes `[next]` at idx 0. Used for a map change or a confirmed remote
    * change: existing undo/redo entries predate it and would otherwise
    * resurrect stale walls (and, on undo, re-broadcast them, erasing the
-   * remote change for everyone).
+   * remote change for everyone). Accepts an updater the same way `replace`
+   * does, and composes the same way across calls made in the same tick.
    */
-  reset: (next: WallSegment[]) => void;
+  reset: (next: WallsUpdate) => void;
   undo: () => WallSegment[] | null;
   redo: () => WallSegment[] | null;
   canUndo: boolean;
@@ -54,17 +69,21 @@ export function useWallHistory(initial: WallSegment[]): WallHistoryResult {
   }, []);
 
   // Replace current entry without pushing — used for external sync (e.g. server broadcast).
-  const replace = useCallback((next: WallSegment[]) => {
+  // Resolves an updater against prev.stack[prev.idx] *inside* the functional update, so
+  // consecutive replace() calls in the same tick chain correctly (each sees the last one's result).
+  const replace = useCallback((next: WallsUpdate) => {
     setWs(prev => {
+      const resolved = resolveUpdate(next, prev.stack[prev.idx]);
       const stack = [...prev.stack];
-      stack[prev.idx] = next;
+      stack[prev.idx] = resolved;
       return { ...prev, stack };
     });
   }, []);
 
-  // Reset: drop the whole history and start a fresh single-entry stack.
-  const reset = useCallback((next: WallSegment[]) => {
-    setWs({ stack: [next], idx: 0 });
+  // Reset: drop the whole history and start a fresh single-entry stack. Same
+  // in-functional-update resolution as replace, for the same reason.
+  const reset = useCallback((next: WallsUpdate) => {
+    setWs(prev => ({ stack: [resolveUpdate(next, prev.stack[prev.idx])], idx: 0 }));
   }, []);
 
   // Undo: move idx back by 1. Returns the restored segments (or null if already at start).
