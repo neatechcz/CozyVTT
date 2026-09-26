@@ -20,8 +20,8 @@ import {
 } from 'lucide-react';
 import { Character } from '../../../types';
 import { api } from '../../../services/api';
-import { mergeRemoteUpdate } from '../../../utils/characterMerge';
-import { deepEqual } from '../../../utils/character-paths';
+import { mergeRemoteUpdate, type ResetField } from '../../../utils/characterMerge';
+import { pathsOverlap } from '../../../utils/character-paths';
 
 interface DnD5eCharacterEditorProps {
   character: Character;
@@ -32,8 +32,18 @@ interface DnD5eCharacterEditorProps {
   /** The form data (as last reported) that `externalData` was merged against */
   externalBase?: object;
   externalDataVersion?: number;
-  /** Called on every form data change; `origin` tells user edits from derived/adopted changes */
-  onLocalChange?: (data: any, origin: 'user' | 'system') => void;
+  /**
+   * Called on every form data change; `origin` tells user edits from
+   * derived/adopted changes, `rebaseResets` lists unreported user edits the
+   * last rebase overwrote, `appliedVersion` is the external version the form
+   * includes.
+   */
+  onLocalChange?: (
+    data: any,
+    origin: 'user' | 'system',
+    rebaseResets?: ResetField[],
+    appliedVersion?: number,
+  ) => void;
   /** Called when the editor goes away (cancel, close, switch to view) */
   onDiscardLocalChanges?: () => void;
 }
@@ -169,21 +179,41 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
   // The form object produced by the latest user edit (updateField). A report
   // is the user's iff it carries exactly that object.
   const userObjRef = useRef<any>(null);
+  // Paths the user edited (updateField) since the last user report.
+  const pendingUserPathsRef = useRef<Set<string>>(new Set());
+  // Per form object: resets its rebase produced, and the external version it
+  // includes. Keyed by object so a double-invoked updater cannot double-report
+  // — only the committed object is looked up.
+  const rebaseResetsRef = useRef(new WeakMap<object, ResetField[]>());
+  const formVersionRef = useRef(new WeakMap<object, number>());
+  const committedVersionRef = useRef(externalDataVersion ?? 0);
 
   // Live updates: when the version changes, rebase the CURRENT form onto the
   // external data (no remount — tab, colour picker and token preview are
-  // kept). Edits not yet reported (e.g. a keystroke committed after the
-  // merge was computed) stay on top instead of being overwritten.
+  // kept). Edits not yet reported (a keystroke queued before this rebase)
+  // stay on top; if the remote changed the same field they lose, and that is
+  // reported as a reset so nothing is dropped silently.
   const appliedExternalVersionRef = useRef(externalDataVersion);
   useEffect(() => {
     if (externalDataVersion === undefined || externalDataVersion === appliedExternalVersionRef.current) return;
     appliedExternalVersionRef.current = externalDataVersion;
     if (!externalData) return;
+    const version = externalDataVersion;
     setFormData((prev: any) => {
-      if (!externalBase) return buildFormData(externalData);
-      const next = buildFormData(mergeRemoteUpdate(externalBase as any, prev, externalData as any).data);
-      if (!deepEqual(prev, externalBase)) {
-        userObjRef.current = next; // carries unreported user edits
+      if (!externalBase) {
+        const replaced = buildFormData(externalData);
+        formVersionRef.current.set(replaced, version);
+        return replaced;
+      }
+      const { data: merged, resetFields } = mergeRemoteUpdate(externalBase as any, prev, externalData as any);
+      const next = buildFormData(merged);
+      formVersionRef.current.set(next, version);
+      const userPaths = [...pendingUserPathsRef.current];
+      if (userPaths.length > 0) {
+        // The form still carries unreported user edits: they are the user's.
+        userObjRef.current = next;
+        const lost = resetFields.filter((reset) => userPaths.some((path) => pathsOverlap(path, reset.path)));
+        if (lost.length > 0) rebaseResetsRef.current.set(next, lost);
       }
       return next;
     });
@@ -191,7 +221,13 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
 
   // Report every form change, tagged by origin.
   useEffect(() => {
-    onLocalChange?.(formData, formData === userObjRef.current ? 'user' : 'system');
+    const version = formVersionRef.current.get(formData);
+    if (version !== undefined) committedVersionRef.current = version;
+    const isUser = formData === userObjRef.current;
+    if (isUser) pendingUserPathsRef.current = new Set();
+    const rebaseResets = rebaseResetsRef.current.get(formData);
+    rebaseResetsRef.current.delete(formData);
+    onLocalChange?.(formData, isUser ? 'user' : 'system', rebaseResets, committedVersionRef.current);
   }, [formData]);
 
   // Unsaved edits die with the editor (cancel, close, back to view mode).
@@ -542,7 +578,14 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
         current = current[keys[i]];
       }
       current[keys[keys.length - 1]] = value;
-      userObjRef.current = newData; // tags this form object as a user edit
+      // Tag this form object as a user edit; carry what a rebase earlier in
+      // the same render attached to `prev`.
+      userObjRef.current = newData;
+      pendingUserPathsRef.current.add(path);
+      const carriedResets = rebaseResetsRef.current.get(prev);
+      if (carriedResets) rebaseResetsRef.current.set(newData, carriedResets);
+      const carriedVersion = formVersionRef.current.get(prev);
+      if (carriedVersion !== undefined) formVersionRef.current.set(newData, carriedVersion);
       return newData;
     });
   };

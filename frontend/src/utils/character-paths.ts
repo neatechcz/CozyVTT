@@ -56,6 +56,11 @@ export function deepEqual(a: unknown, b: unknown): boolean {
   return true;
 }
 
+/** Same field, or one contains the other; `""` is the whole document. */
+export function pathsOverlap(a: string, b: string): boolean {
+  return a === '' || b === '' || a === b || a.startsWith(`${b}.`) || b.startsWith(`${a}.`);
+}
+
 /** True when every segment is a safe key and the path is non-empty. */
 export function isSafePath(path: string): boolean {
   if (typeof path !== 'string' || path === '') return false;

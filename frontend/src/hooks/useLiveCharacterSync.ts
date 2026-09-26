@@ -23,7 +23,7 @@ import {
   type CharacterDataObject,
   type ResetField,
 } from '@/utils/characterMerge';
-import { deepEqual, diffPaths, getAtPath } from '@/utils/character-paths';
+import { deepEqual, diffPaths, getAtPath, pathsOverlap } from '@/utils/character-paths';
 
 export interface SheetResetAuthor {
   userId: string | null;
@@ -82,7 +82,17 @@ export interface UseLiveCharacterSyncResult {
   resets: SheetReset[];
   dismissResets: () => void;
   save: (localData: CharacterDataObject) => Promise<LiveSaveOutcome>;
-  reportLocalChange: (data: CharacterDataObject, origin?: LocalChangeOrigin) => void;
+  /**
+   * The editor reports every form change. `rebaseResets` are fields its own
+   * rebase onto `externalData` reset (unreported user edits that lost);
+   * `appliedVersion` is the external version the reported form includes.
+   */
+  reportLocalChange: (
+    data: CharacterDataObject,
+    origin?: LocalChangeOrigin,
+    rebaseResets?: ResetField[],
+    appliedVersion?: number,
+  ) => void;
   /** Forget the user's unsaved edits (editor cancelled or closed); keeps resets */
   discardLocalChanges: () => void;
   /** The user has edits that are not on the server */
@@ -107,14 +117,11 @@ interface ExternalState {
   data: CharacterDataObject | undefined;
   base: CharacterDataObject | undefined;
   version: number;
+  /** Whose change the push carries (for resets the editor finds applying it) */
+  author: SheetResetAuthor;
 }
 
-const INITIAL_EXTERNAL: ExternalState = { data: undefined, base: undefined, version: 0 };
-
-/** Same field, or one contains the other; `""` is the whole document. */
-function pathsOverlap(a: string, b: string): boolean {
-  return a === '' || b === '' || a === b || a.startsWith(`${b}.`) || b.startsWith(`${a}.`);
-}
+const INITIAL_EXTERNAL: ExternalState = { data: undefined, base: undefined, version: 0, author: UNKNOWN_AUTHOR };
 
 export function useLiveCharacterSync({
   character,
@@ -123,6 +130,12 @@ export function useLiveCharacterSync({
   onServerCharacter,
 }: UseLiveCharacterSyncOptions): UseLiveCharacterSyncResult {
   const [external, setExternal] = useState<ExternalState>(INITIAL_EXTERNAL);
+  /** Synchronous mirror of `external` (reports can arrive before it renders) */
+  const externalRef = useRef<ExternalState>(INITIAL_EXTERNAL);
+  /** Author of each push, by version */
+  const pushAuthorsRef = useRef<Map<number, SheetResetAuthor>>(new Map());
+  /** `${version}:${path}` of every reset recorded, so no reset is listed twice */
+  const recordedResetKeysRef = useRef<Set<string>>(new Set());
   const [resets, setResets] = useState<SheetReset[]>([]);
   const [isDirty, setIsDirty] = useState(false);
 
@@ -149,6 +162,9 @@ export function useLiveCharacterSync({
     localRef.current = cloneData(baseRef.current);
     lastReportedRef.current = cloneData(baseRef.current);
     touchedRef.current = new Set();
+    externalRef.current = INITIAL_EXTERNAL;
+    pushAuthorsRef.current = new Map();
+    recordedResetKeysRef.current = new Set();
     if (switching) {
       // Another character: nothing of the previous one's state applies.
       setExternal(INITIAL_EXTERNAL);
@@ -180,15 +196,37 @@ export function useLiveCharacterSync({
    * the editor rebases its current form onto `data` relative to that, so
    * only edits it has not reported yet are kept on top.
    */
-  const pushToEditor = (data: CharacterDataObject) => {
-    const against = lastReportedRef.current;
-    setExternal((prev) => ({ data: cloneData(data), base: cloneData(against), version: prev.version + 1 }));
+  const pushToEditor = (data: CharacterDataObject, author: SheetResetAuthor) => {
+    const push: ExternalState = {
+      data: cloneData(data),
+      base: cloneData(lastReportedRef.current),
+      version: externalRef.current.version + 1,
+      author,
+    };
+    externalRef.current = push;
+    pushAuthorsRef.current.set(push.version, author);
+    setExternal(push);
+  };
+
+  /** Append resets not recorded yet for that push version. */
+  const recordResets = (resetFields: ResetField[], version: number, author: SheetResetAuthor) => {
+    const at = Date.now();
+    const fresh: SheetReset[] = [];
+    for (const reset of resetFields) {
+      const key = `${version}:${reset.path}`;
+      if (recordedResetKeysRef.current.has(key)) continue;
+      recordedResetKeysRef.current.add(key);
+      fresh.push({ ...reset, author, at });
+    }
+    if (fresh.length > 0) {
+      setResets((prev) => [...prev, ...fresh]);
+    }
   };
 
   /** Move `base` to a new server state, merging it into the local data. */
   const rebase = (serverData: CharacterDataObject, author: SheetResetAuthor, updatedAt?: string) => {
     let next: CharacterDataObject;
-    let newResets: SheetReset[] = [];
+    let newResets: ResetField[] = [];
 
     if (touchedRef.current.size === 0) {
       // Nothing of the user's is at stake — simply adopt the remote state.
@@ -196,20 +234,15 @@ export function useLiveCharacterSync({
     } else {
       const merged = mergeRemoteUpdate(baseRef.current, localRef.current, serverData);
       next = merged.data;
-      const at = Date.now();
-      newResets = merged.resetFields
-        .filter((reset) => isTouched(reset.path))
-        .map((reset) => ({ ...reset, author, at }));
+      newResets = merged.resetFields.filter((reset) => isTouched(reset.path));
     }
 
     baseRef.current = cloneData(serverData);
     baseUpdatedAtRef.current = updatedAt;
     localRef.current = next;
     refreshDirty();
-    pushToEditor(next);
-    if (newResets.length > 0) {
-      setResets((prev) => [...prev, ...newResets]);
-    }
+    pushToEditor(next, author);
+    recordResets(newResets, externalRef.current.version, author);
   };
 
   // Keep the latest `rebase` for the socket handler without resubscribing.
@@ -248,16 +281,48 @@ export function useLiveCharacterSync({
   }, [socket, characterId]);
 
   const reportLocalChange = useCallback(
-    (data: CharacterDataObject, origin: LocalChangeOrigin = 'user') => {
+    (
+      data: CharacterDataObject,
+      origin: LocalChangeOrigin = 'user',
+      rebaseResets?: ResetField[],
+      appliedVersion?: number,
+    ) => {
       if (!trackedIdRef.current) return;
       const next = cloneData(data);
-      if (origin === 'user') {
-        for (const path of diffPaths(localRef.current, next)) {
-          touchedRef.current.add(path);
+      const push = externalRef.current;
+
+      if (appliedVersion !== undefined && appliedVersion < push.version && push.data && push.base) {
+        // Stale report: the form does not include the latest push yet, so it
+        // must not be diffed against `local` (a state the editor never had).
+        // The user's edits are what changed since the last report; merge the
+        // form onto the pending push exactly as the editor will when it
+        // applies it — and surface what that merge resets.
+        if (origin === 'user') {
+          for (const path of diffPaths(lastReportedRef.current, next)) {
+            touchedRef.current.add(path);
+          }
         }
+        const merged = mergeRemoteUpdate(push.base, next, push.data);
+        recordResets(
+          merged.resetFields.filter((reset) => isTouched(reset.path)),
+          push.version,
+          push.author,
+        );
+        localRef.current = merged.data;
+      } else {
+        if (origin === 'user') {
+          for (const path of diffPaths(localRef.current, next)) {
+            touchedRef.current.add(path);
+          }
+        }
+        localRef.current = next;
       }
-      localRef.current = next;
       lastReportedRef.current = next;
+
+      if (rebaseResets && rebaseResets.length > 0) {
+        const version = appliedVersion ?? push.version;
+        recordResets(rebaseResets, version, pushAuthorsRef.current.get(version) ?? UNKNOWN_AUTHOR);
+      }
       refreshDirty();
     },
     [],
@@ -288,7 +353,7 @@ export function useLiveCharacterSync({
       baseUpdatedAtRef.current = saved.updatedAt;
       localRef.current = next;
       refreshDirty();
-      pushToEditor(next);
+      pushToEditor(next, UNKNOWN_AUTHOR);
       onServerCharacterRef.current?.(saved);
       return { status: 'saved', character: saved };
     };

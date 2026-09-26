@@ -92,6 +92,28 @@ describe('DnD5eCharacterEditor live sync', () => {
     expect(nameInput().value).toBe('Typed after');
   });
 
+  it('a rebase over a form that differs only by system changes is not tagged as a user edit', () => {
+    const onLocalChange = vi.fn();
+    const props = { character, onSave: vi.fn(), onCancel: vi.fn(), onLocalChange };
+    const { rerender } = render(<DnD5eCharacterEditor {...props} externalDataVersion={0} />);
+    // The form differs from externalBase (e.g. a derived value not reported
+    // yet) but the user typed nothing.
+    const staleBase = { ...data, speed: 99 };
+    rerender(
+      <DnD5eCharacterEditor
+        {...props}
+        externalBase={staleBase}
+        externalData={{ ...staleBase, experiencePoints: 150 }}
+        externalDataVersion={1}
+      />,
+    );
+    const [reported, origin, resets, appliedVersion] = lastCall(onLocalChange);
+    expect(reported.experiencePoints).toBe(150);
+    expect(origin).toBe('system');
+    expect(resets).toBeUndefined();
+    expect(appliedVersion).toBe(1);
+  });
+
   it('ignores the external data present at mount (no stale overwrite on remount)', () => {
     const onLocalChange = vi.fn();
     render(

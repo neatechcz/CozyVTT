@@ -36,6 +36,11 @@ export interface CharacterSheetProps {
   externalData?: object;
   externalBase?: object;
   externalDataVersion?: number;
-  onLocalChange?: (data: any, origin: 'user' | 'system') => void;
+  onLocalChange?: (
+    data: any,
+    origin: 'user' | 'system',
+    rebaseResets?: import('../../utils/characterMerge').ResetField[],
+    appliedVersion?: number,
+  ) => void;
   onDiscardLocalChanges?: () => void;
 }

@@ -555,6 +555,59 @@ describe('useLiveCharacterSync', () => {
     expect(hook.result.current.externalData).toBeUndefined();
   });
 
+  it('a stale report (form without the latest push) is merged onto the pending push, not diffed against local', () => {
+    const { hook, socket } = setup();
+    // Push v1: remote changed hp.current; the editor has not applied it yet.
+    act(() =>
+      socket.emit('character.updated', remoteEvent({ ...baseData(), hp: { current: 3, maximum: 10, temporary: 0 } }, ['hp.current'])),
+    );
+    expect(hook.result.current.externalDataVersion).toBe(1);
+
+    // The user typed in two fields on the pre-push form: one the remote also changed.
+    act(() =>
+      hook.result.current.reportLocalChange(
+        { ...baseData(), characterName: 'Typed', hp: { current: 6, maximum: 10, temporary: 0 } },
+        'user',
+        undefined,
+        0,
+      ),
+    );
+
+    expect(hook.result.current.resets).toEqual([
+      expect.objectContaining({ path: 'hp.current', mine: 6, theirs: 3, author: gm }),
+    ]);
+    expect(hook.result.current.isDirty).toBe(true);
+
+    // The editor applies v1 and reports the same reset — listed only once.
+    act(() =>
+      hook.result.current.reportLocalChange(
+        { ...baseData(), characterName: 'Typed', hp: { current: 3, maximum: 10, temporary: 0 } },
+        'user',
+        [{ path: 'hp.current', mine: 6, theirs: 3 }],
+        1,
+      ),
+    );
+    expect(hook.result.current.resets).toHaveLength(1);
+  });
+
+  it('rebase resets reported by the editor are recorded with the author of that push', () => {
+    const { hook, socket } = setup();
+    act(() =>
+      socket.emit('character.updated', remoteEvent({ ...baseData(), experiencePoints: 150 }, ['experiencePoints'])),
+    );
+    act(() =>
+      hook.result.current.reportLocalChange(
+        { ...baseData(), experiencePoints: 150 },
+        'user',
+        [{ path: 'experiencePoints', mine: 120, theirs: 150 }],
+        1,
+      ),
+    );
+    expect(hook.result.current.resets).toEqual([
+      expect.objectContaining({ path: 'experiencePoints', mine: 120, theirs: 150, author: gm }),
+    ]);
+  });
+
   it('propagates validation errors from save()', async () => {
     const { hook } = setup();
     const local = { ...baseData(), experiencePoints: -5 };
