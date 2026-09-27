@@ -1,7 +1,6 @@
 import { Server } from 'socket.io';
 import { AuthenticatedSocket, authenticateSocket, authenticateCampaign } from './auth';
-import { prisma } from '../config/database';
-import { sendSystemMessage } from './utils';
+import { broadcastPresence, getOnlineUserIds } from './utils';
 import logger from '../utils/logger';
 import { registerTokenHandlers } from './handlers/tokens';
 import { registerDiceHandlers } from './handlers/dice';
@@ -15,6 +14,7 @@ import { registerInitiativeHandlers } from './handlers/initiative';
 import { registerWallHandlers } from './handlers/walls';
 import { registerFogHandlers } from './handlers/fog';
 import { registerLightHandlers } from './handlers/lights';
+import { registerPingHandlers } from './handlers/pings';
 
 /**
  * WebSocket Event Handlers — orchestrator.
@@ -103,11 +103,16 @@ export function registerEventHandlers(io: Server): void {
         socket.quiet = previousCampaignId === data.campaignId ? previousQuiet && quiet : quiet;
 
         // Notify old campaign that user left (a quiet join was never announced)
-        if (previousCampaignId && previousCampaignId !== data.campaignId && !previousQuiet) {
-          socket.to(previousCampaignId).emit('user.left', {
-            userId: socket.userId,
-            timestamp: new Date().toISOString(),
-          });
+        if (previousCampaignId && previousCampaignId !== data.campaignId) {
+          if (!previousQuiet) {
+            socket.to(previousCampaignId).emit('user.left', {
+              userId: socket.userId,
+              timestamp: new Date().toISOString(),
+            });
+          }
+          // Presence includes quiet editor sockets; recompute after the room
+          // switch so a second tab keeps the user online in the old campaign.
+          await broadcastPresence(previousCampaignId);
         }
 
         // Notify the user they've been authenticated
@@ -119,32 +124,36 @@ export function registerEventHandlers(io: Server): void {
         });
 
         if (!quiet) {
-          // Get user information for system message
-          const user = await prisma.user.findUnique({
-            where: { id: socket.userId },
-            select: { displayName: true },
-          });
-
-          // Send system message to campaign
-          if (user) {
-            await sendSystemMessage(
-              data.campaignId,
-              `${user.displayName} has joined the campaign.`,
-              { userId: socket.userId, action: 'user.joined' }
-            );
-          }
-
-          // Also emit user.joined event for backwards compatibility
           socket.to(data.campaignId).emit('user.joined', {
             userId: socket.userId,
             timestamp: new Date().toISOString(),
           });
         }
 
+        await broadcastPresence(data.campaignId);
+
         logger.info('authenticated', { userId: socket.userId, campaignId: data.campaignId, role: result.role, quiet });
       } catch (error) {
         logger.error('authenticate failed', { err: error });
         socket.emit('error', { message: 'Authentication failed' });
+      }
+    });
+
+    // ============================================
+    // PRESENCE REQUEST
+    // A client asking who is online right now.
+    // ============================================
+    // Presence is pushed on every join and leave, but a component that mounts
+    // after this socket authenticated would have missed its own snapshot and
+    // would then show everyone offline until somebody else moved. This lets it
+    // ask. Replies to the caller alone — nobody else's view has changed.
+    socket.on('presence.request', async () => {
+      if (!socket.campaignId) return;
+      try {
+        const onlineUserIds = await getOnlineUserIds(socket.campaignId);
+        socket.emit('presence.state', { campaignId: socket.campaignId, onlineUserIds });
+      } catch (error) {
+        logger.error('presence.request failed', { err: error });
       }
     });
 
@@ -163,6 +172,7 @@ export function registerEventHandlers(io: Server): void {
     registerWallHandlers(io, socket);
     registerFogHandlers(io, socket);
     registerLightHandlers(io, socket);
+    registerPingHandlers(io, socket);
 
     // ============================================
     // DISCONNECT EVENT
@@ -172,31 +182,13 @@ export function registerEventHandlers(io: Server): void {
       logger.debug('ws disconnected', { socketId: socket.id, reason });
 
       // Notify campaign members if user was in a campaign (not for a quiet join)
-      if (socket.campaignId && !socket.quiet) {
-        // Get user information for system message
-        const user = await prisma.user.findUnique({
-          where: { id: socket.userId },
-          select: { displayName: true },
-        });
-
-        // Send system message to campaign (best-effort — campaign may have been deleted)
-        if (user) {
-          try {
-            await sendSystemMessage(
-              socket.campaignId,
-              `${user.displayName} has left the campaign.`,
-              { userId: socket.userId, action: 'user.left' }
-            );
-          } catch {
-            // Swallow — campaign was deleted or DB unavailable; disconnect must still complete cleanly
-          }
+      if (socket.campaignId) {
+        if (!socket.quiet) {
+          socket.to(socket.campaignId).emit('user.left', {
+            userId: socket.userId,
+            timestamp: new Date().toISOString(),
+          });
         }
-
-        // Also emit user.left event for backwards compatibility
-        socket.to(socket.campaignId).emit('user.left', {
-          userId: socket.userId,
-          timestamp: new Date().toISOString(),
-        });
       }
 
       // Leave all rooms
@@ -205,6 +197,8 @@ export function registerEventHandlers(io: Server): void {
           socket.leave(room);
         }
       });
+      // Recompute after leaving: another tab for this user may remain online.
+      if (socket.campaignId) await broadcastPresence(socket.campaignId);
     });
 
     // ============================================

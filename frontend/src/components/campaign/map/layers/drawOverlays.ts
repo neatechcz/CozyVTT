@@ -1,13 +1,16 @@
 // ============================================
 // Interaction overlays — DM wall-tool previews (draw/split/erase/
-// brush/polygon), the ruler, AoE templates, and the fog brush cursor.
+// brush/polygon), the ruler, AoE templates, and the fog selection box.
 // Pure: no React, no component closures. Snap helpers arrive as
 // callbacks because snapping depends on live tool flags.
 // ============================================
 
-import type { WallSegment, WallType } from '@/types/walls';
+import type { FogState, WallSegment, WallType } from '@/types/walls';
 import { calcGridDistance } from '@/utils/geometry';
 import type { Viewport } from './types';
+import { mapPxToFogCell } from '../coords';
+import { fogRectFromDrag, fogRectToPx, fogRectSize } from '../fogSelection';
+import type { SelectionRect } from '../mapSelection';
 
 type Pt = { x: number; y: number };
 
@@ -365,6 +368,8 @@ export function drawRuler(
   ctx.restore();
 }
 
+import { cubeRect, snapToSquareCentre, squareExitPoint, squaresFor } from '../aoeGeometry';
+
 export type AoEShape = 'sphere' | 'cylinder' | 'cone' | 'line' | 'cube';
 
 export interface AoEConfig {
@@ -373,12 +378,41 @@ export interface AoEConfig {
   widthFt?: number; // line only, default 5
 }
 
+/**
+ * Where a template is anchored, in **map pixels**.
+ *
+ * This is a fixed pivot: aiming a cone or line must never move it. Held in
+ * pixels rather than grid coordinates so that `exact` placement can express a
+ * point part-way into a square.
+ */
+export interface AoEAnchor {
+  point: Pt;
+  /**
+   * True when the user held Alt to place freely — the origin is then the point
+   * itself, with no grid snapping, for an effect cast at a distance rather than
+   * from the caster (a wall of fire, say).
+   */
+  exact: boolean;
+}
+
 export interface AoEOverlayState {
   config: AoEConfig;
-  /** Committed origin (grid coords) — null means "follow cursor". */
-  origin: Pt | null;
-  /** Grid coords of the cursor (aim direction + fallback origin). */
-  hoverCoords: Pt | null;
+  /** Committed anchor — null means "follow cursor". */
+  anchor: AoEAnchor | null;
+  /**
+   * Live cursor in map pixels, or null when it is off the canvas. Stands in for
+   * the anchor until one is pinned, so nothing is drawn once the cursor leaves.
+   */
+  hoverMapPx: Pt | null;
+  /**
+   * What a pinned template aims at: the *last* cursor position, retained rather
+   * than cleared when the cursor leaves the canvas. The tool panel sits over
+   * the map, so aiming towards it would otherwise swing the template back to
+   * pointing right the moment the cursor crossed onto the panel.
+   */
+  aimMapPx: Pt | null;
+  /** True while Alt is held, so the un-pinned preview matches what a click does. */
+  hoverExact: boolean;
   feetPerSquare: number;
 }
 
@@ -388,24 +422,63 @@ export function drawAoEOverlay(
   state: AoEOverlayState,
   viewport: Viewport
 ): void {
-  const { zoom, gridSize: gs, mapHeight: mh } = viewport;
+  const { zoom, gridSize: gs } = viewport;
   const fps = state.feetPerSquare;
 
-  const origin = state.origin ?? state.hoverCoords;
-  if (!origin) return;
+  // The anchor is the pivot the template turns about. Once pinned it is fixed —
+  // deriving it from the aim is what used to make a rotating cone's apex jump
+  // between a few spots instead of sweeping around its square. Until it is
+  // pinned the cursor stands in for it, so the preview matches what a click
+  // would place.
+  const anchor: AoEAnchor | null =
+    state.anchor ??
+    (state.hoverMapPx ? { point: state.hoverMapPx, exact: state.hoverExact } : null);
+  if (!anchor) return;
 
-  const ox = origin.x * gs + gs / 2;
-  const oy = (mh - 1 - origin.y) * gs + gs / 2;
+  // A free-placed template pivots about the exact point; otherwise about the
+  // centre of the square it was placed in.
+  const pivot = anchor.exact
+    ? anchor.point
+    : { x: snapToSquareCentre(anchor.point.x, gs), y: snapToSquareCentre(anchor.point.y, gs) };
 
-  let angle = 0;
-  if (state.hoverCoords && state.origin) {
-    const mx = state.hoverCoords.x * gs + gs / 2;
-    const my = (mh - 1 - state.hoverCoords.y) * gs + gs / 2;
-    angle = Math.atan2(my - oy, mx - ox);
+  const sizeSquares = squaresFor(state.config.sizeFt, fps);
+  const widthSquares = squaresFor(state.config.widthFt ?? 5, fps);
+  const sizeInPx = sizeSquares * gs;
+  const widthInPx = widthSquares * gs;
+
+  // Aim direction, measured from the pivot. Only meaningful once the anchor is
+  // pinned — before that the cursor *is* the anchor, so there is nothing to aim
+  // at and the template rests pointing right.
+  const angle =
+    state.anchor && state.aimMapPx
+      ? Math.atan2(state.aimMapPx.y - pivot.y, state.aimMapPx.x - pivot.x)
+      : 0;
+
+  // The cube's rectangle is computed once and reused for both the outline and
+  // the label anchor below — deriving them separately let the label drift off
+  // the snapped shape by up to half a square. A free-placed cube sits on the
+  // pivot; otherwise it snaps to cover whole squares (see aoeGeometry.ts).
+  let cube: { x: number; y: number; size: number } | null = null;
+  if (state.config.shape === 'cube') {
+    cube = anchor.exact
+      ? { x: pivot.x - sizeInPx / 2, y: pivot.y - sizeInPx / 2, size: sizeInPx }
+      : cubeRect(pivot, gs, sizeSquares);
   }
 
-  const sizeInPx = (state.config.sizeFt / fps) * gs;
-  const widthInPx = ((state.config.widthFt ?? 5) / fps) * gs;
+  // Sphere and cylinder sit on the pivot itself: a circle never tiles squares
+  // whatever it is centred on, and that placement was not what was reported as
+  // misaligned. Cone and line emerge from the point their aim leaves the
+  // anchor square through, so they sweep around the token rather than through
+  // it — unless placed freely, where the origin is the point itself.
+  const isAimed = state.config.shape === 'cone' || state.config.shape === 'line';
+  let { x: ox, y: oy } = pivot;
+
+  if (cube) {
+    ox = cube.x + cube.size / 2;
+    oy = cube.y + cube.size / 2;
+  } else if (isAimed && !anchor.exact) {
+    ({ x: ox, y: oy } = squareExitPoint(pivot, gs, angle));
+  }
 
   ctx.save();
   ctx.fillStyle = 'rgba(147, 51, 234, 0.25)';
@@ -447,16 +520,11 @@ export function drawAoEOverlay(
     }
 
     case 'cube': {
-      const cos = Math.cos(angle);
-      const sin = Math.sin(angle);
-      const perpCos = Math.cos(angle + Math.PI / 2);
-      const perpSin = Math.sin(angle + Math.PI / 2);
-      const hs = sizeInPx / 2;
-      ctx.moveTo(ox + perpCos * hs,                      oy + perpSin * hs);
-      ctx.lineTo(ox + cos * sizeInPx + perpCos * hs,     oy + sin * sizeInPx + perpSin * hs);
-      ctx.lineTo(ox + cos * sizeInPx - perpCos * hs,     oy + sin * sizeInPx - perpSin * hs);
-      ctx.lineTo(ox - perpCos * hs,                      oy - perpSin * hs);
-      ctx.closePath();
+      // Axis-aligned and snapped to whole squares. It used to be a rotatable
+      // rectangle anchored at a square centre, which could not line up with the
+      // grid at any angle — a 10 ft cube on a 5 ft grid straddled four squares
+      // instead of covering two.
+      if (cube) ctx.rect(cube.x, cube.y, cube.size, cube.size);
       break;
     }
   }
@@ -483,34 +551,147 @@ export function drawAoEOverlay(
   ctx.restore();
 }
 
-export interface FogBrushCursorState {
-  mode: 'fog-reveal' | 'fog-hide';
-  /** Grid coords of the cursor. */
-  hoverCoords: Pt;
-  /** Brush radius in map-space pixels. */
-  brushRadius: number;
+export interface WallSelectionOverlayState {
+  /** The box being dragged out, in map pixels, or null when none is. */
+  marquee: SelectionRect | null;
+  /** Walls currently selected, drawn so a gathered set is visible as one. */
+  selectedWallIds: ReadonlySet<string>;
+  wallSegments: WallSegment[];
 }
 
 /**
- * Fog brush cursor. Drawn in SCREEN space (zoom-invariant) — the caller
- * must invoke this AFTER restoring the world transform.
+ * The wall selection box, and a ring around everything it has caught.
+ *
+ * Dashed and unsnapped, unlike the fog box: a wall can sit anywhere between
+ * grid lines, so the box has to be able to as well.
  */
-export function drawFogBrushCursor(
+export function drawWallSelection(
   ctx: CanvasRenderingContext2D,
-  state: FogBrushCursorState,
+  viewport: Viewport,
+  state: WallSelectionOverlayState
+): void {
+  const { zoom } = viewport;
+
+  if (state.selectedWallIds.size > 0) {
+    ctx.save();
+    ctx.strokeStyle = 'rgba(56, 189, 248, 0.95)';
+    ctx.lineWidth = 6 / zoom;
+    ctx.lineCap = 'round';
+    for (const seg of state.wallSegments) {
+      if (!state.selectedWallIds.has(seg.id)) continue;
+      ctx.beginPath();
+      ctx.moveTo(seg.x1, seg.y1);
+      ctx.lineTo(seg.x2, seg.y2);
+      ctx.stroke();
+    }
+    ctx.restore();
+  }
+
+  if (state.marquee) {
+    const { minX, minY, maxX, maxY } = state.marquee;
+    ctx.save();
+    ctx.strokeStyle = 'rgba(56, 189, 248, 0.9)';
+    ctx.fillStyle = 'rgba(56, 189, 248, 0.12)';
+    ctx.lineWidth = 1.5 / zoom;
+    ctx.setLineDash([4 / zoom, 3 / zoom]);
+    ctx.beginPath();
+    ctx.rect(minX, minY, maxX - minX, maxY - minY);
+    ctx.fill();
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  }
+}
+
+export interface FogSelectionState {
+  mode: 'fog-reveal' | 'fog-hide';
+  fog: FogState;
+  /** Drag anchor in map pixels, or null when only hovering. */
+  anchor: Pt | null;
+  /** Current cursor in map pixels. */
+  cursor: Pt | null;
+}
+
+const FOG_REVEAL_TINT = '163, 230, 53';  // lime
+const FOG_HIDE_TINT = '249, 115, 22';    // orange
+
+/**
+ * Fog selection preview — the snapped rectangle being dragged, or the single
+ * cell under the cursor when idle.
+ *
+ * Drawn in WORLD space, unlike the circular brush cursor this replaces: a
+ * grid-snapped rectangle has to stay locked to the grid while the DM pans and
+ * zooms, so the caller must invoke this BEFORE restoring the world transform.
+ */
+export function drawFogSelection(
+  ctx: CanvasRenderingContext2D,
+  state: FogSelectionState,
   viewport: Viewport
 ): void {
-  const screenX = state.hoverCoords.x * viewport.zoom * viewport.gridSize + viewport.panOffset.x;
-  const screenY = (viewport.mapHeight - 1 - state.hoverCoords.y) * viewport.zoom * viewport.gridSize + viewport.panOffset.y;
-  const screenRadius = state.brushRadius * viewport.zoom;
+  const { zoom } = viewport;
+  const { cursor, anchor, fog } = state;
+  if (!cursor) return;
+
+  const tint = state.mode === 'fog-reveal' ? FOG_REVEAL_TINT : FOG_HIDE_TINT;
+
+  // Idle: outline just the cell a click would toggle, so the DM can see
+  // exactly which square is in play before committing to a drag.
+  if (!anchor) {
+    const cell = mapPxToFogCell(cursor.x, cursor.y, fog);
+    if (!cell) return;
+    ctx.save();
+    ctx.strokeStyle = `rgba(${tint}, 0.9)`;
+    ctx.lineWidth = 2 / zoom;
+    ctx.setLineDash([4 / zoom, 4 / zoom]);
+    ctx.strokeRect(cell.col * fog.cellPx, cell.row * fog.cellPx, fog.cellPx, fog.cellPx);
+    ctx.setLineDash([]);
+    ctx.restore();
+    return;
+  }
+
+  const rect = fogRectFromDrag(fog, anchor.x, anchor.y, cursor.x, cursor.y);
+  if (!rect) return;
+
+  const { x, y, w, h } = fogRectToPx(fog, rect);
+  const { cols, rows } = fogRectSize(rect);
+
   ctx.save();
-  ctx.setTransform(1, 0, 0, 1, 0, 0); // reset to screen-space
-  ctx.strokeStyle = state.mode === 'fog-reveal' ? 'rgba(163, 230, 53, 0.8)' : 'rgba(249, 115, 22, 0.8)';
-  ctx.lineWidth = 2;
-  ctx.setLineDash([4, 4]);
-  ctx.beginPath();
-  ctx.arc(screenX, screenY, screenRadius, 0, Math.PI * 2);
-  ctx.stroke();
+
+  ctx.fillStyle = `rgba(${tint}, 0.22)`;
+  ctx.fillRect(x, y, w, h);
+
+  ctx.strokeStyle = `rgba(${tint}, 0.95)`;
+  ctx.lineWidth = 2 / zoom;
+  ctx.setLineDash([6 / zoom, 4 / zoom]);
+  ctx.strokeRect(x, y, w, h);
   ctx.setLineDash([]);
+
+  // Size readout on an opaque pill — the text contrasts against its own
+  // background rather than the map, same technique as the ruler.
+  const label = `${cols} × ${rows}`;
+  const fontSize = Math.max(11, 13 / zoom);
+  ctx.font = `bold ${fontSize}px 'Inter', system-ui, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  const pad = 5 / zoom;
+  const textW = ctx.measureText(label).width;
+  const pillW = textW + pad * 2;
+  const pillH = fontSize + pad * 2;
+  const pillX = x + w / 2 - pillW / 2;
+  const pillY = y + h / 2 - pillH / 2;
+
+  ctx.fillStyle = 'rgba(0, 0, 0, 0.72)';
+  ctx.beginPath();
+  if (ctx.roundRect) {
+    ctx.roundRect(pillX, pillY, pillW, pillH, 4 / zoom);
+  } else {
+    ctx.rect(pillX, pillY, pillW, pillH);
+  }
+  ctx.fill();
+
+  ctx.fillStyle = '#ffffff';
+  ctx.fillText(label, x + w / 2, y + h / 2);
+
   ctx.restore();
 }

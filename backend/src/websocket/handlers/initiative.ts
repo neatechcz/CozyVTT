@@ -8,7 +8,13 @@ import { Server } from 'socket.io';
 import { AuthenticatedSocket } from '../auth';
 import { prisma } from '../../config/database';
 import { rollDice, parseDiceExpression, DiceParserError } from '../../utils/dice-parser';
+import {
+  resolveCharacterInitiative,
+  resolveStatBlockInitiative,
+  DEFAULT_INITIATIVE_EXPRESSION,
+} from '../../utils/rules/initiative';
 import logger from '../../utils/logger';
+import { readTokens, toJson } from '../../utils/prisma-json';
 import {
   getState as getCombatState,
   setState as setCombatState,
@@ -42,8 +48,8 @@ export function registerInitiativeHandlers(io: Server, socket: AuthenticatedSock
       const map = await prisma.map.findUnique({ where: { id: mapId } });
       if (!map || map.campaignId !== socket.campaignId) { socket.emit('error', { message: 'Map not found' }); return; }
 
-      const tokens = (Array.isArray(map.tokens) ? map.tokens : []) as any[];
-      const token = tokens.find((t: any) => t.id === tokenId);
+      const tokens = readTokens(map.tokens);
+      const token = tokens.find((t) => t.id === tokenId);
       if (!token) { socket.emit('error', { message: 'Token not found' }); return; }
 
       const state = getCombatState(socket.campaignId);
@@ -58,7 +64,17 @@ export function registerInitiativeHandlers(io: Server, socket: AuthenticatedSock
         tokenId,
         name: token.name,
         imageUrl: token.imageUrl || '',
-        initiative: token.initiative ?? null,
+        // Always null, never `token.initiative`.
+        //
+        // A rolled value is persisted onto the map token, and ending combat
+        // clears only the in-memory order — so the number outlives the fight it
+        // was rolled for. Seeding from it meant a token joining a *new* fight
+        // arrived carrying its result from the last one, already placed in the
+        // order before anyone had rolled.
+        //
+        // Joining the order and having a place in it are separate steps: a
+        // combatant sorts to the bottom as "—" until something rolls for it.
+        initiative: null,
         hp: token.hp ?? null,
         type: token.type ?? 'npc',
         disposition: token.disposition ?? null,
@@ -117,8 +133,8 @@ export function registerInitiativeHandlers(io: Server, socket: AuthenticatedSock
       const map = await prisma.map.findUnique({ where: { id: mapId } });
       if (!map || map.campaignId !== socket.campaignId) { socket.emit('error', { message: 'Map not found' }); return; }
 
-      const tokens = (Array.isArray(map.tokens) ? map.tokens : []) as any[];
-      const tokenIndex = tokens.findIndex((t: any) => t.id === tokenId);
+      const tokens = readTokens(map.tokens);
+      const tokenIndex = tokens.findIndex((t) => t.id === tokenId);
       if (tokenIndex !== -1) {
         tokens[tokenIndex] = { ...tokens[tokenIndex], initiative: value };
         await prisma.map.update({ where: { id: mapId }, data: { tokens: tokens as any } });
@@ -143,44 +159,165 @@ export function registerInitiativeHandlers(io: Server, socket: AuthenticatedSock
   });
 
   /**
-   * INITIATIVE.ROLL — DM rolls initiative for a token using a dice expression.
+   * INITIATIVE.ROLL — roll initiative for a token using a dice expression.
+   *
+   * The DM may roll for anything on the map. A player may roll only for a token
+   * they control, and only once the DM has put that token into the initiative
+   * order — rolling is how you take your turn in a fight you are already part
+   * of, not a way to insert yourself into one. Everything else about initiative
+   * (who is in it, the order, whose turn it is) stays DM-only.
+   *
+   * This check is the real boundary: the tracker and the map menu only decide
+   * whether to *offer* the control, and neither is trustworthy on its own.
    */
-  socket.on('initiative.roll', async (data: { tokenId: string; mapId: string; expression: string; characterName?: string }) => {
+  socket.on('initiative.roll', async (data: { tokenId: string; mapId: string; expression?: string; characterName?: string }) => {
     try {
       if (!socket.campaignId) { socket.emit('error', { message: 'Not authenticated to a campaign' }); return; }
-      if (socket.role !== 'DM') { socket.emit('error', { message: 'Only the DM can roll initiative' }); return; }
 
       const { tokenId, mapId, expression, characterName } = data;
-      if (!tokenId || !mapId || !expression) { socket.emit('error', { message: 'tokenId, mapId, and expression required' }); return; }
+      if (!tokenId || !mapId) { socket.emit('error', { message: 'tokenId and mapId required' }); return; }
 
-      // Validate expression
-      try { parseDiceExpression(expression); } catch (err) {
-        if (err instanceof DiceParserError) { socket.emit('error', { message: `Invalid expression: ${err.message}` }); return; }
-        throw err;
+      // `expression` is now only a fallback for combatants the server cannot
+      // work initiative out for itself — see the resolution below. Validate it
+      // when one is sent, since it still reaches the dice roller in that case.
+      if (expression !== undefined) {
+        try { parseDiceExpression(expression); } catch (err) {
+          if (err instanceof DiceParserError) { socket.emit('error', { message: `Invalid expression: ${err.message}` }); return; }
+          throw err;
+        }
       }
 
       // Fetch token name from DB for logging
       const map = await prisma.map.findUnique({ where: { id: mapId } });
       if (!map || map.campaignId !== socket.campaignId) { socket.emit('error', { message: 'Map not found' }); return; }
 
-      const tokens = (Array.isArray(map.tokens) ? map.tokens : []) as any[];
-      const tokenIndex = tokens.findIndex((t: any) => t.id === tokenId);
+      const tokens = readTokens(map.tokens);
+      const tokenIndex = tokens.findIndex((t) => t.id === tokenId);
       if (tokenIndex === -1) { socket.emit('error', { message: 'Token not found' }); return; }
 
       const token = tokens[tokenIndex];
-      const rollResult = rollDice(expression);
-      const rolledValue = rollResult.total;
-
-      // Persist to token
-      tokens[tokenIndex] = { ...token, initiative: rolledValue };
-      await prisma.map.update({ where: { id: mapId }, data: { tokens: tokens as any } });
-      bumpMapVersion(mapId); // cached drag snapshots of this map are stale now
 
       // Update in-memory state — add to combatants if not already present
       const state = getCombatState(socket.campaignId);
       const existingIndex = state.combatants.findIndex((c) => c.tokenId === tokenId);
-      if (existingIndex !== -1) {
-        state.combatants[existingIndex].initiative = rolledValue;
+
+      // Authorize. `controlledBy` is the same ownership field that decides who
+      // may move a token (see handlers/tokens.ts), so a player can roll for
+      // exactly the tokens they can already move.
+      if (socket.role !== 'DM') {
+        // Spectators are watching, not playing. `controlledBy` survives a
+        // demotion from PLAYER, so without this an ex-player would keep the
+        // ability to roll — and reorder a fight — after losing the ability to
+        // move the very same token. handlers/tokens.ts makes the same pair of
+        // checks for movement.
+        if (socket.role === 'SPECTATOR') {
+          socket.emit('error', { message: 'Spectators cannot roll initiative' });
+          return;
+        }
+        if (token.controlledBy !== socket.userId) {
+          socket.emit('error', { message: 'You can only roll initiative for your own token' });
+          return;
+        }
+        if (existingIndex === -1) {
+          socket.emit('error', { message: 'That token is not in the initiative order yet' });
+          return;
+        }
+        // Initiative is rolled to establish the order, not to renegotiate it
+        // mid-fight. Re-rolling re-sorts the combatants, and the turn pointer
+        // walks the list by position — so a player who rolls their way above the
+        // current combatant ends the round early and skips whoever was between
+        // them. It would also be spammable until a good number came up. A DM can
+        // still re-roll anyone, which is the case where it is a deliberate call.
+        if (state.active) {
+          socket.emit('error', { message: 'Combat has started — ask your DM to change your initiative' });
+          return;
+        }
+      }
+
+      // Work out what initiative actually means for this combatant.
+      //
+      // The server decides, not the client. It has to: this is the only side
+      // holding the character sheet, and Call of Cthulhu has no initiative roll
+      // at all — combatants are ranked by Dexterity — which a client-supplied
+      // dice expression cannot express. Deciding here also means the tracker's
+      // die and the map menu produce the same number by construction rather
+      // than by both remembering to compute it the same way.
+      let resolution = null as ReturnType<typeof resolveCharacterInitiative>;
+      if (token.characterId) {
+        const character = await prisma.character.findUnique({
+          where: { id: token.characterId },
+          select: { gameSystem: true, data: true },
+        });
+        if (character) {
+          resolution = resolveCharacterInitiative(character.gameSystem, character.data);
+        }
+      }
+      if (!resolution && token.statBlock) {
+        const campaign = await prisma.campaign.findUnique({
+          where: { id: socket.campaignId },
+          select: { gameSystem: true },
+        });
+        resolution = resolveStatBlockInitiative(campaign?.gameSystem ?? null, token.statBlock);
+      }
+
+      // Nothing system-specific applies (a flexible sheet, a bare NPC token).
+      //
+      // A client-supplied expression is honoured only for the DM, who can set
+      // any initiative value by hand anyway so gains nothing by lying. A player
+      // always gets the default: they may control a token with no sheet and no
+      // stat block (a DM can assign one to them), and without this they could
+      // send `1d20+9999` and hand themselves the top of the order.
+      const fallbackExpression =
+        socket.role === 'DM' && expression ? expression : DEFAULT_INITIATIVE_EXPRESSION;
+
+      let rolledValue: number;
+      let rollResult: ReturnType<typeof rollDice> | null = null;
+      let usedExpression = '';
+
+      if (resolution && resolution.kind === 'fixed') {
+        // No dice. The value *is* the answer.
+        rolledValue = resolution.value;
+      } else {
+        usedExpression = resolution ? resolution.expression : fallbackExpression;
+        try {
+          parseDiceExpression(usedExpression);
+        } catch {
+          // A derived expression that will not parse is a bug on our side, not
+          // the caller's — fall back rather than failing the player's roll.
+          logger.warn('initiative.roll derived an unparseable expression', {
+            usedExpression, campaignId: socket.campaignId,
+          });
+          usedExpression = DEFAULT_INITIATIVE_EXPRESSION;
+        }
+        rollResult = rollDice(usedExpression);
+        rolledValue = rollResult.total;
+      }
+
+      // Persist to token.
+      //
+      // Re-read rather than writing back the copy fetched before the character
+      // lookups above: those are awaits, and the whole token array is rewritten
+      // in one field, so a token someone moved in the meantime would be silently
+      // put back where it was.
+      const freshMap = await prisma.map.findUnique({ where: { id: mapId }, select: { tokens: true } });
+      const freshTokens = freshMap && Array.isArray(freshMap.tokens) ? readTokens(freshMap.tokens) : tokens;
+      const freshIndex = freshTokens.findIndex((t) => t.id === tokenId);
+      if (freshIndex !== -1) {
+        freshTokens[freshIndex] = { ...freshTokens[freshIndex], initiative: rolledValue };
+        await prisma.map.update({ where: { id: mapId }, data: { tokens: toJson(freshTokens) } });
+        bumpMapVersion(mapId);
+      }
+
+      // Update in-memory state — add to combatants if not already present.
+      // Only reachable for a DM: a player's roll is rejected above unless the
+      // token is already a combatant.
+      //
+      // Re-found rather than reusing the index taken before the awaits above:
+      // a concurrent roll re-sorts this array and a concurrent remove shortens
+      // it, so a stale index would write the value onto the wrong combatant.
+      const combatantIndex = state.combatants.findIndex((c) => c.tokenId === tokenId);
+      if (combatantIndex !== -1) {
+        state.combatants[combatantIndex].initiative = rolledValue;
       } else {
         state.combatants.push({
           tokenId,
@@ -195,25 +332,30 @@ export function registerInitiativeHandlers(io: Server, socket: AuthenticatedSock
       state.combatants = sortCombatants(state.combatants);
       setCombatState(socket.campaignId, state);
 
-      // Get user info for roll broadcast
-      const user = await prisma.user.findUnique({ where: { id: socket.userId }, select: { displayName: true } });
-
-      // Broadcast the roll result so it appears in the dice log
-      const rollData = {
-        userId: socket.userId,
-        userName: user?.displayName ?? 'DM',
-        characterName: characterName || token.name,
-        expression,
-        result: rolledValue,
-        breakdown: rollResult,
-        purpose: `${token.name} Initiative`,
-        timestamp: new Date().toISOString(),
-        secret: false,
-      };
-      io.to(socket.campaignId).emit('dice.rolled', rollData);
+      // Announce the roll in the dice log — but only when dice were actually
+      // thrown. A Call of Cthulhu investigator's initiative is simply their
+      // Dexterity, and a dice-log entry claiming otherwise would be a lie. The
+      // value still reaches everyone through the initiative broadcast below.
+      if (rollResult) {
+        const user = await prisma.user.findUnique({ where: { id: socket.userId }, select: { displayName: true } });
+        const rollData = {
+          userId: socket.userId,
+          userName: user?.displayName ?? 'DM',
+          characterName: characterName || token.name,
+          expression: usedExpression,
+          result: rolledValue,
+          breakdown: rollResult,
+          purpose: `${token.name} Initiative`,
+          timestamp: new Date().toISOString(),
+          secret: false,
+        };
+        io.to(socket.campaignId).emit('dice.rolled', rollData);
+      }
 
       await broadcastInitiativeState(socket.campaignId);
-      logger.debug('initiative.roll', { expression, result: rolledValue, name: token.name, campaignId: socket.campaignId });
+      logger.debug('initiative.roll', {
+        rolled: !!rollResult, result: rolledValue, name: token.name, campaignId: socket.campaignId,
+      });
     } catch (error) {
       logger.error('initiative.roll failed', { err: error });
       socket.emit('error', { message: 'Failed to roll initiative' });

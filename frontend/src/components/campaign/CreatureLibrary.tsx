@@ -29,7 +29,11 @@ import { useWebSocket } from '@/contexts/WebSocketContext';
 import api from '@/services/api';
 import type { CreatureTemplate, NpcStatBlock } from '@/types';
 import { TokenType, GameSystem, AssetType, AssetScope } from '@/types';
-import { StatBlockViewer } from './npc-stat-blocks';
+import { StatBlockViewer, ProficiencyEditor, Pf2eProficiencyEditor } from './npc-stat-blocks';
+import { CHALLENGE_RATINGS } from '@/utils/rules/dnd5e';
+import { GAME_SYSTEM_SHORT_LABELS } from '@/constants/game-systems';
+import AssetPicker from '@/components/assets/AssetPicker';
+import { extractAssetId } from '@/utils/assetUrl';
 import { isPositiveNumber, parseStatBlockHpForm, tokenHpForCreature } from '@/utils/creatureHp';
 import { xpForChallengeRating } from '@/utils/creatureXp';
 import Button from '@/components/ui/Button';
@@ -38,12 +42,7 @@ import Button from '@/components/ui/Button';
 // Constants
 // ============================================
 
-const CR_OPTIONS = [
-  '0', '1/8', '1/4', '1/2', '1', '2', '3', '4', '5',
-  '6', '7', '8', '9', '10', '11', '12', '13', '14', '15',
-  '16', '17', '18', '19', '20', '21', '22', '23', '24',
-  '25', '26', '27', '28', '29', '30',
-];
+const CR_OPTIONS = CHALLENGE_RATINGS;
 
 const SOURCE_FILTERS = [
   { value: '', label: 'All Sources' },
@@ -73,6 +72,7 @@ export default function CreatureLibrary({ isOpen, onClose }: CreatureLibraryProp
   const [sourceFilter, setSourceFilter] = useState('');
   const [crFilter, setCrFilter] = useState('');
   const [showFilters, setShowFilters] = useState(false);
+  const [matchGameSystem, setMatchGameSystem] = useState(true);
 
   // ── Data state ──
   const [creatures, setCreatures] = useState<CreatureTemplate[]>([]);
@@ -115,6 +115,7 @@ export default function CreatureLibrary({ isOpen, onClose }: CreatureLibraryProp
         search: searchQuery || undefined,
         source: sourceFilter || undefined,
         cr: crFilter || undefined,
+        gameSystem: matchGameSystem ? (campaign.gameSystem ?? undefined) : undefined,
         limit: LIMIT,
         offset: newOffset,
       });
@@ -129,7 +130,7 @@ export default function CreatureLibrary({ isOpen, onClose }: CreatureLibraryProp
     } finally {
       setIsLoading(false);
     }
-  }, [campaign, searchQuery, sourceFilter, crFilter, offset]);
+  }, [campaign, searchQuery, sourceFilter, crFilter, matchGameSystem, offset]);
 
   // Fetch on open and when filters change
   useEffect(() => {
@@ -147,7 +148,7 @@ export default function CreatureLibrary({ isOpen, onClose }: CreatureLibraryProp
       })
       .catch(() => {})
       .finally(() => setIsLoadingFavorites(false));
-  }, [isOpen, campaign?.id, sourceFilter, crFilter]);
+  }, [isOpen, campaign?.id, sourceFilter, crFilter, matchGameSystem]);
 
   // Debounced search
   useEffect(() => {
@@ -169,7 +170,8 @@ export default function CreatureLibrary({ isOpen, onClose }: CreatureLibraryProp
 
     try {
       const result = await api.seedSrdCreatures(campaign.id);
-      setSeedResult(`Seeded ${result.created} SRD creatures (${result.skipped} already existed).`);
+      const updatedNote = result.updated ? `, ${result.updated} updated with hit points` : '';
+      setSeedResult(`Seeded ${result.created} SRD creatures${updatedNote} (${result.skipped} already existed).`);
       setSrdCount((result.alreadyExisted || 0) + result.created);
       // Refresh the list
       fetchCreatures(true);
@@ -375,7 +377,8 @@ export default function CreatureLibrary({ isOpen, onClose }: CreatureLibraryProp
 
               {/* Filter controls */}
               {showFilters && (
-                <div className="flex gap-2">
+                <div className="space-y-2">
+                  <div className="flex gap-2">
                   <select
                     value={sourceFilter}
                     onChange={(e) => setSourceFilter(e.target.value)}
@@ -395,6 +398,18 @@ export default function CreatureLibrary({ isOpen, onClose }: CreatureLibraryProp
                       <option key={cr} value={cr}>CR {cr}</option>
                     ))}
                   </select>
+                  </div>
+                  {campaign?.gameSystem && (
+                    <select
+                      aria-label="Game system filter"
+                      value={matchGameSystem ? 'campaign' : 'all'}
+                      onChange={(e) => setMatchGameSystem(e.target.value === 'campaign')}
+                      className="input-cozy text-xs w-full"
+                    >
+                      <option value="campaign">{GAME_SYSTEM_SHORT_LABELS[campaign.gameSystem]} only (this campaign)</option>
+                      <option value="all">All game systems</option>
+                    </select>
+                  )}
                 </div>
               )}
 
@@ -410,7 +425,7 @@ export default function CreatureLibrary({ isOpen, onClose }: CreatureLibraryProp
                   <button
                     onClick={handleSeedSrd}
                     disabled={isSeeding}
-                    className="flex items-center gap-1 text-xs text-blue-600 hover:text-blue-500 transition-colors"
+                    className="flex items-center gap-1 text-xs text-info-ink hover:text-info-ink transition-colors"
                   >
                     {isSeeding ? (
                       <><Loader2 className="w-3 h-3 animate-spin" /> Seeding...</>
@@ -421,7 +436,7 @@ export default function CreatureLibrary({ isOpen, onClose }: CreatureLibraryProp
                 )}
               </div>
               {seedResult && (
-                <div className="text-[10px] text-green-600 bg-green-500/10 rounded px-2 py-1">
+                <div className="text-[10px] text-success-ink bg-success/10 rounded px-2 py-1">
                   {seedResult}
                 </div>
               )}
@@ -429,7 +444,7 @@ export default function CreatureLibrary({ isOpen, onClose }: CreatureLibraryProp
 
             {/* ── Error ── */}
             {error && (
-              <div className="mx-4 mt-2 text-xs text-red-600 bg-red-500/10 border border-red-500/20 rounded-cozy px-3 py-2">
+              <div className="mx-4 mt-2 text-xs text-danger-ink bg-danger/10 border border-danger/20 rounded-cozy px-3 py-2">
                 {error}
               </div>
             )}
@@ -442,7 +457,7 @@ export default function CreatureLibrary({ isOpen, onClose }: CreatureLibraryProp
                   className="w-full flex items-center justify-between px-4 py-2 hover:bg-moss-green/5 transition-colors"
                 >
                   <div className="flex items-center gap-2">
-                    <Star className="w-3.5 h-3.5 text-amber-500 fill-amber-500" />
+                    <Star className="w-3.5 h-3.5 text-warning-ink fill-warning" />
                     <span className="text-xs font-semibold text-stone-gray uppercase tracking-wide">
                       Favorites
                     </span>
@@ -455,7 +470,7 @@ export default function CreatureLibrary({ isOpen, onClose }: CreatureLibraryProp
                   )}
                 </button>
                 {showFavorites && (
-                  <div className="divide-y divide-moss-green/10 bg-amber-500/[0.02]">
+                  <div className="divide-y divide-moss-green/10 bg-warning/[0.02]">
                     {isLoadingFavorites ? (
                       <div className="flex items-center gap-2 text-stone-gray text-xs py-3 px-4">
                         <Loader2 className="w-3 h-3 animate-spin" />
@@ -642,8 +657,8 @@ function CreatureRow({
         ) : (
           <div
             className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 text-white font-bold text-sm ${
-              creature.disposition === 'hostile' ? 'bg-red-500' :
-              creature.disposition === 'friendly' ? 'bg-teal-500' : 'bg-amber-500'
+              creature.disposition === 'hostile' ? 'bg-danger' :
+              creature.disposition === 'friendly' ? 'bg-success' : 'bg-warning'
             }`}
           >
             {creature.name.charAt(0).toUpperCase()}
@@ -661,7 +676,7 @@ function CreatureRow({
         {/* Source badge */}
         <span className={`text-[9px] font-semibold px-1.5 py-0.5 rounded-full flex-shrink-0 ${
           creature.source === 'srd'
-            ? 'bg-blue-500/10 text-blue-600'
+            ? 'bg-info/10 text-info-ink'
             : 'bg-moss-green/10 text-moss-green'
         }`}>
           {creature.source === 'srd' ? 'SRD' : 'Custom'}
@@ -670,13 +685,13 @@ function CreatureRow({
         {/* Favorite star */}
         <button
           onClick={(e) => { e.stopPropagation(); onToggleFavorite(); }}
-          className="flex-shrink-0 p-0.5 rounded hover:bg-amber-500/10 transition-colors"
+          className="flex-shrink-0 p-0.5 rounded hover:bg-warning/10 transition-colors"
           title={isFavorite ? 'Remove from favorites' : 'Add to favorites'}
         >
           <Star className={`w-3.5 h-3.5 transition-colors ${
             isFavorite
-              ? 'text-amber-500 fill-amber-500'
-              : 'text-stone-gray/30 hover:text-amber-400'
+              ? 'text-warning-ink fill-warning'
+              : 'text-stone-gray/30 hover:text-warning-ink'
           }`} />
         </button>
 
@@ -724,7 +739,7 @@ function CreatureRow({
             {creature.source !== 'srd' && (
               <button
                 onClick={onDelete}
-                className="flex items-center gap-1 px-3 py-1.5 text-xs rounded-cozy border border-red-500/20 text-red-500 hover:bg-red-500/10 transition-colors"
+                className="flex items-center gap-1 px-3 py-1.5 text-xs rounded-cozy border border-danger/20 text-danger-ink hover:bg-danger/10 transition-colors"
               >
                 <Trash2 className="w-3 h-3" /> Delete
               </button>
@@ -799,7 +814,7 @@ function NameDescriptionList({
           <button
             type="button"
             onClick={() => onChange(items.filter((_, idx) => idx !== i))}
-            className="p-1 text-red-400 hover:text-red-600 flex-shrink-0 mt-0.5"
+            className="p-1 text-danger-ink hover:text-danger-ink flex-shrink-0 mt-0.5"
             title="Remove"
           >
             <Trash2 className="w-3 h-3" />
@@ -836,9 +851,10 @@ export function CreatureForm({ campaignId, gameSystem, editingCreature, onCreate
   const [ac, setAc] = useState(sb?.ac ?? 10);
   const [speed, setSpeed] = useState(sb?.speed ?? '30 ft.');
   // Malformed hp (missing or non-positive average) counts as "no hit points".
-  const hadHp = isPositiveNumber(sb?.hp?.average);
-  const [hpAverage, setHpAverage] = useState(hadHp ? String(sb?.hp?.average) : '');
-  const [hpFormula, setHpFormula] = useState(typeof sb?.hp?.formula === 'string' ? sb.hp.formula : '');
+  const originalHp = isPositiveNumber(sb?.hp?.average) ? sb.hp.average : sb?.hpMax;
+  const hadHp = isPositiveNumber(originalHp);
+  const [hpAverage, setHpAverage] = useState(hadHp ? String(originalHp) : '');
+  const [hpFormula, setHpFormula] = useState(sb?.hp?.formula ?? sb?.hitDice ?? '');
   const [str, setStr] = useState(sb?.abilities?.str ?? 10);
   const [dex, setDex] = useState(sb?.abilities?.dex ?? 10);
   const [con, setCon] = useState(sb?.abilities?.con ?? 10);
@@ -867,6 +883,25 @@ export function CreatureForm({ campaignId, gameSystem, editingCreature, onCreate
   const [conditionImmunities, setConditionImmunities] = useState(sb?.conditionImmunities ?? '');
   const [senses, setSenses] = useState(sb?.senses ?? '');
   const [languages, setLanguages] = useState(sb?.languages ?? '');
+  const [proficiencyFields, setProficiencyFields] = useState<
+    Pick<NpcStatBlock, 'savingThrows' | 'skills' | 'proficiencies'>
+  >({
+    savingThrows: sb?.savingThrows,
+    skills: sb?.skills,
+    proficiencies: sb?.proficiencies,
+  });
+  const isPf2e = gameSystem === GameSystem.PATHFINDER_2E;
+  const [level, setLevel] = useState<number | undefined>(sb?.level);
+  const workingStatBlock: NpcStatBlock = {
+    ...sb,
+    ac,
+    hpMax: hadHp ? Number(hpAverage) : undefined,
+    speed,
+    abilities: { ...sb?.abilities, str, dex, con, int, wis, cha },
+    challengeRating: cr || undefined,
+    level,
+    ...proficiencyFields,
+  };
 
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
@@ -935,7 +970,13 @@ export function CreatureForm({ campaignId, gameSystem, editingCreature, onCreate
       if (empty) delete statBlock[key];
       else statBlock[key] = value;
     };
+    setOrRemove('savingThrows', proficiencyFields.savingThrows);
+    setOrRemove('skills', proficiencyFields.skills);
+    setOrRemove('proficiencies', proficiencyFields.proficiencies);
     setOrRemove('hp', hpResult.hp);
+    setOrRemove('hpMax', hpResult.hp?.average);
+    setOrRemove('hitDice', hpResult.hp?.formula);
+    setOrRemove('level', isPf2e ? level : undefined);
     setOrRemove('creatureType', creatureType);
     setOrRemove('alignment', alignment);
     setOrRemove('challengeRating', cr);
@@ -997,7 +1038,7 @@ export function CreatureForm({ campaignId, gameSystem, editingCreature, onCreate
       </div>
 
       {formError && (
-        <div className="text-xs text-red-600 bg-red-500/10 rounded px-2 py-1">{formError}</div>
+        <div className="text-xs text-danger-ink bg-danger/10 rounded px-2 py-1">{formError}</div>
       )}
 
       {/* Name */}
@@ -1047,13 +1088,24 @@ export function CreatureForm({ campaignId, gameSystem, editingCreature, onCreate
             <button
               type="button"
               onClick={() => setImageUrl('')}
-              className="text-[10px] text-red-500 hover:text-red-600"
+              className="text-[10px] text-danger-ink hover:text-danger-ink"
             >
               Remove
             </button>
           )}
         </div>
       </div>
+      <AssetPicker
+        label="Browse Token Images"
+        type={AssetType.TOKEN}
+        campaignId={campaignId}
+        selectedAssetId={extractAssetId(imageUrl)}
+        onSelect={(asset) => setImageUrl(asset ? asset.id : '')}
+        allowUpload={false}
+        columns={5}
+        searchPlaceholder="Search token images..."
+        emptyMessage="No token images yet. Upload one to get started."
+      />
 
       {/* Type & Alignment */}
       <div className="grid grid-cols-2 gap-2">
@@ -1136,6 +1188,24 @@ export function CreatureForm({ campaignId, gameSystem, editingCreature, onCreate
         />
       </div>
 
+      {isPf2e && (
+        <div>
+          <label htmlFor="creature-level" className="text-[10px] text-stone-gray block mb-0.5">Level</label>
+          <input
+            id="creature-level"
+            type="number"
+            min={-1}
+            max={30}
+            value={level ?? ''}
+            onChange={(e) => {
+              const parsed = parseInt(e.target.value, 10);
+              setLevel(Number.isFinite(parsed) ? parsed : undefined);
+            }}
+            className="input-cozy w-full text-xs"
+          />
+        </div>
+      )}
+
       {/* Ability scores */}
       <div>
         <label className="text-[10px] text-stone-gray block mb-0.5">Ability Scores</label>
@@ -1163,6 +1233,30 @@ export function CreatureForm({ campaignId, gameSystem, editingCreature, onCreate
 
       {/* Disposition */}
       <div>
+        <label className="text-[10px] text-stone-gray block mb-1">Saving Throws &amp; Skills</label>
+        {isPf2e ? (
+          <Pf2eProficiencyEditor
+            statBlock={workingStatBlock}
+            onChange={(updated) => setProficiencyFields({
+              savingThrows: updated.savingThrows,
+              skills: updated.skills,
+              proficiencies: updated.proficiencies,
+            })}
+          />
+        ) : (
+          <ProficiencyEditor
+            statBlock={workingStatBlock}
+            onChange={(updated) => setProficiencyFields({
+              savingThrows: updated.savingThrows,
+              skills: updated.skills,
+              proficiencies: updated.proficiencies,
+            })}
+          />
+        )}
+      </div>
+
+      {/* Disposition */}
+      <div>
         <label className="text-[10px] text-stone-gray block mb-0.5">Disposition</label>
         <div className="flex gap-2">
           {([
@@ -1176,9 +1270,9 @@ export function CreatureForm({ campaignId, gameSystem, editingCreature, onCreate
               onClick={() => setDisposition(d)}
               className={`flex-1 py-1 text-[10px] rounded-cozy border transition-all ${
                 disposition === d
-                  ? color === 'teal'  ? 'border-teal-500 bg-teal-500/10 text-teal-700 font-semibold'
-                  : color === 'amber' ? 'border-amber-500 bg-amber-500/10 text-amber-700 font-semibold'
-                  :                     'border-red-500 bg-red-500/10 text-red-700 font-semibold'
+                  ? color === 'teal'  ? 'border-success bg-success/10 text-success-ink font-semibold'
+                  : color === 'amber' ? 'border-warning bg-warning/10 text-warning-ink font-semibold'
+                  :                     'border-danger bg-danger/10 text-danger-ink font-semibold'
                   : 'border-moss-green/20 hover:border-moss-green/40 text-stone-gray'
               }`}
             >

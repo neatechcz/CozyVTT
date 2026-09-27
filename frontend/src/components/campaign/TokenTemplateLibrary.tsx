@@ -29,6 +29,8 @@ import { TokenType, AssetType, AssetScope, CampaignRole } from '@/types';
 import type { TokenDisplayMode } from '@/types';
 import StatBlockEditor from './npc-stat-blocks/StatBlockEditor';
 import Button from '@/components/ui/Button';
+import { useServerConfigQuery } from '@/hooks/queries';
+import { getUploadLimit, formatUploadLimit } from '@/utils/uploadLimits';
 
 function defaultStatBlockForNpc(): NpcStatBlock {
   return {
@@ -114,7 +116,7 @@ export default function TokenTemplateLibrary({ isOpen, onClose }: TokenTemplateL
     api.listCampaigns().then(({ campaigns }) => {
       setDmCampaigns(
         campaigns.filter(
-          (c: any) => c.userRole === CampaignRole.DM && c.id !== campaign?.id
+          (c) => c.userRole === CampaignRole.DM && c.id !== campaign?.id
         )
       );
     }).catch(() => {});
@@ -220,8 +222,8 @@ export default function TokenTemplateLibrary({ isOpen, onClose }: TokenTemplateL
           >
             {/* Header */}
             <div className="flex items-center gap-3 px-5 py-4 border-b border-moss-green/20 bg-parchment/60 sticky top-0 z-10">
-              <Package className="w-5 h-5 text-moss-green flex-shrink-0" />
-              <h2 className="flex-1 text-base font-bold text-moss-green">Token Templates</h2>
+              <Package className="w-5 h-5 text-brand-ink flex-shrink-0" />
+              <h2 className="flex-1 text-base font-bold text-brand-ink">Token Templates</h2>
               <span className="text-xs text-stone-gray/60">
                 {total} template{total !== 1 ? 's' : ''}
               </span>
@@ -256,7 +258,7 @@ export default function TokenTemplateLibrary({ isOpen, onClose }: TokenTemplateL
                 </select>
                 <button
                   onClick={() => { setEditingTemplate(null); setShowForm(true); }}
-                  className="flex items-center gap-1 text-xs text-moss-green hover:text-moss-green/80 transition-colors"
+                  className="flex items-center gap-1 text-xs text-brand-ink hover:text-brand-ink/80 transition-colors"
                 >
                   <Plus className="w-3 h-3" /> New Template
                 </button>
@@ -265,7 +267,7 @@ export default function TokenTemplateLibrary({ isOpen, onClose }: TokenTemplateL
 
             {/* Error */}
             {error && (
-              <div className="mx-4 mt-2 text-xs text-red-600 bg-red-500/10 border border-red-500/20 rounded-cozy px-3 py-2">
+              <div className="mx-4 mt-2 text-xs text-danger-ink bg-danger/10 border border-danger/20 rounded-cozy px-3 py-2">
                 {error}
               </div>
             )}
@@ -279,7 +281,7 @@ export default function TokenTemplateLibrary({ isOpen, onClose }: TokenTemplateL
                 </div>
               ) : templates.length === 0 ? (
                 <div className="text-center py-12 px-6">
-                  <Package className="w-8 h-8 text-moss-green/30 mx-auto mb-2" />
+                  <Package className="w-8 h-8 text-brand-ink/30 mx-auto mb-2" />
                   <p className="text-sm text-stone-gray/70">
                     {searchQuery ? 'No templates match your search.' : 'No saved token templates yet.'}
                   </p>
@@ -311,7 +313,12 @@ export default function TokenTemplateLibrary({ isOpen, onClose }: TokenTemplateL
 
             {/* Create / Edit Form */}
             {showForm && (
+              // Keyed so switching straight from one template to another
+              // remounts the form — handleEdit leaves showForm true, so
+              // otherwise the previous template's field state carried over and
+              // saving wrote it onto the newly selected template.
               <TemplateForm
+                key={editingTemplate?.id ?? 'new'}
                 campaignId={campaign?.id || ''}
                 editingTemplate={editingTemplate}
                 onCreated={(t) => {
@@ -367,8 +374,8 @@ function TemplateRow({
   onCopyToCampaign,
 }: TemplateRowProps) {
   const typeColors: Record<string, string> = {
-    object: 'bg-amber-500/10 text-amber-600',
-    npc: 'bg-red-500/10 text-red-600',
+    object: 'bg-warning/10 text-warning-ink',
+    npc: 'bg-danger/10 text-danger-ink',
     player: 'bg-teal-500/10 text-teal-600',
   };
 
@@ -387,8 +394,8 @@ function TemplateRow({
           />
         ) : (
           <div className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 text-white font-bold text-sm ${
-            template.disposition === 'hostile' ? 'bg-red-500' :
-            template.disposition === 'friendly' ? 'bg-teal-500' : 'bg-amber-500'
+            template.disposition === 'hostile' ? 'bg-danger' :
+            template.disposition === 'friendly' ? 'bg-teal-500' : 'bg-warning'
           }`}>
             {template.name.charAt(0).toUpperCase()}
           </div>
@@ -419,14 +426,14 @@ function TemplateRow({
             <button
               onClick={onPlace}
               disabled={isPlacing}
-              className="flex-1 flex items-center justify-center gap-1.5 py-1.5 text-xs rounded-cozy bg-moss-green/10 text-moss-green border border-moss-green/30 hover:bg-moss-green/20 transition-colors font-medium"
+              className="flex-1 flex items-center justify-center gap-1.5 py-1.5 text-xs rounded-cozy bg-moss-green/10 text-brand-ink border border-moss-green/30 hover:bg-moss-green/20 transition-colors font-medium"
             >
               {isPlacing ? <Loader2 className="w-3 h-3 animate-spin" /> : <MapPin className="w-3 h-3" />}
               {isPlacing ? 'Placing...' : 'Place on Map'}
             </button>
             <button
               onClick={onEdit}
-              className="flex items-center gap-1 px-3 py-1.5 text-xs rounded-cozy border border-moss-green/20 text-moss-green hover:bg-moss-green/10 transition-colors"
+              className="flex items-center gap-1 px-3 py-1.5 text-xs rounded-cozy border border-moss-green/20 text-brand-ink hover:bg-moss-green/10 transition-colors"
               title="Edit template"
             >
               <Pencil className="w-3 h-3" /> Edit
@@ -463,7 +470,7 @@ function TemplateRow({
             </div>
             <button
               onClick={onDelete}
-              className="flex items-center gap-1 px-3 py-1.5 text-xs rounded-cozy border border-red-500/20 text-red-500 hover:bg-red-500/10 transition-colors"
+              className="flex items-center gap-1 px-3 py-1.5 text-xs rounded-cozy border border-danger/20 text-danger-ink hover:bg-danger/10 transition-colors"
             >
               <Trash2 className="w-3 h-3" /> Delete
             </button>
@@ -500,6 +507,10 @@ interface TemplateFormProps {
 
 function TemplateForm({ campaignId, editingTemplate, onCreated, onEdited, onCancel }: TemplateFormProps) {
   const isEdit = !!editingTemplate;
+  const { data: serverConfig } = useServerConfigQuery();
+  // The stat block editor interprets a template differently per game system,
+  // so this form needs the campaign's system as well as its id.
+  const { campaign } = useCampaign();
 
   const [name, setName] = useState(editingTemplate?.name ?? '');
   const [type, setType] = useState<string>(editingTemplate?.type ?? 'object');
@@ -524,17 +535,20 @@ function TemplateForm({ campaignId, editingTemplate, onCreated, onEdited, onCanc
   const handleImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (file.size > 5 * 1024 * 1024) { setFormError('Image must be under 5 MB'); return; }
+    const tokenLimit = getUploadLimit(serverConfig, AssetType.TOKEN);
+    if (file.size > tokenLimit) { setFormError(`Image must be under ${formatUploadLimit(tokenLimit)}`); return; }
 
     setIsUploading(true);
     setFormError(null);
     try {
+      // Fields before the file so the server can name the type if it rejects an
+      // oversize upload mid-stream.
       const formData = new FormData();
-      formData.append('file', file);
       formData.append('type', AssetType.TOKEN);
       formData.append('scope', AssetScope.CAMPAIGN);
       formData.append('campaignId', campaignId);
       formData.append('name', file.name.replace(/\.[^.]+$/, ''));
+      formData.append('file', file);
       const { asset } = await api.uploadAsset(formData);
       setImageUrl(asset.id);
     } catch {
@@ -581,7 +595,7 @@ function TemplateForm({ campaignId, editingTemplate, onCreated, onEdited, onCanc
   return (
     <div className="border-t border-moss-green/20 bg-parchment/40 p-4 space-y-3 max-h-[60vh] overflow-y-auto">
       <div className="flex items-center justify-between">
-        <h3 className="text-xs font-semibold text-moss-green uppercase tracking-wide">
+        <h3 className="text-xs font-semibold text-brand-ink uppercase tracking-wide">
           {isEdit ? 'Edit Template' : 'New Token Template'}
         </h3>
         <button onClick={onCancel} className="text-stone-gray hover:text-stone-gray/80 p-0.5">
@@ -590,7 +604,7 @@ function TemplateForm({ campaignId, editingTemplate, onCreated, onEdited, onCanc
       </div>
 
       {formError && (
-        <div className="text-xs text-red-600 bg-red-500/10 rounded px-2 py-1">{formError}</div>
+        <div className="text-xs text-danger-ink bg-danger/10 rounded px-2 py-1">{formError}</div>
       )}
 
       {/* Name */}
@@ -605,7 +619,12 @@ function TemplateForm({ campaignId, editingTemplate, onCreated, onEdited, onCanc
         <div className="flex items-center gap-2">
           {imageUrl ? (
             <img
-              src={imageUrl.startsWith('http') || imageUrl.startsWith('/') ? imageUrl : `/api/assets/${imageUrl}/file`}
+              // imageUrl may be a bare asset id or an /api/assets path — both
+              // resolve through the tokens serving route. (There is no
+              // /api/assets/:id/file endpoint; this used to point at one.)
+              src={imageUrl.startsWith('http') || imageUrl.startsWith('/')
+                ? imageUrl
+                : api.getAssetUrl(imageUrl, 'tokens')}
               alt="Token" className="w-10 h-10 rounded-full object-cover border border-moss-green/20"
             />
           ) : (
@@ -614,11 +633,11 @@ function TemplateForm({ campaignId, editingTemplate, onCreated, onEdited, onCanc
             </div>
           )}
           <input ref={fileInputRef} type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={handleImageUpload} className="hidden" />
-          <button type="button" onClick={() => fileInputRef.current?.click()} disabled={isUploading} className="text-[10px] text-moss-green hover:text-moss-green/80 flex items-center gap-1">
+          <button type="button" onClick={() => fileInputRef.current?.click()} disabled={isUploading} className="text-[10px] text-brand-ink hover:text-brand-ink/80 flex items-center gap-1">
             {isUploading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Upload className="w-3 h-3" />}
             {imageUrl ? 'Change' : 'Upload'}
           </button>
-          {imageUrl && <button type="button" onClick={() => setImageUrl('')} className="text-[10px] text-red-500 hover:text-red-600">Remove</button>}
+          {imageUrl && <button type="button" onClick={() => setImageUrl('')} className="text-[10px] text-danger-ink hover:text-danger-ink">Remove</button>}
         </div>
       </div>
 
@@ -681,7 +700,7 @@ function TemplateForm({ campaignId, editingTemplate, onCreated, onEdited, onCanc
               if (!statBlock) setStatBlock(defaultStatBlockForNpc());
               setShowStatBlock((prev) => !prev);
             }}
-            className="flex items-center gap-1 w-full text-left py-1 text-[10px] font-semibold text-moss-green uppercase tracking-wide hover:text-moss-green/80 transition-colors"
+            className="flex items-center gap-1 w-full text-left py-1 text-[10px] font-semibold text-brand-ink uppercase tracking-wide hover:text-brand-ink/80 transition-colors"
           >
             {showStatBlock ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
             Stat Block
@@ -689,11 +708,15 @@ function TemplateForm({ campaignId, editingTemplate, onCreated, onEdited, onCanc
           </button>
           {showStatBlock && statBlock && (
             <div className="pl-1 pt-1">
-              <StatBlockEditor statBlock={statBlock} onChange={setStatBlock} />
+              <StatBlockEditor
+                statBlock={statBlock}
+                onChange={setStatBlock}
+                gameSystem={campaign?.gameSystem ?? null}
+              />
               <button
                 type="button"
                 onClick={() => { setStatBlock(null); setShowStatBlock(false); }}
-                className="mt-2 text-[10px] text-red-500 hover:text-red-600 flex items-center gap-1"
+                className="mt-2 text-[10px] text-danger-ink hover:text-danger-ink flex items-center gap-1"
               >
                 <Trash2 className="w-3 h-3" /> Clear stat block
               </button>

@@ -2,6 +2,7 @@ import { prisma } from '../config/database';
 import { computeVisibility, isPointVisible, type VisibilityPolygon } from './serverRaycasting';
 import type { WallSegment, LightSource } from '../types/walls';
 import logger from './logger';
+import type { Token } from '../websocket/shared';
 
 /**
  * Spirit Layer Utility Functions
@@ -11,31 +12,9 @@ import logger from './logger';
  * Spirit layer tokens and data are never sent to players — only DMs see them.
  */
 
-// Token interface
-interface Token {
-  id: string;
-  characterId?: string | null;
-  name: string;
-  imageUrl: string;
-  position: { x: number; y: number };
-  size: { width: number; height: number };
-  layer: 'token' | 'spirit';
-  visible: boolean;
-  controlledBy?: string | null;
-  rotation: number;
-  conditions: string[];
-  metadata: Record<string, any>;
-  type?: string;
-  disposition?: string | null;
-  hp?: { current: number; max: number; temp: number } | null;
-  showHpBar?: boolean;
-  notes?: string;
-  initiative?: number | null;
-  sightRadius?: number;
-  displayMode?: 'pog' | 'top-down' | 'full-art';
-  statBlock?: Record<string, any> | null;
-  creatureTemplateId?: string | null;
-}
+// The token shape lives in websocket/shared.ts — this file used to keep a third
+// copy of it, looser than both others (`type` and `disposition` as bare
+// strings). See the note there.
 
 // Map data as returned from Prisma
 interface MapData {
@@ -346,34 +325,65 @@ export function filterTokensByLighting(
   const mapWidthPx = mapWidth * gridSize;
   const mapHeightPx = mapHeight * gridSize;
 
-  // Compute combined visibility polygons from all controlled tokens.
-  // Token grid coords use Y=0 at bottom (VTT standard); wall pixel coords use Y=0 at top.
-  // Apply the Y-flip so both are in the same canvas pixel coordinate space.
-  const visPolygons = myTokens.map((t) => {
+  /**
+   * One line-of-sight polygon per controlled token, deliberately **unbounded**
+   * by the token's sight radius.
+   *
+   * The radius governs how far you can make something out in the dark, not how
+   * far away you can notice something that is lit — you can see a bonfire
+   * across a field. So the radius is applied as a distance test below rather
+   * than baked into the polygon, and the polygon answers only "is there a wall
+   * in the way".
+   */
+  const sights = myTokens.map((t) => {
+    // Token grid coords use Y=0 at bottom (VTT standard); wall pixel coords use
+    // Y=0 at top. Apply the Y-flip so both are in the same pixel space.
     const cx = (t.position.x + (t.size?.width ?? 1) / 2) * gridSize;
     const cy = (mapHeight - 1 - t.position.y + (t.size?.height ?? 1) / 2) * gridSize;
-    const radiusPx = (t.sightRadius ?? 0) * gridSize;
-    return computeVisibility({ x: cx, y: cy }, wallSegs, mapWidthPx, mapHeightPx, radiusPx);
+    return {
+      poly: computeVisibility({ x: cx, y: cy }, wallSegs, mapWidthPx, mapHeightPx, 0),
+      cx,
+      cy,
+      // 0 means unlimited, which is what a token with no sight radius set has.
+      radiusPx: (t.sightRadius ?? 0) * gridSize,
+    };
   });
 
-  // Additive visibility: also the visibility polygons of each enabled light source.
-  const lightPolygons = options.lightPolygons ?? computeLightPolygons(walls, mapWidth, mapHeight, gridSize, lights);
-  visPolygons.push(...lightPolygons);
+  const litAreas = options.lightPolygons ?? computeLightPolygons(walls, mapWidth, mapHeight, gridSize, lights);
 
   const elapsed = Date.now() - startMs;
   if (elapsed > 50) {
-    logger.warn(`[lighting] filterTokensByLighting took ${elapsed}ms for userId=${playerUserId} (${myTokens.length} tokens, ${lightPolygons.length} lights)`);
+    logger.warn(`[lighting] filterTokensByLighting took ${elapsed}ms for userId=${playerUserId} (${myTokens.length} tokens, ${litAreas.length} lights)`);
   }
 
   // Keep own tokens and tokens inside any of the visibility polygons (token or light).
   // No vision source at all → only own tokens (none).
   return tokens.filter((t) => {
     if (isOwn(t)) return true;
-    if (visPolygons.length === 0) return false;
+    if (sights.length === 0) return false;
 
     const cx = (t.position.x + (t.size?.width ?? 1) / 2) * gridSize;
     const cy = (mapHeight - 1 - t.position.y + (t.size?.height ?? 1) / 2) * gridSize;
-    return visPolygons.some((poly) => isPointVisible({ x: cx, y: cy }, poly));
+    const point = { x: cx, y: cy };
+
+    // Line of sight is required, always.
+    //
+    // Each light's polygon used to be pushed onto this same list and the test
+    // was "inside ANY of them", so a light could stand in for the player's own
+    // eyes: a creature in a lit room was sent to every player on the map,
+    // through walls, at any distance. A light reveals what you could already
+    // have seen; it never sees on your behalf.
+    const withLineOfSight = sights.filter((s) => isPointVisible(point, s.poly));
+    if (withLineOfSight.length === 0) return false;
+
+    // Inside a viewer's own vision radius: made out whether or not it is lit.
+    const seenUnaided = withLineOfSight.some(
+      (s) => s.radiusPx <= 0 || Math.hypot(cx - s.cx, cy - s.cy) <= s.radiusPx
+    );
+    if (seenUnaided) return true;
+
+    // Further off than that, it has to be standing in light.
+    return litAreas.some((poly) => isPointVisible(point, poly));
   });
 }
 

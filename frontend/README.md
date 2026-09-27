@@ -24,6 +24,8 @@ npx tsc --noEmit         # type-check
 - [`src/types/index.ts`](src/types/index.ts) — TypeScript types mirroring the backend
 - [`src/themes.ts`](src/themes.ts) — built-in color themes and font families
 - [`src/components/character-sheets/`](src/components/character-sheets/) — per-game-system character sheet implementations
+- [`src/components/common/Markdown.tsx`](src/components/common/Markdown.tsx) — the one Markdown renderer (notes, documents). Import it; do not use `react-markdown` directly, so raw HTML stays off and the plugin set stays the same everywhere
+- [`security-headers.conf`](security-headers.conf) — the Content-Security-Policy and other headers the production image serves the app page with. Included by [`nginx.conf`](nginx.conf) in every location, because nginx does not inherit them. Anything loading from a new host has to be allowed here, and the dev server has no policy, so a violation only shows up in a production build
 
 ## More information
 

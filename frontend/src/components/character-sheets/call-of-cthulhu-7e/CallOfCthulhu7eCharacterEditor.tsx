@@ -5,7 +5,7 @@
  * derived stats, half/fifth values, and validation.
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   User,
   Target,
@@ -26,6 +26,7 @@ import { BackstorySection } from './components/BackstorySection';
 import { api } from '../../../services/api';
 
 interface CallOfCthulhu7eCharacterEditorProps {
+  onDirtyChange?: (dirty: boolean) => void;
   character: Character;
   onSave: (data: any, showToast?: boolean, tokenImageUrl?: string) => Promise<void>;
   onCancel: () => void;
@@ -110,6 +111,7 @@ export const CallOfCthulhu7eCharacterEditor: React.FC<CallOfCthulhu7eCharacterEd
   character,
   onSave,
   onCancel,
+  onDirtyChange,
 }) => {
   const [activeTab, setActiveTab] = useState<TabId>('overview');
   const [isSaving, setIsSaving] = useState(false);
@@ -137,6 +139,25 @@ export const CallOfCthulhu7eCharacterEditor: React.FC<CallOfCthulhu7eCharacterEd
     contacts: dataWithoutSkills.contacts || [],
     conditions: dataWithoutSkills.conditions || {},
   }));
+
+  const dirtyRef = useRef(false);
+  const hasInteractedRef = useRef(false);
+  const cleanSnapshotRef = useRef<string | null>(null);
+  if (cleanSnapshotRef.current === null) cleanSnapshotRef.current = JSON.stringify(formData);
+  const latestFormDataRef = useRef(formData);
+  latestFormDataRef.current = formData;
+  useEffect(() => {
+    if (!hasInteractedRef.current) {
+      cleanSnapshotRef.current = JSON.stringify(formData);
+      return;
+    }
+    const dirty = JSON.stringify(formData) !== cleanSnapshotRef.current;
+    if (dirty !== dirtyRef.current) {
+      dirtyRef.current = dirty;
+      onDirtyChange?.(dirty);
+    }
+  }, [formData, onDirtyChange]);
+  const noteInteraction = () => { hasInteractedRef.current = true; };
 
   // Token image state
   const [tokenImageFile, setTokenImageFile] = useState<File | null>(null);
@@ -271,6 +292,7 @@ export const CallOfCthulhu7eCharacterEditor: React.FC<CallOfCthulhu7eCharacterEd
 
   // Handle save
   const handleSave = async () => {
+    const savedSnapshot = JSON.stringify(formData);
     setIsSaving(true);
     try {
       // Include color customization in saved data
@@ -309,6 +331,10 @@ export const CallOfCthulhu7eCharacterEditor: React.FC<CallOfCthulhu7eCharacterEd
 
       // Pass the tokenImageUrl as a separate parameter if it was uploaded
       await onSave(updatedData, true, newTokenImageUrl);
+      cleanSnapshotRef.current = savedSnapshot;
+      const stillDirty = JSON.stringify(latestFormDataRef.current) !== savedSnapshot;
+      dirtyRef.current = stillDirty;
+      onDirtyChange?.(stillDirty);
     } catch (error) {
       console.error('Failed to save character:', error);
     } finally {
@@ -897,7 +923,12 @@ export const CallOfCthulhu7eCharacterEditor: React.FC<CallOfCthulhu7eCharacterEd
 
   // Main render
   return (
-    <div className="glass-panel overflow-hidden">
+    <div
+      className="glass-panel overflow-hidden"
+      onInputCapture={noteInteraction}
+      onChangeCapture={noteInteraction}
+      onPointerDownCapture={noteInteraction}
+    >
       {renderHeader()}
       {renderTabs()}
       <div className="p-6 bg-parchment max-h-[calc(100vh-200px)] overflow-y-auto">

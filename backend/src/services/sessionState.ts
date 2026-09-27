@@ -13,6 +13,8 @@
 import { prisma } from '../config/database';
 import logger from '../utils/logger';
 import { bumpMapVersion } from '../websocket/mapVersion';
+import type { Token } from '../websocket/shared';
+import { readJsonArray, readTokens, toJson } from '../utils/prisma-json';
 
 /**
  * Game State Interface
@@ -22,10 +24,10 @@ export interface GameState {
   sessionId?: string;
   savedAt: string;
   mapId: string | null;
-  tokens: any[];
+  tokens: Token[];
   spiritLayerVisible: boolean;
   currentVibe: string | null;
-  annotations: any[];
+  annotations: unknown[];
 }
 
 /**
@@ -64,10 +66,10 @@ export async function captureGameState(
       sessionId: sessionId || undefined,
       savedAt: new Date().toISOString(),
       mapId: campaign.currentMapId,
-      tokens: campaign.currentMap?.tokens ? (Array.isArray(campaign.currentMap.tokens) ? campaign.currentMap.tokens : []) : [],
+      tokens: readTokens(campaign.currentMap?.tokens),
       spiritLayerVisible: campaign.spiritLayerEnabled,
       currentVibe: campaign.currentVibe,
-      annotations: campaign.currentMap?.annotations ? (Array.isArray(campaign.currentMap.annotations) ? campaign.currentMap.annotations : []) : [],
+      annotations: readJsonArray(campaign.currentMap?.annotations),
     };
 
     logger.info(`📸 Captured game state for campaign ${campaignId}`);
@@ -123,8 +125,8 @@ export async function restoreGameState(
         await prisma.map.update({
           where: { id: state.mapId },
           data: {
-            tokens: state.tokens as any,
-            annotations: state.annotations as any,
+            tokens: toJson(state.tokens),
+            annotations: toJson(state.annotations),
           },
         });
         bumpMapVersion(state.mapId); // cached drag snapshots of this map are stale now

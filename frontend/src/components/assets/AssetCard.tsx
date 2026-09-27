@@ -11,11 +11,13 @@ import {
   Tag,
   Globe,
   Users,
+  FileText,
 } from 'lucide-react';
 import { Asset, AssetType, AssetScope } from '../../types';
 import { useAuth } from '../../contexts/AuthContext';
 import { api } from '../../services/api';
 import ConfirmDialog from '@/components/common/ConfirmDialog';
+import { assetScopeLabel } from '@/utils/assetUrl';
 
 interface AssetCardProps {
   asset: Asset;
@@ -45,6 +47,15 @@ function AssetCardInner({ asset, viewMode, onView, onDelete }: AssetCardProps) {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   };
 
+  /**
+   * Whether this type is shown as a picture. Audio and documents are shown as
+   * an icon instead. This used to be an `=== AUDIO` check written twice, so a
+   * document fell through to an <img> with no source and rendered as a broken
+   * picture.
+   */
+  const showsPicture =
+    asset.type === AssetType.MAP || asset.type === AssetType.TOKEN || asset.type === AssetType.AVATAR;
+
   // Get asset thumbnail URL
   const getThumbnailUrl = (): string => {
     if (asset.type === AssetType.MAP) {
@@ -66,11 +77,13 @@ function AssetCardInner({ asset, viewMode, onView, onDelete }: AssetCardProps) {
       case AssetType.MAP:
         return <MapPin className="w-8 h-8 text-warm-amber" />;
       case AssetType.TOKEN:
-        return <User className="w-8 h-8 text-moss-green" />;
+        return <User className="w-8 h-8 text-brand-ink" />;
       case AssetType.AUDIO:
         return <FileAudio className="w-8 h-8 text-spirit-purple" />;
       case AssetType.AVATAR:
         return <User className="w-8 h-8 text-sunset-orange" />;
+      case AssetType.DOCUMENT:
+        return <FileText className="w-8 h-8 text-moss-green" />;
       default:
         return <FileImage className="w-8 h-8 text-stone-gray" />;
     }
@@ -125,7 +138,7 @@ function AssetCardInner({ asset, viewMode, onView, onDelete }: AssetCardProps) {
         <div className="flex items-center gap-4">
           {/* Thumbnail */}
           <div className="flex-shrink-0 w-20 h-20 bg-moss-green/10 rounded-lg overflow-hidden flex items-center justify-center">
-            {asset.type === AssetType.AUDIO ? (
+            {!showsPicture ? (
               getAssetIcon()
             ) : (
               <img
@@ -144,7 +157,7 @@ function AssetCardInner({ asset, viewMode, onView, onDelete }: AssetCardProps) {
 
           {/* Info */}
           <div className="flex-1 min-w-0">
-            <h3 className="text-lg font-semibold text-moss-green truncate">
+            <h3 className="text-lg font-semibold text-brand-ink truncate">
               {asset.name}
             </h3>
             <div className="flex items-center gap-3 mt-1 text-sm text-stone-gray">
@@ -156,7 +169,7 @@ function AssetCardInner({ asset, viewMode, onView, onDelete }: AssetCardProps) {
                 ) : (
                   <Users className="w-4 h-4" />
                 )}
-                {asset.scope === AssetScope.USER ? 'Personal' : asset.scope}
+                {assetScopeLabel(asset.scope)}
               </span>
               <span>{formatFileSize(asset.fileSize)}</span>
               <span>{asset.type}</span>
@@ -185,7 +198,7 @@ function AssetCardInner({ asset, viewMode, onView, onDelete }: AssetCardProps) {
           <div className="flex items-center gap-2">
             <button
               onClick={onView}
-              className="p-2 rounded-lg bg-moss-green/10 hover:bg-moss-green/20 text-moss-green transition-colors"
+              className="p-2 rounded-lg bg-moss-green/10 hover:bg-moss-green/20 text-brand-ink transition-colors"
               title="View details"
             >
               <Eye className="w-5 h-5" />
@@ -201,7 +214,7 @@ function AssetCardInner({ asset, viewMode, onView, onDelete }: AssetCardProps) {
               <button
                 onClick={handleDelete}
                 disabled={isDeleting}
-                className="p-2 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-600 transition-colors disabled:opacity-50"
+                className="p-2 rounded-lg bg-danger/10 hover:bg-danger/20 text-danger-ink transition-colors disabled:opacity-50"
                 title="Delete"
               >
                 <Trash2 className="w-5 h-5" />
@@ -229,7 +242,7 @@ function AssetCardInner({ asset, viewMode, onView, onDelete }: AssetCardProps) {
     >
       {/* Thumbnail */}
       <div className="relative w-full h-48 bg-moss-green/10 overflow-hidden">
-        {asset.type === AssetType.AUDIO ? (
+        {!showsPicture ? (
           <div className="flex items-center justify-center w-full h-full">
             {getAssetIcon()}
           </div>
@@ -253,21 +266,13 @@ function AssetCardInner({ asset, viewMode, onView, onDelete }: AssetCardProps) {
         {/* Scope Badge */}
         <div className="absolute top-2 right-2 px-2 py-1 bg-paper-white backdrop-blur-sm rounded-md text-xs font-medium text-stone-gray flex items-center gap-1">
           {asset.scope === AssetScope.GLOBAL ? (
-            <>
-              <Globe className="w-3 h-3" />
-              Global
-            </>
+            <Globe className="w-3 h-3" />
           ) : asset.scope === AssetScope.USER ? (
-            <>
-              <User className="w-3 h-3" />
-              Personal
-            </>
+            <User className="w-3 h-3" />
           ) : (
-            <>
-              <Users className="w-3 h-3" />
-              Campaign
-            </>
+            <Users className="w-3 h-3" />
           )}
+          {assetScopeLabel(asset.scope)}
         </div>
 
         {/* Hover Actions */}
@@ -282,7 +287,7 @@ function AssetCardInner({ asset, viewMode, onView, onDelete }: AssetCardProps) {
               className="p-3 bg-paper-white rounded-full hover:bg-white transition-colors"
               title="View details"
             >
-              <Eye className="w-5 h-5 text-moss-green" />
+              <Eye className="w-5 h-5 text-brand-ink" />
             </button>
             <button
               onClick={handleDownload}
@@ -295,7 +300,7 @@ function AssetCardInner({ asset, viewMode, onView, onDelete }: AssetCardProps) {
               <button
                 onClick={handleDelete}
                 disabled={isDeleting}
-                className="p-3 bg-red-500/90 rounded-full hover:bg-red-600 transition-colors disabled:opacity-50"
+                className="p-3 bg-danger/90 rounded-full hover:bg-danger transition-colors disabled:opacity-50"
                 title="Delete"
               >
                 <Trash2 className="w-5 h-5 text-white" />
@@ -307,7 +312,7 @@ function AssetCardInner({ asset, viewMode, onView, onDelete }: AssetCardProps) {
 
       {/* Content */}
       <div className="p-4">
-        <h3 className="text-lg font-semibold text-moss-green truncate mb-2">
+        <h3 className="text-lg font-semibold text-brand-ink truncate mb-2">
           {asset.name}
         </h3>
 

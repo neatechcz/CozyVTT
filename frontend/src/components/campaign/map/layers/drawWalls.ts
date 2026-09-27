@@ -15,7 +15,7 @@ export interface WallsDrawState {
   /** DM-selected color for plain walls (doors/windows use fixed colors). */
   wallColor: string;
   hoveredWallId: string | null;
-  selectedWallId: string | null;
+  selectedWallIds: ReadonlySet<string>;
   hoveredDoorId: string | null;
   /** Show endpoint/junction nodes (any wall tool active). */
   showEndpoints: boolean;
@@ -115,7 +115,7 @@ export function drawWalls(
   if (state.isDM) {
     // DM sees all walls
     for (const seg of state.wallSegments) {
-      drawWallSegment(ctx, seg, zoom, state.wallColor, seg.id === state.hoveredWallId || seg.id === state.selectedWallId);
+      drawWallSegment(ctx, seg, zoom, state.wallColor, seg.id === state.hoveredWallId || state.selectedWallIds.has(seg.id));
     }
     // Endpoint/junction nodes — shown whenever a wall tool is active.
     // White dot = dangling endpoint; larger yellow dot = junction (≥2 segments share the point).

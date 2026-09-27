@@ -3,13 +3,14 @@
  * Modal dialog for creating a new character with game system templates
  */
 
-import { useState, FormEvent, useEffect } from 'react';
+import { useState, FormEvent, useEffect, useRef } from 'react';
 import { Loader2, User, Sparkles } from 'lucide-react';
 import { Modal } from '@/components/ui';
 import { Character, GameSystem, Campaign } from '@/types';
 import { GAME_SYSTEM_OPTIONS } from '@/constants/game-systems';
 import api from '@/services/api';
 import Button from '@/components/ui/Button';
+import { apiErrorMessage, apiValidationIssues, errorMessage } from '@/utils/errors';
 
 interface NewCharacterModalProps {
   isOpen: boolean;
@@ -122,7 +123,7 @@ export default function NewCharacterModal({
     try {
       const response = await api.listCampaigns();
       setAvailableCampaigns(response.campaigns);
-    } catch (err: any) {
+    } catch (err) {
       console.error('Failed to fetch campaigns:', err);
     } finally {
       setLoadingCampaigns(false);
@@ -165,6 +166,14 @@ export default function NewCharacterModal({
     return TEMPLATE_OPTIONS_BY_SYSTEM[gameSystem] || [];
   };
 
+  /**
+   * When true, the sheet is also published as a shared template after the
+   * character is created. Held in a ref rather than state because the second
+   * submit button sets it immediately before the form submits, and a state
+   * update would not have landed by the time handleSubmit reads it.
+   */
+  const alsoPublishTemplate = useRef(false);
+
   const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     setError('');
@@ -188,19 +197,8 @@ export default function NewCharacterModal({
       let templateData: Record<string, unknown> = {};
       if (selectedTemplate) {
         const systemParam = gameSystem || 'null';
-        const templateResponse = await fetch(
-          `/api/characters/templates/${systemParam}/${selectedTemplate}`,
-          { credentials: 'include' }
-        );
-
-        if (!templateResponse.ok) {
-          const errorText = await templateResponse.text();
-          console.error('Template fetch failed:', errorText);
-          throw new Error(`Failed to fetch character template: ${templateResponse.status} ${templateResponse.statusText}`);
-        }
-
-        const templateJson = await templateResponse.json();
-        templateData = templateJson.data || {};
+        const starter = await api.getStarterSheet(systemParam, selectedTemplate);
+        templateData = starter.data || {};
       }
 
       // Create character using the api client
@@ -210,6 +208,24 @@ export default function NewCharacterModal({
         gameSystem: gameSystem || undefined,
         data: templateData as unknown as import('@/types').CharacterData,
       });
+
+      // Optionally publish the same sheet as a shared template. Done after the
+      // character exists, and failing softly: the character is the thing the
+      // user asked for, so a template error must not lose it.
+      if (alsoPublishTemplate.current) {
+        try {
+          await api.createCharacterTemplate({
+            name: name.trim(),
+            gameSystem: gameSystem || null,
+            data: templateData,
+          });
+        } catch {
+          setError(
+            'Character created, but publishing it as a template failed. You can retry with "Save as Template" in the editor.'
+          );
+        }
+        alsoPublishTemplate.current = false;
+      }
 
       // Reset form
       setName('');
@@ -222,17 +238,17 @@ export default function NewCharacterModal({
 
       // Close modal
       onClose();
-    } catch (err: any) {
+    } catch (err) {
       // Show detailed validation errors if available
-      const errorData = err.response?.data;
-      if (errorData?.validationErrors && Array.isArray(errorData.validationErrors)) {
-        const errorList = errorData.validationErrors
-          .map((e: any) => `• ${e.path}: ${e.message}`)
+      const issues = apiValidationIssues(err);
+      if (issues) {
+        const errorList = issues
+          .map((e) => `• ${e.path}: ${e.message}`)
           .join('\n');
-        setError(`${errorData.message}\n\n${errorList}`);
-        console.error('Validation errors:', errorData.validationErrors);
+        setError(`${apiErrorMessage(err)}\n\n${errorList}`);
+        console.error('Validation errors:', issues);
       } else {
-        setError(errorData?.message || err.message || 'Failed to create character');
+        setError(apiErrorMessage(err) || errorMessage(err) || 'Failed to create character');
       }
     } finally {
       setLoading(false);
@@ -411,7 +427,7 @@ export default function NewCharacterModal({
                 {/* Info Box */}
                 <div className="rounded-lg p-4 bg-moss-green/10 border border-moss-green/30">
                   <p className="text-sm text-ink">
-                    <strong className="text-moss-green">Note:</strong> After
+                    <strong className="text-brand-ink">Note:</strong> After
                     creation, you'll be redirected to the character editor where
                     you can customize all details and save when ready.
                   </p>
@@ -444,6 +460,20 @@ export default function NewCharacterModal({
                         Create Character
                       </>
                     )}
+                  </Button>
+                </div>
+
+                {/* Publish the same sheet for others to copy, in one step. */}
+                <div className="pt-1">
+                  <Button
+                    type="submit"
+                    variant="secondary"
+                    disabled={loading || !isFormValid}
+                    onClick={() => { alsoPublishTemplate.current = true; }}
+                    title="Create this character and also publish it as a template others can copy"
+                    className="w-full disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Create &amp; Publish as Template
                   </Button>
                 </div>
               </form>

@@ -198,21 +198,21 @@ describe('REST walls and lights', () => {
     expect(tokenEvents(alice)).toEqual([['token.removed', 'goblin']]);
   });
 
-  it('re-syncs after light POST, PATCH, DELETE and PUT', async () => {
+  it('does not reveal tokens through a wall after light POST, PATCH, DELETE or PUT', async () => {
     await request(app).post(`${BASE}/lights`).send(TORCH);
-    expect(tokenEvents(alice)).toEqual([['token.added', 'goblin']]);
+    expect(tokenEvents(alice)).toEqual([]);
 
     alice.emit.mockClear();
     await request(app).patch(`${BASE}/lights/${LIGHT_ID}`).send({ enabled: false });
-    expect(tokenEvents(alice)).toEqual([['token.removed', 'goblin']]);
+    expect(tokenEvents(alice)).toEqual([]);
 
     alice.emit.mockClear();
     await request(app).put(`${BASE}/lights`).send({ lights: [TORCH] });
-    expect(tokenEvents(alice)).toEqual([['token.added', 'goblin']]);
+    expect(tokenEvents(alice)).toEqual([]);
 
     alice.emit.mockClear();
     await request(app).delete(`${BASE}/lights/${LIGHT_ID}`);
-    expect(tokenEvents(alice)).toEqual([['token.removed', 'goblin']]);
+    expect(tokenEvents(alice)).toEqual([]);
   });
 });
 

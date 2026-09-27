@@ -100,7 +100,11 @@ Copy `backend/.env.example` to `backend/.env` and fill in the values.
 | `MAX_TOKEN_SIZE_MB` | No | `5` | Upload size limit for token images |
 | `MAX_AUDIO_SIZE_MB` | No | `20` | Upload size limit for audio files |
 | `MAX_AVATAR_SIZE_MB` | No | `2` | Upload size limit for avatar images |
+| `MAX_DOCUMENT_SIZE_MB` | No | `50` | Upload size limit for PDF, text and Markdown documents |
+| `NGINX_MAX_BODY_SIZE` | No | `55M` | Request body cap for the bundled Nginx (`client_max_body_size`); must cover the largest limit above |
 | `ASSET_UPLOAD_RATE_LIMIT` | No | `30` | Asset uploads per minute per user |
+
+The `MAX_*_SIZE_MB` values are read at startup by `backend/src/utils/fileUtils.ts` and served to the SPA by `GET /api/config`, so a restart is enough to change them — no rebuild. Non-numeric or non-positive values are ignored with a startup warning.
 
 **Example `backend/.env` for local development:**
 
@@ -192,6 +196,25 @@ Services (all exposed on localhost for easy debugging):
 - PostgreSQL: `localhost:5432`
 
 The backend container runs `npm run dev` (nodemon with hot reload). The frontend container runs `vite` with hot module replacement. Migrations run automatically on first start via Prisma.
+
+**Each container has its own `node_modules` and its own generated Prisma client.** Source is bind-mounted, `node_modules` is not, so after adding a dependency or changing `schema.prisma` the running container does not see it until you tell it to. Vite answers a missing package with a 500 and the app shows "Something went wrong"; the backend throws on the first query that touches a new table:
+
+```bash
+# After `npm install <package>` on the host, in either project:
+docker compose -f docker-compose.dev.yml exec --user root frontend npm install
+docker compose -f docker-compose.dev.yml exec --user root backend npm install
+
+# After changing prisma/schema.prisma:
+docker compose -f docker-compose.dev.yml exec --user root backend npx prisma generate
+```
+
+`--user root` is needed because the images install `node_modules` as a different user from the one the process runs as; without it both commands fail with `EACCES: permission denied`. Rebuilding the image (`docker compose -f docker-compose.dev.yml up --build`) does the same thing more slowly.
+
+### Security headers are production-only
+
+The app page's `Content-Security-Policy` and the other security headers come from the frontend container's nginx (`frontend/security-headers.conf`), which only exists in the production image. The Vite dev server serves its own page with an inline module script for hot reload, so the production policy would stop `npm run dev` working.
+
+The practical consequence: **a CSP violation cannot appear during development**. If you add something that loads from a new host — a font, an image, an API on another domain — check it against `frontend/security-headers.conf`, and test it against a production build before assuming it works. `frontend/src/__tests__/securityHeaders.test.ts` pins the policy's shape but cannot know what your feature loads.
 
 ### Production vs Development at a glance
 
@@ -320,23 +343,65 @@ cd backend && npx tsc --noEmit
 cd frontend && npm run typecheck
 ```
 
+### Everything, before you call something done
+
+Run the lot, not a subset — this is what CI runs, and what a reviewer will
+assume you ran:
+
+```bash
+# Frontend
+cd frontend && npm run typecheck && npm run lint && npx vitest run && npm run build
+
+# Backend
+cd backend && npx tsc --noEmit && npm run lint && npx jest
+
+# Documentation, from the repository root
+python scripts/spec-coverage.py
+python scripts/websocket-events.py --check
+```
+
+Two of those deserve a note:
+
+- **`npx vitest run`, not `npm test`.** The latter is watch mode and will sit
+  there until you notice.
+- **The doc checks are gates, not formalities.** `spec-coverage.py` compares
+  `backend/docs/API_DOCUMENTATION.yaml` against the routes the server actually
+  mounts and fails when they disagree in either direction;
+  `websocket-events.py --check` does the same for the WebSocket event table.
+  Regenerate that table with `python scripts/websocket-events.py --write`.
+
+`.github/workflows/ci.yml` runs the same commands on every push and pull
+request. Note that it **reports** failures rather than blocking a merge —
+blocking needs branch protection with required status checks, which is a
+setting in the repository rather than a file in it.
+
 ---
 
 ## Code Style
 
 ### TypeScript
 
-Both backend and frontend use TypeScript in **strict mode**. The `tsconfig.json` in each package enables:
-- `strict: true` (includes `noImplicitAny`, `strictNullChecks`, etc.)
-- `noUncheckedIndexedAccess`
+Both backend and frontend use TypeScript in **strict mode**. The `tsconfig.json`
+in each package enables `strict: true`, which brings `noImplicitAny`,
+`strictNullChecks` and the rest with it.
 
-### Formatting
+`noUncheckedIndexedAccess` is **not** enabled in either package. It is worth
+turning on one day, but it is its own burn-down and mixing it into other work
+would make it impossible to say what caused a regression.
 
-The project uses ESLint for linting. Run:
+**No `any`.** `@typescript-eslint/no-explicit-any` is an **error** in both
+packages, not a warning. There is a small `overrides` allowlist covering some
+test files; it is meant to shrink and never to grow. When a type resists, reach
+for `unknown` plus a narrowing helper — `frontend/src/utils/errors.ts` and
+`backend/src/utils/prisma-json.ts` exist for the two common cases.
+
+### Linting
+
+**Both** packages have ESLint, and both run with `--max-warnings 0`:
 
 ```bash
-cd frontend
-npm run lint
+cd backend && npm run lint
+cd frontend && npm run lint
 ```
 
 There is no enforced code formatter (Prettier), but follow the existing style in the file you're editing:

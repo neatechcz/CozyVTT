@@ -1,7 +1,7 @@
 /**
  * server.ts body-limit wiring
- * PATCH /api/characters/:id/data accepts up to 1mb of JSON; every other route
- * keeps the global default (100kb). Imports the real server.ts with its side
+ * PATCH /api/characters/:id/data and other JSON routes accept up to 1mb.
+ * Imports the real server.ts with its side
  * effects (listen, WebSocket, PostgreSQL session store, setup gate) mocked.
  */
 
@@ -65,9 +65,10 @@ test('PATCH /api/characters/:id/data still rejects bodies over 1mb', async () =>
   expect(rejectedAsTooLarge(res)).toBe(true);
 });
 
-test('other routes keep the global 100kb limit (~200 kB PUT rejected)', async () => {
+test('other routes also accept ~200 kB bodies under the global 1mb limit', async () => {
   const res = await request(app)
     .put('/api/characters/char-1')
     .send({ data: { backstory: 'x'.repeat(200 * 1024) } });
-  expect(rejectedAsTooLarge(res)).toBe(true);
+  expect(rejectedAsTooLarge(res)).toBe(false);
+  expect(res.status).toBe(401);
 });

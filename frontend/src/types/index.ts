@@ -1,3 +1,4 @@
+import type { CharacterHpInfo } from '@/utils/characterHp';
 // ============================================
 // CozyVTT Frontend Type Definitions
 // Mirrors backend API models (Prisma schema)
@@ -86,11 +87,37 @@ export enum TokenDisposition {
 export type TokenDisplayMode = 'pog' | 'top-down' | 'full-art';
 
 /** NPC stat block — game-system-agnostic container for combat stats. */
+/**
+ * How proficient a creature is in a save or skill.
+ * 'custom' marks a bonus set explicitly rather than derived — used for homebrew
+ * and for published creatures whose printed value does not decompose into
+ * ability modifier plus a whole number of proficiency bonuses.
+ */
+export type ProficiencyLevel = 'none' | 'proficient' | 'expertise' | 'custom';
+
+/** Proficiency metadata backing a creature's derived save and skill bonuses. */
+export interface NpcProficiencies {
+  /**
+   * Overrides the proficiency bonus derived from challenge rating, for the rare
+   * published monster whose printed values do not match the CR table.
+   */
+  bonusOverride?: number;
+  saves?: Record<string, ProficiencyLevel>;
+  skills?: Record<string, ProficiencyLevel>;
+}
+
 export interface NpcStatBlock {
   /** Armor Class / Defense rating */
   ac: number;
-  /** Hit points: average value and optional dice formula, e.g. { average: 7, formula: "2d6" } */
+  /**
+   * Maximum hit points. Optional: stat blocks saved before HP was tracked have
+   * none, and callers fall back to a default (see CreatureLibrary placement).
+   */
+  hpMax?: number;
+  /** Legacy MCP representation, kept in sync with hpMax and hitDice. */
   hp?: { average: number; formula?: string };
+  /** Hit dice expression, e.g. "7d8+14" (informational) */
+  hitDice?: string;
   /** Speed (e.g. "30 ft." or "30 ft., fly 60 ft.") */
   speed: string;
   /** Ability scores */
@@ -102,10 +129,21 @@ export interface NpcStatBlock {
     wis: number;
     cha: number;
   };
-  /** Saving throw bonuses, e.g. { "dex": 5, "wis": 3 } */
+  /**
+   * Saving throw bonuses as totals, e.g. { "dex": 5, "wis": 3 }.
+   * These stay the value that is displayed and rolled. Where `proficiencies`
+   * has a matching entry the total is derived and rewritten on save; where it
+   * does not, the stored value is preserved verbatim (which is how every stat
+   * block created before proficiency tracking keeps working unchanged).
+   */
   savingThrows?: Record<string, number>;
-  /** Skill bonuses, e.g. { "perception": 5, "stealth": 7 } */
+  /** Skill bonuses as totals, e.g. { "perception": 5, "stealth": 7 }. See savingThrows. */
   skills?: Record<string, number>;
+  /**
+   * How each bonus above is arrived at. Optional throughout — absent means
+   * "legacy data, take the totals as given".
+   */
+  proficiencies?: NpcProficiencies;
   /** Damage vulnerabilities */
   damageVulnerabilities?: string;
   /** Damage resistances */
@@ -118,8 +156,29 @@ export interface NpcStatBlock {
   senses?: string;
   /** Languages */
   languages?: string;
+  /**
+   * Attribute modifiers, used by systems that print modifiers rather than
+   * scores. Pathfinder 2e stat blocks give "Str +4" directly and have no
+   * underlying score, so deriving one from `abilities` would be an invention.
+   * Absent for D&D 5e, where `abilities` holds scores and the modifier is
+   * derived.
+   */
+  attributeModifiers?: {
+    str: number;
+    dex: number;
+    con: number;
+    int: number;
+    wis: number;
+    cha: number;
+  };
   /** Challenge rating, e.g. "1/4", "5" */
   challengeRating?: string;
+  /**
+   * Creature level, for systems that rate creatures by level rather than
+   * challenge rating (Pathfinder 2e). Kept separate from challengeRating so
+   * neither system has to pretend to use the other's scale.
+   */
+  level?: number;
   /** XP value */
   xp?: number;
   /** Special traits/abilities (name + description pairs) */
@@ -198,6 +257,8 @@ export interface User {
   displayName: string;
   platformRole: PlatformRole;
   globalAssetManager: boolean;
+  /** May edit or delete anyone's character template, not just their own. */
+  templateEditor: boolean;
   mfaEnabled: boolean;
   avatarUrl: string | null;
   bio: string | null;
@@ -206,6 +267,28 @@ export interface User {
   lastLoginAt: string | null;
   mustChangePassword?: boolean;
   isApproved?: boolean;
+}
+
+/**
+ * A shareable starter sheet. Visible to everyone; editable by its author, an
+ * admin, or a user with `templateEditor`.
+ *
+ * Distinct from the hardcoded starter presets served by
+ * `/api/characters/templates/:system/:name`, which are compiled into the
+ * backend rather than stored as rows.
+ */
+export interface CharacterTemplate {
+  id: string;
+  name: string;
+  description: string | null;
+  gameSystem: GameSystem | null;
+  /** Always a GLOBAL asset — a template is readable by everyone, so its image must be too. */
+  tokenImageUrl: string | null;
+  data: unknown;
+  createdById: string | null;
+  createdBy: { id: string; displayName: string } | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 // ============================================
@@ -287,16 +370,41 @@ export interface AdminActivityData {
 }
 
 // ============================================
+// Public Server Config
+// ============================================
+
+/** Upload limits in bytes, keyed by asset type — served by GET /api/config. */
+/**
+ * The limits a self-hoster can set, one per MAX_<TYPE>_SIZE_MB variable. The
+ * same shape comes back from GET /api/config and GET /api/admin/config, so it
+ * is declared once here. OTHER is not uploadable and is never reported.
+ */
+export interface ServerUploadLimits {
+  MAP: number;
+  TOKEN: number;
+  AUDIO: number;
+  AVATAR: number;
+  DOCUMENT: number;
+}
+
+export interface ServerConfig {
+  uploadLimits: ServerUploadLimits;
+  maxUploadBytes: number;
+  /**
+   * Whether this instance can send email at all. A bare boolean — the SMTP
+   * host, port and credentials stay on the admin-only config endpoint. Used to
+   * disable the "also email them" option on a campaign invitation rather than
+   * offering something that would silently do nothing.
+   */
+  smtp?: { configured: boolean };
+}
+
+// ============================================
 // Admin Types (extended)
 // ============================================
 
 export interface AdminServerConfig {
-  uploadLimits: {
-    MAP: number;
-    TOKEN: number;
-    AUDIO: number;
-    AVATAR: number;
-  };
+  uploadLimits: ServerUploadLimits;
   sessionTimeoutMs: number;
   rememberMeTimeoutMs: number;
   smtp: {
@@ -369,6 +477,15 @@ export interface Campaign {
   lastPlayedAt: string | null;
   memberships?: CampaignMembership[];
   /**
+   * The requesting user's role in this campaign.
+   *
+   * Sent by `GET /campaigns` and `GET /campaigns/:id` (see `userRole: m.role`
+   * in backend/src/routes/campaigns.ts), but it was missing from this interface
+   * — code that needed it annotated the value as `any` to get at it, which is
+   * how the omission survived.
+   */
+  userRole?: CampaignRole;
+  /**
    * NOTE: from `GET /campaigns/:id` these are METADATA ONLY — the
    * `tokens`/`wallSegments`/`fogData`/`lights`/`annotations` map blobs and the
    * character `data` sheet are NOT included. Fetch the active map via
@@ -384,7 +501,7 @@ export interface Campaign {
 
 export interface VibeSettings {
   periods: VibePeriod[];
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 export interface VibePeriod {
@@ -437,6 +554,84 @@ export interface Session {
   notes: string | null;
 }
 
+/**
+ * One of the caller's own notes, as the list returns it.
+ *
+ * No `content`: a note runs to tens of thousands of characters and the list
+ * would otherwise move megabytes every time the panel opened. The body arrives
+ * from `getNote`, one note at a time.
+ */
+export interface PersonalNoteSummary {
+  id: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * A document as it appears in a campaign's shared list.
+ *
+ * `id` is the asset id, used with the document serving route. A document is
+ * private to whoever uploaded it until a DM shares it with a campaign; this is
+ * the shape the list of shared documents comes back in.
+ */
+export interface CampaignDocument {
+  id: string;
+  name: string;
+  description: string | null;
+  originalName: string;
+  /** As declared at upload. Not what the file is served as. */
+  mimeType: string;
+  fileSize: number;
+  createdAt: string;
+  uploadedBy: { id: string; displayName: string };
+  linkedAt: string;
+  linkedBy: { id: string; displayName: string };
+  /**
+   * True when shared into the campaign by link, which the DM can undo. False
+   * when it is the campaign's own document, created or uploaded at CAMPAIGN
+   * scope, where there is no link to remove.
+   */
+  shared: boolean;
+}
+
+/**
+ * A saved dice roll, shown as a button in the dice panel.
+ *
+ * Private to whoever saved it and scoped to one campaign, so a table's homebrew
+ * rolls do not follow you into an unrelated game. The expression is checked when
+ * it is saved against the code that rolls it, so a stored macro can always be
+ * rolled.
+ */
+export interface DiceMacro {
+  id: string;
+  userId: string;
+  campaignId: string;
+  name: string;
+  expression: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A note with its Markdown source. */
+export interface PersonalNote extends PersonalNoteSummary {
+  content: string;
+}
+
+/**
+ * A past session as the history list returns it.
+ *
+ * Deliberately without `savedState`: that is a large blob of token positions
+ * kept for resuming a session, and the server does not send it here.
+ */
+export interface SessionSummary {
+  id: string;
+  sessionNumber: number;
+  startedAt: string;
+  endedAt: string | null;
+  notes: string | null;
+}
+
 export interface SessionState {
   sessionId: string;
   savedAt: string;
@@ -471,7 +666,11 @@ export type CharacterData =
   | import('./game-systems').DnD5eCharacterData
   | import('./game-systems').PF2eCharacterData
   | import('./game-systems').SR6CharacterData
-  | import('./game-systems').CoC7eCharacterData;
+  | import('./game-systems').CoC7eCharacterData
+  // A character with no game system stores a flexible sheet here. The union
+  // omitted it, so `Character.data` never admitted a shape it demonstrably
+  // holds — invisible while the flexible editor's props were `any`.
+  | import('./flexible-character-sheet').FlexibleCharacterData;
 
 // ============================================
 // Map & Tokens
@@ -511,7 +710,7 @@ export interface Token {
   controlledBy: string | null;
   rotation: number;
   conditions: string[];
-  metadata: Record<string, any>;
+  metadata: Record<string, unknown>;
   // Token type system
   type:        TokenType;
   disposition: TokenDisposition | null;
@@ -544,7 +743,30 @@ export interface Annotation {
   type: 'circle' | 'line' | 'rectangle' | 'polygon';
   position: Position;
   color: string;
-  [key: string]: any;
+  [key: string]: unknown;
+}
+
+/**
+ * One member of a campaign roster, from `GET /campaigns/:id/characters`.
+ *
+ * The characters here are deliberately not `Character`: the endpoint strips the
+ * `data` sheet and returns a derived `hp` in its place, so that no campaign
+ * member can read another player's sheet off the roster.
+ */
+export interface RosterMember {
+  userId: string;
+  userName: string;
+  userAvatar: string | null;
+  role: CampaignRole;
+  joinedAt: string;
+  characters: {
+    id: string;
+    name: string;
+    tokenImageUrl: string | null;
+    gameSystem: GameSystem | null;
+    userId: string;
+    hp: CharacterHpInfo | null;
+  }[];
 }
 
 // ============================================
@@ -600,7 +822,13 @@ export interface Message {
 }
 
 export interface MessageMetadata {
-  [key: string]: any;
+  /**
+   * Free-form per-message payload — a dice breakdown, a `user.joined` action,
+   * whatever the sender attached. `unknown` rather than `any` so a reader has to
+   * check what it found before using it; the shape genuinely varies by message
+   * type and is not worth a discriminated union while only a few types set it.
+   */
+  [key: string]: unknown;
 }
 
 // ============================================
@@ -674,10 +902,10 @@ export interface ApiError {
   message: string;
 }
 
-export interface ApiResponse<T = any> {
+export interface ApiResponse<T = unknown> {
   message?: string;
   data?: T;
-  [key: string]: any;
+  [key: string]: unknown;
 }
 
 // Login
@@ -789,7 +1017,7 @@ export interface CreateTokenRequest {
   controlledBy?: string | null;
   rotation?: number;
   conditions?: string[];
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
   // Token type system
   type?: TokenType;
   disposition?: TokenDisposition | null;
@@ -809,7 +1037,7 @@ export interface UpdateTokenRequest {
   controlledBy?: string | null;
   rotation?: number;
   conditions?: string[];
-  metadata?: Record<string, any>;
+  metadata?: Record<string, unknown>;
   // Token type system
   type?: TokenType;
   disposition?: TokenDisposition | null;
@@ -823,7 +1051,7 @@ export interface UpdateTokenRequest {
 // WebSocket Event Types
 // ============================================
 
-export interface WebSocketEvent<T = any> {
+export interface WebSocketEvent<T = unknown> {
   type: string;
   data: T;
   timestamp: string;
@@ -866,6 +1094,13 @@ export interface DiceRollEvent {
 }
 
 export interface DiceRolledEvent {
+  /**
+   * The stored roll's id. Optional because a roll made while the session is
+   * paused is evaluated in the browser and never reaches the server, so it has
+   * no database row — see DiceRoller's local-roll path. Everything else, live
+   * or replayed from history, carries one and dedupes on it.
+   */
+  id?: string;
   userId: string;
   userName: string;
   characterName: string | null;
@@ -886,6 +1121,18 @@ export interface DiceRolledSecretEvent extends DiceRolledEvent {
 export interface ChatMessageEvent {
   content: string;
   type: MessageType;
+}
+
+/**
+ * A system notice. The server sends the row's real id, which is what lets a
+ * notice received live be recognised as the same message when history replays
+ * it — see ChatPanel's merge.
+ */
+export interface ChatSystemBroadcast {
+  id: string;
+  content: string;
+  metadata?: MessageMetadata;
+  timestamp: string;
 }
 
 export interface ChatMessageBroadcast {
@@ -986,6 +1233,25 @@ export interface SpiritLayerTokenToggledBroadcast {
 // Character HP Events
 // ============================================
 
+/** Where a page of chat history stopped, and whether there is more behind it. */
+export interface MessagePageInfo {
+  limit: number;
+  hasMore: boolean;
+  /** Send back as `cursor` for the page before this one. Opaque — do not build one. */
+  nextCursor: string | null;
+}
+
+export interface MessageHistoryPage {
+  messages: Message[];
+  pagination: MessagePageInfo;
+}
+
+export interface HitDiceSpendEvent {
+  characterId: string;
+  /** Which pool it comes out of — a multiclass character has several. */
+  index: number;
+}
+
 export interface CharacterHpUpdateEvent {
   characterId: string;
   delta: number;
@@ -994,6 +1260,17 @@ export interface CharacterHpUpdateEvent {
 export interface CharacterHpUpdatedBroadcast {
   characterId: string;
   hp: { current: number; max: number; temp: number };
+}
+
+/**
+ * The DM seat moved to another member. Campaign ownership is a separate thing
+ * and does not move with it.
+ */
+export interface DmTransferredBroadcast {
+  campaignId: string;
+  /** Null only if the campaign somehow had no DM to demote. */
+  previousDmId: string | null;
+  newDmId: string;
 }
 
 // ============================================
@@ -1020,8 +1297,36 @@ export interface CombatState {
 export interface InitiativeAddEvent    { tokenId: string; mapId: string; }
 export interface InitiativeRemoveEvent { tokenId: string; }
 export interface InitiativeSetEvent    { tokenId: string; mapId: string; value: number | null; }
-export interface InitiativeRollEvent   { tokenId: string; mapId: string; expression: string; characterName?: string; }
+/**
+ * `expression` is only a fallback. The server derives initiative from the
+ * token's character sheet or stat block, because it is the only side holding
+ * either and because some systems (Call of Cthulhu) do not roll for initiative
+ * at all. Send one only for a combatant nothing can be derived for.
+ */
+export interface InitiativeRollEvent   { tokenId: string; mapId: string; expression?: string; characterName?: string; }
 export interface InitiativeReorderEvent { orderedTokenIds: string[]; }
+
+// ============================================
+// Map Pings — transient "look here" marks
+// ============================================
+
+/** Client → server. Coordinates are map pixels, not grid cells. */
+export interface MapPingEvent {
+  mapId: string;
+  x: number;
+  y: number;
+}
+
+/**
+ * Server → all campaign members. Carries only the sender's id — the display
+ * name and identity colour are resolved client-side from the roster.
+ */
+export interface MapPingedBroadcast {
+  mapId: string;
+  x: number;
+  y: number;
+  userId: string;
+}
 
 // ============================================
 // User Preferences (per-user theme + font)

@@ -1,4 +1,5 @@
 import { Socket } from 'socket.io';
+import type { SessionData } from 'express-session';
 import { prisma } from '../config/database';
 import logger from '../utils/logger';
 
@@ -28,7 +29,15 @@ export interface AuthenticatedSocket extends Socket {
  */
 export async function authenticateSocket(socket: AuthenticatedSocket): Promise<boolean> {
   try {
-    const session = (socket.request as any).session;
+    // express-session attaches `session` to the underlying request, but the
+    // socket.io type for `socket.request` is the bare Node IncomingMessage and
+    // knows nothing about it.
+    //
+    // Borrowing the real `SessionData` rather than re-declaring the field:
+    // a local `{ userId?: string }` would keep compiling if that field were
+    // renamed, and this socket would then silently reject every connection
+    // while the REST routes failed loudly at build time.
+    const session = (socket.request as { session?: Partial<SessionData> }).session;
 
     if (!session || !session.userId) {
       return false;
@@ -36,10 +45,17 @@ export async function authenticateSocket(socket: AuthenticatedSocket): Promise<b
 
     const user = await prisma.user.findUnique({
       where: { id: session.userId },
-      select: { id: true },
+      select: { id: true, mustChangePassword: true },
     });
 
     if (!user) {
+      return false;
+    }
+
+    // Same gate the REST API applies: an account that still has to replace an
+    // admin-issued password cannot play over the socket either
+    if (user.mustChangePassword) {
+      logger.warn('WebSocket rejected: password change required', { userId: user.id });
       return false;
     }
 

@@ -12,7 +12,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 interface CharacterCardProps {
   character: Character;
   campaign?: Campaign | null;
-  canManage: boolean;
+  canManage?: boolean;
+  onView?: (character: Character) => void;
   onEdit: (character: Character) => void;
   onCopy: (character: Character) => void;
   onDelete: (character: Character) => void;
@@ -23,7 +24,8 @@ interface CharacterCardProps {
 function CharacterCardInner({
   character,
   campaign,
-  canManage,
+  canManage = false,
+  onView,
   onEdit,
   onCopy,
   onDelete,
@@ -49,7 +51,8 @@ function CharacterCardInner({
 
   // Handle card click (open character editor)
   const handleCardClick = () => {
-    onEdit(character);
+    if (onView) onView(character);
+    else onEdit(character);
   };
 
   // Handle menu item click (prevent card click propagation)

@@ -5,6 +5,7 @@
  */
 
 import { z } from 'zod';
+import { createNpcStatBlockSchema, IMPORT_STAT_BLOCK_LIMITS } from './statBlock';
 
 // ── Limits ──────────────────────────────────────────────────────────────────
 
@@ -38,42 +39,10 @@ const HpSchema = z.object({
   temp: z.number().int().min(0),
 }).strip();
 
-const NameDescPairSchema = z.object({
-  name: z.string().max(500),
-  description: z.string().max(10000),
-}).strip();
-
-const StatBlockSchema = z.object({
-  ac: z.number().int().min(0).max(99),
-  speed: z.string().max(500),
-  abilities: z.object({
-    str: z.number().int().min(0).max(30),
-    dex: z.number().int().min(0).max(30),
-    con: z.number().int().min(0).max(30),
-    int: z.number().int().min(0).max(30),
-    wis: z.number().int().min(0).max(30),
-    cha: z.number().int().min(0).max(30),
-  }).strip(),
-  savingThrows: z.record(z.string(), z.number()).optional(),
-  skills: z.record(z.string(), z.number()).optional(),
-  damageVulnerabilities: z.string().max(500).optional(),
-  damageResistances: z.string().max(500).optional(),
-  damageImmunities: z.string().max(500).optional(),
-  conditionImmunities: z.string().max(500).optional(),
-  senses: z.string().max(500).optional(),
-  languages: z.string().max(500).optional(),
-  challengeRating: z.string().max(10).optional(),
-  xp: z.number().int().min(0).optional(),
-  traits: z.array(NameDescPairSchema).max(100).optional(),
-  actions: z.array(NameDescPairSchema).max(100).optional(),
-  bonusActions: z.array(NameDescPairSchema).max(100).optional(),
-  reactions: z.array(NameDescPairSchema).max(100).optional(),
-  legendaryActions: z.array(NameDescPairSchema).max(100).optional(),
-  creatureType: z.string().max(200).optional(),
-  alignment: z.string().max(100).optional(),
-  gameSystem: z.string().max(50).optional(),
-  notes: z.string().max(5000).optional(),
-}).passthrough();
+// Stat blocks arriving in an archive validate against the same definition the
+// creature and token-template routes use, with the looser import limits this
+// file has always applied (see IMPORT_STAT_BLOCK_LIMITS).
+const StatBlockSchema = createNpcStatBlockSchema(IMPORT_STAT_BLOCK_LIMITS);
 
 // ── Manifest ────────────────────────────────────────────────────────────────
 

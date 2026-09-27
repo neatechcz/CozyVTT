@@ -92,7 +92,9 @@ export default function DmWallControls({
   onCollapse,
 }: DmWallControlsProps) {
   const [confirmClear, setConfirmClear] = useState(false);
-  const [collapsed, setCollapsed] = useState(false);
+  // Folded away to begin with, like the other map tools: a DM arriving at the
+  // table wants to see the map, not three open panels over it.
+  const [collapsed, setCollapsed] = useState(true);
 
   const handleClearAll = () => {
     if (!confirmClear) { setConfirmClear(true); return; }
@@ -266,7 +268,7 @@ export default function DmWallControls({
               >
                 Merge point
               </button>
-              <span className="text-[10px] text-stone-500 px-1">Remove this point and join the two segments into one straight wall</span>
+              <span className="text-[10px] text-stone-300 px-1">Remove this point and join the two segments into one straight wall</span>
             </div>
           )}
 

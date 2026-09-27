@@ -75,6 +75,7 @@ describe('sanitizeUser', () => {
     isApproved: true,
     mustChangePassword: false,
     globalAssetManager: false,
+    templateEditor: false,
     rememberMe: false,
     preferences: null,
     lastLoginAt: null,

@@ -60,3 +60,20 @@ export function validateEmail(email: string): boolean {
 export function sanitizeInput(input: string): string {
   return input.trim().replace(/[<>]/g, '');
 }
+
+/**
+ * Whether a branding image URL points at this instance.
+ *
+ * The logo, mascot and favicon are replaced by swapping the files in
+ * `frontend/public/` and rebuilding, so these only ever name a path this
+ * instance serves. An address on another host is refused: it would have every
+ * visitor's browser contact a third party before they sign in, and the app
+ * page's Content-Security-Policy allows images from this origin only, so the
+ * picture would not appear anyway.
+ *
+ * A single leading slash and no scheme. `//host/x` is rejected along with the
+ * rest: the browser reads it as another origin, not as a path.
+ */
+export function isSameOriginPath(value: string): boolean {
+  return value.startsWith('/') && !value.startsWith('//');
+}

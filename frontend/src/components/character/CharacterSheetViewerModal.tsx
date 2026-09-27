@@ -3,11 +3,10 @@
  */
 
 import { useState, useEffect } from 'react';
-import { X, Edit, Shield, User as UserIcon } from 'lucide-react';
+import { X, Shield, User as UserIcon } from 'lucide-react';
 import { useFocusTrap } from '@/hooks/useFocusTrap';
 import { useAuth } from '@/contexts/AuthContext';
-import { useCampaign } from '@/contexts/CampaignContext';
-import { useWebSocket } from '@/contexts/WebSocketContext';
+import { useOptionalWebSocket } from '@/contexts/WebSocketContext';
 import { canEditCharacter, canRollAsCharacter } from '@/services/permissions';
 import { api } from '@/services/api';
 import type { Character, GameSystem, CampaignMembership } from '@/types';
@@ -24,8 +23,13 @@ import CharacterSheetEditorModal from './CharacterSheetEditorModal';
 
 interface CharacterSheetViewerModalProps {
   character: Character;
-  campaignId: string;
-  membership: CampaignMembership;
+  /**
+   * Campaign context, when the sheet was opened from inside a campaign. Absent
+   * when opened from the character gallery, where there is no campaign — and a
+   * character there is always your own, so ownership alone decides editing.
+   */
+  campaignId?: string;
+  membership?: CampaignMembership;
   onClose: () => void;
 }
 
@@ -36,8 +40,11 @@ export default function CharacterSheetViewerModal({
   onClose,
 }: CharacterSheetViewerModalProps) {
   const { user } = useAuth();
-  const { campaign } = useCampaign();
-  const { socket } = useWebSocket();
+  // Optional: this modal opens both from the campaign roster, where there is a
+  // websocket, and from the character gallery, where there is not. Live updates
+  // and click-to-roll are a bonus in the first case rather than a requirement.
+  const ws = useOptionalWebSocket();
+  const socket = ws?.socket;
   const [character, setCharacter] = useState(initialCharacter);
   const [ownerName, setOwnerName] = useState<string>('');
   const [showEditor, setShowEditor] = useState(false);
@@ -65,7 +72,11 @@ export default function CharacterSheetViewerModal({
   useEffect(() => {
     if (!socket) return;
 
-    const handleCharacterUpdate = (data: { characterId: string; character: Character }) => {
+    const handleCharacterUpdate = (data: { characterId: string; character?: Character }) => {
+      // The same event is also sent to campaigns that merely hold a token for
+      // this character, and those carry no sheet — reading it is not something
+      // membership of *that* campaign entitles you to. Nothing to refresh here.
+      if (!data.character) return;
       if (data.characterId === character.id) {
         console.log('Character updated - refreshing viewer');
         setCharacter(data.character);
@@ -81,12 +92,11 @@ export default function CharacterSheetViewerModal({
 
   // Check if user can edit
   const canEdit = user ? canEditCharacter(user, character, membership) : false;
+  // Reading someone else's sheet is deliberate — the server lets any campaign
+  // member do it. Rolling from it is not: those are their modifiers.
   const canRoll = user ? canRollAsCharacter(user, character, membership) : false;
-  const assignedPlayer = campaign?.memberships?.find((member) =>
-    member.role === 'PLAYER' && member.characterIds.includes(character.id));
-  const playerName = assignedPlayer?.user?.displayName ?? ownerName;
   const isDMEditingOtherCharacter =
-    membership.role === 'DM' && character.userId !== user?.id;
+    membership?.role === 'DM' && character.userId !== user?.id;
 
   // Handle edit - open editor modal
   const handleEdit = () => {
@@ -131,21 +141,33 @@ export default function CharacterSheetViewerModal({
   // Handle click-to-roll — emit dice roll via WebSocket
   const handleRoll = (expression: string, purpose: string) => {
     if (socket) {
-      socket.emitDiceRoll({ characterId: character.id, expression, purpose });
+      // Named so the panel heads the entry with the character whose sheet this
+      // is, not with whoever happens to be reading it.
+      socket.emitDiceRoll({ expression, purpose, characterName: character.name });
     }
   };
+
+  // Passed to the sheet views only when this viewer may roll; without it the
+  // stats render as plain text rather than clickable rolls.
+  const rollHandler = canRoll ? handleRoll : undefined;
+
+  // Spending follows the same rule as rolling. The server checks it again —
+  // owner or DM — so this only decides whether the control is offered.
+  const spendHitDie = canRoll
+    ? (index: number) => socket?.emitHitDiceSpend({ characterId: character.id, index })
+    : undefined;
 
   // Render appropriate character sheet view based on game system
   const renderCharacterSheet = () => {
     switch (character.gameSystem) {
       case 'DND_5E':
-        return <DnD5eCharacterView character={character} onEdit={canEdit ? handleEdit : undefined} onRoll={canRoll ? handleRoll : undefined} />;
+        return <DnD5eCharacterView character={character} onEdit={canEdit ? handleEdit : undefined} onRoll={rollHandler} onSpendHitDie={spendHitDie} />;
       case 'PATHFINDER_2E':
-        return <Pathfinder2eCharacterView character={character} onEdit={canEdit ? handleEdit : undefined} onRoll={canRoll ? handleRoll : undefined} />;
+        return <Pathfinder2eCharacterView character={character} onEdit={canEdit ? handleEdit : undefined} onRoll={rollHandler} />;
       case 'SHADOWRUN_6E':
         return <Shadowrun6eCharacterSheet character={character} mode="view" />;
       case 'CALL_OF_CTHULHU_7E':
-        return <CallOfCthulhu7eCharacterView character={character} onEdit={canEdit ? handleEdit : undefined} onRoll={canRoll ? handleRoll : undefined} />;
+        return <CallOfCthulhu7eCharacterView character={character} onEdit={canEdit ? handleEdit : undefined} onRoll={rollHandler} />;
       default:
         return <FlexibleCharacterSheetView character={character} onEdit={canEdit ? handleEdit : undefined} />;
     }
@@ -166,14 +188,14 @@ export default function CharacterSheetViewerModal({
           <div className="flex-1">
             <div className="flex items-center gap-3 mb-2">
               <div className="p-2 rounded-full bg-moss-green/10">
-                <UserIcon className="w-5 h-5 text-moss-green" />
+                <UserIcon className="w-5 h-5 text-brand-ink" />
               </div>
               <div>
-                <h2 id="character-sheet-viewer-title" className="text-2xl font-bold text-moss-green">
+                <h2 id="character-sheet-viewer-title" className="text-2xl font-bold text-brand-ink">
                   {character.name}
                 </h2>
                 <div className="flex items-center gap-3 text-sm text-warm-gray">
-                  <span>Player: {playerName}</span>
+                  <span>Player: {ownerName}</span>
                   <span>•</span>
                   <span>{getSystemName(character.gameSystem)}</span>
                 </div>
@@ -183,25 +205,18 @@ export default function CharacterSheetViewerModal({
             {/* DM Edit Banner */}
             {isDMEditingOtherCharacter && (
               <div className="mt-3 flex items-center gap-2 px-3 py-2 bg-moss-green/10 border border-moss-green/30 rounded-lg">
-                <Shield className="w-4 h-4 text-moss-green" />
-                <p className="text-sm text-moss-green">
-                  You can edit this character as DM
+                <Shield className="w-4 h-4 text-brand-ink" />
+                <p className="text-sm text-brand-ink">
+                  You are viewing <strong>{ownerName}'s</strong> character as DM
                 </p>
               </div>
             )}
           </div>
 
-          {/* Actions */}
+          {/* Actions — close only. Edit lives on the sheet itself, which
+              receives handleEdit as onEdit below; rendering it here as well
+              produced two working Edit buttons on every character. */}
           <div className="flex items-center gap-2 ml-4">
-            {canEdit && (
-              <button
-                onClick={handleEdit}
-                className="flex items-center gap-2 px-4 py-2 bg-moss-green text-white rounded-lg hover:bg-moss-green/90 transition-colors"
-              >
-                <Edit className="w-4 h-4" />
-                Edit
-              </button>
-            )}
             <button
               onClick={onClose}
               aria-label="Close dialog"

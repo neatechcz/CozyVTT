@@ -125,6 +125,90 @@ export function getBlankCharacterTemplate(
 }
 
 /**
+ * The field each system keeps the character's own name in.
+ *
+ * A character has a top-level `name` column AND a name inside its sheet blob,
+ * and nothing used to reconcile them: a character created as "Aldra" opened its
+ * sheet showing the factory placeholder, because only the column was set.
+ *
+ * Call of Cthulhu calls its people investigators, so the field differs; keeping
+ * that difference in one table rather than scattering conditionals means a new
+ * system only has to be added here.
+ */
+const SHEET_NAME_FIELD: Record<GameSystem, string> = {
+  [GameSystem.DND_5E]: 'characterName',
+  [GameSystem.PATHFINDER_2E]: 'characterName',
+  [GameSystem.SHADOWRUN_6E]: 'characterName',
+  [GameSystem.CALL_OF_CTHULHU_7E]: 'investigatorName',
+};
+
+/**
+ * The name written on a sheet, whichever field that system keeps it in.
+ *
+ * Returns undefined when the sheet has no usable name, so callers can leave the
+ * existing one alone rather than blanking it.
+ */
+export function sheetNameFor(
+  gameSystem: GameSystem | null | undefined,
+  data: Record<string, unknown> | null | undefined
+): string | undefined {
+  if (!gameSystem || !data) return undefined;
+  const field = SHEET_NAME_FIELD[gameSystem];
+  if (!field) return undefined;
+  const value = data[field];
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : undefined;
+}
+
+/**
+ * Stamp the character's name and its owner's display name into the sheet.
+ *
+ * Called from character creation and nowhere else, where the caller has just
+ * supplied a name for the character being made — so that name wins outright.
+ *
+ * It used to overwrite only a blank field or one of four known factory
+ * placeholders, which meant a character started from an *example* template kept
+ * the template's name: type "Grimtooth Ashfang", pick the Level 1 Fighter, and
+ * get a sheet headed "Brave Fighter". Worse, `PUT /characters/:id` takes the
+ * sheet as authoritative for the name, so the first save copied that back over
+ * the character record and renamed the character permanently.
+ *
+ * Returns a new object; the input is not mutated.
+ */
+export function applyIdentityToSheet(
+  gameSystem: GameSystem | null | undefined,
+  data: Record<string, unknown> | null | undefined,
+  characterName: string,
+  playerDisplayName: string
+): Record<string, unknown> {
+  const sheet = { ...(data ?? {}) };
+  if (!gameSystem) return sheet;
+
+  const nameField = SHEET_NAME_FIELD[gameSystem];
+  if (nameField) {
+    // Only when one was actually supplied: an empty name would blank the sheet
+    // rather than leave it as it is.
+    const supplied = typeof characterName === 'string' ? characterName.trim() : '';
+    if (supplied) {
+      sheet[nameField] = supplied;
+    }
+  }
+
+  // The player name belongs to whoever owns the character rather than being
+  // free text, so it is ALWAYS set from their display name — never their email,
+  // which is admin-only information.
+  //
+  // Unconditionally, unlike the character name above: a sheet can arrive here
+  // carrying somebody else's name, most obviously when copying a published
+  // template, and the field is not editable on the sheet, so anything left
+  // behind could not be corrected afterwards.
+  if (playerDisplayName) {
+    sheet.playerName = playerDisplayName;
+  }
+
+  return sheet;
+}
+
+/**
  * Create blank D&D 5e character
  */
 function createBlankDnD5eCharacter(): DnD5eCharacterData {
@@ -186,7 +270,7 @@ function createBlankDnD5eCharacter(): DnD5eCharacterData {
     hp: { maximum: 10, current: 10, temporary: 0 },
     survival: { daysWithoutFood: 0, exhaustionLevel: 0, deprivationLockedLevels: 0 },
     conditions: [],
-    hitDice: [{ class: 'fighter', total: '1d10', remaining: 1 }],
+    hitDice: [{ class: 'fighter', die: 'd10', maximum: 1, remaining: 1 }],
     deathSaves: { successes: 0, failures: 0 },
     attacks: [],
     currency: { cp: 0, sp: 0, ep: 0, gp: 0, pp: 0 },

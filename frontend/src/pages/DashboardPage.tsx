@@ -9,7 +9,7 @@ import { useNavigate } from 'react-router-dom';
 import { useQueryClient } from '@tanstack/react-query';
 import { useAuth } from '@/contexts/AuthContext';
 import { useToast } from '@/contexts/ToastContext';
-import { Plus, LogOut, RefreshCw, User, ArrowRight, Mail, FolderOpen, Shield, AlertCircle, Upload } from 'lucide-react';
+import { Plus, LogOut, RefreshCw, User, ArrowRight, Mail, FolderOpen, Shield, AlertCircle, Upload, FileText, BookOpen } from 'lucide-react';
 import { useTheme } from '@/contexts/ThemeContext';
 import { useCampaignsQuery, useCharactersQuery, usePendingInvitationsQuery, queryKeys } from '@/hooks/queries';
 import CampaignCard from '@/components/CampaignCard';
@@ -20,6 +20,7 @@ import CampaignCardSkeleton from '@/components/skeletons/CampaignCardSkeleton';
 import type { Campaign, CampaignInvitation } from '@/types';
 import { CampaignRole, PlatformRole } from '@/types';
 import Button from '@/components/ui/Button';
+import { apiErrorMessage } from '@/utils/errors';
 
 export default function DashboardPage() {
   const { user, logout } = useAuth();
@@ -44,7 +45,7 @@ export default function DashboardPage() {
   const loading = campaignsQuery.isPending || charactersQuery.isPending || invitationsQuery.isPending;
   const queryError = campaignsQuery.error || charactersQuery.error || invitationsQuery.error;
   const error = queryError
-    ? ((queryError as any).response?.data?.message || 'Failed to load data')
+    ? (apiErrorMessage(queryError) || 'Failed to load data')
     : '';
 
   // Refresh button + post-invitation-response resync
@@ -74,24 +75,24 @@ export default function DashboardPage() {
       {/* Header */}
       <header className="bg-moss-green/10 border-b border-moss-green/20 shadow-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex flex-col gap-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:py-6">
+          <div className="flex items-center justify-between py-6">
             {/* Left: Logo + Title */}
-            <div className="flex min-w-0 items-center gap-4">
+            <div className="flex items-center gap-4">
               <div className="p-1 rounded-lg bg-moss-green/10" aria-hidden="true">
                 <img src={mascotUrl} alt="" className="w-10 h-10 object-contain" />
               </div>
-              <div className="min-w-0">
-                <h1 className="text-2xl font-bold text-moss-green font-heading sm:text-3xl">
+              <div>
+                <h1 className="text-3xl font-bold text-brand-ink font-heading">
                   CozyVTT
                 </h1>
-                <p className="break-words text-sm text-warm-gray">
+                <p className="text-sm text-warm-gray">
                   Welcome back, {user?.displayName}
                 </p>
               </div>
             </div>
 
             {/* Right: Actions */}
-            <div className="flex w-full flex-wrap items-center justify-end gap-2 sm:w-auto sm:gap-3">
+            <div className="flex items-center gap-3">
               <Button
                 onClick={loadData}
                 disabled={loading}
@@ -109,7 +110,7 @@ export default function DashboardPage() {
                   variant="secondary" className="flex items-center gap-2"
                   aria-label="Go to Admin Panel"
                 >
-                  <Shield className="w-4 h-4 text-moss-green" aria-hidden="true" />
+                  <Shield className="w-4 h-4 text-brand-ink" aria-hidden="true" />
                   <span className="hidden sm:inline">Admin</span>
                 </Button>
               )}
@@ -136,7 +137,7 @@ export default function DashboardPage() {
                     className="w-full h-full object-cover"
                   />
                 ) : (
-                  <User className="w-6 h-6 text-moss-green" aria-hidden="true" />
+                  <User className="w-6 h-6 text-brand-ink" aria-hidden="true" />
                 )}
               </button>
             </div>
@@ -148,16 +149,16 @@ export default function DashboardPage() {
       <main id="main-content" className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         <div className="space-y-8">
           {/* Quick Links Section */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
             {/* Characters Section */}
             <section className="glass-panel p-6">
-              <div className="mb-4 flex flex-col items-start gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-3">
                   <div className="p-2 rounded-lg bg-spirit-purple/10">
                     <User className="w-6 h-6 text-spirit-purple" />
                   </div>
                   <div>
-                    <h2 className="text-xl font-semibold text-moss-green font-heading">
+                    <h2 className="text-xl font-semibold text-brand-ink font-heading">
                       Your Characters
                     </h2>
                     <p className="text-sm text-warm-gray">
@@ -171,7 +172,7 @@ export default function DashboardPage() {
                   aria-label="Manage characters"
                 >
                   <span className="hidden sm:inline">Manage</span>
-                  <ArrowRight className="w-4 h-4" aria-hidden="true" />
+                  <ArrowRight className="w-4 h-4" />
                 </Button>
               </div>
 
@@ -211,7 +212,7 @@ export default function DashboardPage() {
                                 className="w-full h-full object-cover"
                               />
                             ) : (
-                              <User className="w-5 h-5 text-moss-green" />
+                              <User className="w-5 h-5 text-brand-ink" />
                             )}
                           </div>
                           <div className="flex-1 min-w-0">
@@ -250,13 +251,13 @@ export default function DashboardPage() {
 
             {/* Assets Library Section */}
             <section className="glass-panel p-6">
-              <div className="mb-4 flex flex-col items-start gap-3 lg:flex-row lg:items-center lg:justify-between">
+              <div className="flex items-center justify-between mb-4">
                 <div className="flex items-center gap-3">
                   <div className="p-2 rounded-lg bg-warm-amber/10">
                     <FolderOpen className="w-6 h-6 text-warm-amber" />
                   </div>
                   <div>
-                    <h2 className="text-xl font-semibold text-moss-green font-heading">
+                    <h2 className="text-xl font-semibold text-brand-ink font-heading">
                       Asset Library
                     </h2>
                     <p className="text-sm text-warm-gray">
@@ -270,7 +271,7 @@ export default function DashboardPage() {
                   aria-label="View asset library"
                 >
                   <span className="hidden sm:inline">View Library</span>
-                  <ArrowRight className="w-4 h-4" aria-hidden="true" />
+                  <ArrowRight className="w-4 h-4" />
                 </Button>
               </div>
 
@@ -281,11 +282,93 @@ export default function DashboardPage() {
                   onClick={() => navigate('/assets')}
                 >
                   <FolderOpen className="w-8 h-8 mx-auto mb-2 text-warm-amber/60" />
-                  <p className="text-sm font-medium text-moss-green mb-1">
+                  <p className="text-sm font-medium text-brand-ink mb-1">
                     Manage Your Assets
                   </p>
                   <p className="text-xs text-warm-gray">
                     Upload and organize maps, tokens, audio, and avatar images
+                  </p>
+                </div>
+              </div>
+            </section>
+
+            {/* Documents Section */}
+            <section className="glass-panel p-6">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 rounded-lg bg-moss-green/10">
+                    <BookOpen className="w-6 h-6 text-moss-green" />
+                  </div>
+                  <div>
+                    <h2 className="text-xl font-semibold text-brand-ink font-heading">
+                      Documents
+                    </h2>
+                    <p className="text-sm text-warm-gray">
+                      Rulebooks and handouts
+                    </p>
+                  </div>
+                </div>
+                <Button
+                  onClick={() => navigate('/documents')}
+                  className="flex items-center gap-2"
+                >
+                  <span className="hidden sm:inline">View Documents</span>
+                  <ArrowRight className="w-4 h-4" />
+                </Button>
+              </div>
+
+              <div className="space-y-3 mt-4">
+                <div
+                  className="p-4 rounded-lg bg-parchment/50 border border-moss-green/20
+                           hover:border-moss-green/40 transition-colors cursor-pointer text-center"
+                  onClick={() => navigate('/documents')}
+                >
+                  <BookOpen className="w-8 h-8 mx-auto mb-2 text-moss-green/60" />
+                  <p className="text-sm font-medium text-brand-ink mb-1">
+                    Read Without Leaving the Table
+                  </p>
+                  <p className="text-xs text-warm-gray">
+                    Upload a PDF, text or Markdown file and read it here or in any campaign a DM shares it with
+                  </p>
+                </div>
+              </div>
+            </section>
+
+            {/* Character Templates Section */}
+            <section className="glass-panel p-6">
+              <div className="flex items-center justify-between mb-4">
+                <div className="flex items-center gap-3">
+                  <div className="p-2 rounded-lg bg-moss-green/10">
+                    <FileText className="w-6 h-6 text-brand-ink" />
+                  </div>
+                  <div>
+                    <h2 className="text-xl font-semibold text-brand-ink font-heading">
+                      Character Templates
+                    </h2>
+                    <p className="text-sm text-warm-gray">Shared starter sheets</p>
+                  </div>
+                </div>
+                <Button
+                  onClick={() => navigate('/character-templates')}
+                  className="flex items-center gap-2"
+                >
+                  <span className="hidden sm:inline">Browse</span>
+                  <ArrowRight className="w-4 h-4" />
+                </Button>
+              </div>
+
+              <div className="space-y-3 mt-4">
+                <div
+                  className="p-4 rounded-lg bg-parchment/50 border border-moss-green/20
+                           hover:border-moss-green/40 transition-colors cursor-pointer text-center"
+                  onClick={() => navigate('/character-templates')}
+                >
+                  <FileText className="w-8 h-8 mx-auto mb-2 text-brand-ink/40" />
+                  <p className="text-sm font-medium text-brand-ink mb-1">
+                    Start From a Template
+                  </p>
+                  <p className="text-xs text-warm-gray">
+                    Copy a shared sheet into a character, or publish one for others
                   </p>
                 </div>
               </div>
@@ -297,10 +380,10 @@ export default function DashboardPage() {
             <section className="glass-panel p-6">
               <div className="flex items-center gap-3 mb-4">
                 <div className="p-2 rounded-lg bg-moss-green/10">
-                  <Mail className="w-6 h-6 text-moss-green" />
+                  <Mail className="w-6 h-6 text-brand-ink" />
                 </div>
                 <div>
-                  <h2 className="text-xl font-semibold text-moss-green font-heading">
+                  <h2 className="text-xl font-semibold text-brand-ink font-heading">
                     Pending Invitations
                   </h2>
                   <p className="text-sm text-warm-gray">
@@ -316,7 +399,7 @@ export default function DashboardPage() {
                     className="p-4 rounded-lg bg-parchment/50 border border-moss-green/20 hover:border-moss-green/40 transition-colors cursor-pointer"
                     onClick={() => setSelectedInvitation(invitation)}
                   >
-                    <h3 className="font-semibold text-moss-green mb-1">
+                    <h3 className="font-semibold text-brand-ink mb-1">
                       {invitation.campaign?.name}
                     </h3>
                     {invitation.campaign?.description && (
@@ -328,7 +411,7 @@ export default function DashboardPage() {
                       <span>
                         DM: {invitation.campaign?.owner?.displayName}
                       </span>
-                      <button className="text-moss-green hover:underline font-medium">
+                      <button className="text-brand-ink hover:underline font-medium">
                         View Invitation →
                       </button>
                     </div>
@@ -340,17 +423,17 @@ export default function DashboardPage() {
 
           {/* Campaigns Section */}
           <section>
-            <div className="mb-6 flex flex-col items-stretch gap-4 sm:flex-row sm:items-center sm:justify-between">
-              <h2 className="text-2xl font-semibold text-moss-green font-heading">
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-2xl font-semibold text-brand-ink font-heading">
                 Your Campaigns
               </h2>
-              <div className="flex flex-wrap items-center justify-end gap-2">
+              <div className="flex items-center gap-2">
                 <Button
                   onClick={() => setShowImportDialog(true)}
                   variant="secondary" className="flex items-center gap-2"
                   aria-label="Import campaign"
                 >
-                  <Upload className="w-4 h-4" aria-hidden="true" />
+                  <Upload className="w-4 h-4" />
                   <span className="hidden sm:inline">Import</span>
                 </Button>
                 <Button
@@ -365,10 +448,10 @@ export default function DashboardPage() {
 
             {/* Error Message */}
             {error && !loading && (
-              <div className="mb-6 bg-red-500/10 border border-red-500/20 rounded-lg p-4 flex items-start gap-3">
-                <AlertCircle className="w-5 h-5 text-red-500 flex-shrink-0 mt-0.5" />
+              <div className="mb-6 bg-danger/10 border border-danger/20 rounded-lg p-4 flex items-start gap-3">
+                <AlertCircle className="w-5 h-5 text-danger-ink flex-shrink-0 mt-0.5" />
                 <div className="flex-1">
-                  <p className="text-sm text-red-700 font-medium">{error}</p>
+                  <p className="text-sm text-danger-ink font-medium">{error}</p>
                 </div>
                 <Button
                   onClick={loadData}
@@ -390,12 +473,12 @@ export default function DashboardPage() {
 
             {/* Empty State */}
             {!loading && campaigns.length === 0 && (
-              <div className="glass-panel p-6 text-center sm:p-12">
+              <div className="glass-panel p-12 text-center">
                 <div className="max-w-md mx-auto">
                   <div className="mb-4 inline-block p-4 rounded-full bg-moss-green/10">
                     <img src={mascotUrl} alt="" className="w-12 h-12 object-contain" />
                   </div>
-                  <h3 className="text-xl font-semibold text-moss-green mb-2">
+                  <h3 className="text-xl font-semibold text-brand-ink mb-2">
                     No campaigns yet
                   </h3>
                   <p className="text-warm-gray mb-6">
@@ -404,7 +487,7 @@ export default function DashboardPage() {
                   </p>
                   <Button
                     onClick={() => setShowCreateModal(true)}
-                    className="inline-flex max-w-full flex-wrap items-center justify-center gap-2 whitespace-normal text-center"
+                    className="inline-flex items-center gap-2"
                   >
                     <Plus className="w-5 h-5" />
                     Create Your First Campaign
@@ -430,12 +513,12 @@ export default function DashboardPage() {
           {/* Campaign Stats (if campaigns exist) */}
           {!loading && campaigns.length > 0 && (
             <section className="glass-panel p-6">
-              <h3 className="text-lg font-semibold text-moss-green mb-4">
+              <h3 className="text-lg font-semibold text-brand-ink mb-4">
                 Quick Stats
               </h3>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div className="text-center p-4 rounded-lg bg-moss-green/5">
-                  <p className="text-3xl font-bold text-moss-green">
+                  <p className="text-3xl font-bold text-brand-ink">
                     {campaigns.filter(c => getUserRole(c) === CampaignRole.DM).length}
                   </p>
                   <p className="text-sm text-warm-gray mt-1">Campaigns as DM</p>

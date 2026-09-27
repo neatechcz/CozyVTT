@@ -61,6 +61,7 @@ src/
 ├── config/            Configuration loading (env vars, validation)
 ├── middleware/
 │   ├── auth.ts        Passport.js session middleware, requireAuth guards
+│   ├── passwordChange.ts  Gates every route until an admin-issued password is replaced
 │   ├── rateLimit.ts   Per-route rate limiters (auth, dice, chat, file upload)
 │   └── upload.ts      Multer configuration, magic byte validation
 ├── routes/            HTTP route handlers
@@ -74,6 +75,7 @@ src/
 │   ├── invitations.ts Campaign invitation lifecycle
 │   ├── mfa.ts         TOTP setup, verify, disable, backup codes
 │   ├── setup.ts       First-run setup wizard
+│   ├── config.ts      Public client config (upload limits)
 │   └── admin.ts       Admin: stats, settings, users, backups, logs
 ├── services/          Business logic (called by routes and WebSocket handlers)
 ├── validators/        Zod validation schemas (one per domain, incl. game-systems/)
@@ -91,6 +93,8 @@ src/
 │   ├── spirit-layer.ts   Spirit-layer + dynamic-lighting token filtering
 │   ├── serverRaycasting.ts  Server-side vision raycasting for lighting
 │   ├── asset-urls.ts     Asset URL normalization
+│   ├── fileUtils.ts      Upload paths + MAX_*_SIZE_MB limit resolution
+│   ├── proxyLimits.ts    Proxy body-cap parsing and startup warnings
 │   └── logger.ts         Winston logger configuration
 └── types/             Shared TypeScript interfaces
 ```
@@ -134,14 +138,14 @@ src/
 │   ├── WebSocketContext.tsx  Socket.io connection lifecycle and event subscriptions
 │   └── CampaignContext.tsx   Per-campaign metadata (campaign, current map, vibe, session status, roster)
 ├── stores/
-│   └── gameStore.ts   Zustand store for live socket-fed session state (token positions, walls, fog, lights, initiative)
+│   └── gameStore.ts   Zustand store for live socket-fed session state (token positions, combat/initiative, hover cross-highlight)
 ├── lib/
 │   └── queryClient.ts  React Query client configuration
 ├── pages/             One file per route (thin; delegates to components, contexts, and query hooks)
 ├── components/
 │   ├── ui/            Shared UI primitives (Button, Modal, Input, Field, Tooltip)
 │   ├── campaign/      Campaign page panels (ChatPanel, DiceRoller, SessionSidebar, MapCanvas, etc.)
-│   │   └── map/       MapCanvas render layers, vision cache, and animation/render-loop hooks
+│   │   └── map/       MapCanvas render layers, coordinate conversions, fog selection, vision cache, and animation/render-loop hooks
 │   ├── character-sheets/  Game system sheet renderers
 │   ├── common/        Reusable primitives (Toast, ConfirmDialog, EmptyState, etc.)
 │   └── admin/         Admin panel tabs
@@ -163,10 +167,43 @@ CozyVTT uses three complementary state layers, each with a clear boundary. The r
 | Layer | Owns | Examples |
 |-------|------|----------|
 | **React Query** (`@tanstack/react-query`) | Server resources fetched over REST | Campaign lists/detail, characters, assets, map metadata |
-| **Zustand** (`stores/gameStore.ts`) | Live, high-frequency state fed by WebSocket events | Token positions, walls, fog, lights, initiative |
+| **Zustand** (`stores/gameStore.ts`) | Live, high-frequency state fed by WebSocket events | Token positions and list, combat/initiative, hover cross-highlight (walls, fog and lights are still MapCanvas-local; walls additionally keep their own undo/redo history) |
 | **React Context** | App/session wiring and metadata | Auth state, socket connection, campaign metadata + vibe/session status |
 
 The split exists for performance. Live token movement is written to the Zustand store from **outside** React, so a `token.moved` event re-renders only the components subscribed to that token (the map canvas) — the roster, initiative tracker, and side panels don't re-render per movement frame. All three context provider values are memoized so unrelated socket traffic doesn't cascade re-renders through the campaign subtree.
+
+### Theming
+
+Every color in the themed UI comes from a CSS variable, so switching themes repaints the app without
+re-rendering anything. Tailwind maps each token with `rgb(var(--color-x) / <alpha-value>)`
+([tailwind.config.js](../frontend/tailwind.config.js)), which is why opacity modifiers such as
+`bg-danger/10` still follow the theme.
+
+| Group | Tokens | Use for |
+|---|---|---|
+| Brand / accent | `brand`, `brand-dark`, `accent`, `accent-hover`, `accent-text` | Fills: buttons, borders, highlights |
+| Text | `ink`, `ink-secondary`, `ink-muted` | Body, secondary and muted text |
+| Surfaces | `canvas`, `surface`, `surface-light`, `surface-dark`, `paper` | Page and panel backgrounds |
+| **Ink variants** | `brand-ink`, `accent-ink`, `spirit-ink`, `danger-ink`, `success-ink`, `warning-ink`, `info-ink` | **Text** in that color |
+| States | `danger`, `success`, `warning`, `info`, `spirit` | Status fills, borders, tints |
+
+**Two rules keep themes readable:**
+
+1. **Use `-ink` when the color is text.** `accent` is a fill — as text it measured as low as 1.84:1.
+   The `-ink` variants are derived per theme by `deriveReadableTokens`
+   ([themes.ts](../frontend/src/themes.ts)) via `ensureReadable`
+   ([utils/color.ts](../frontend/src/utils/color.ts)), which walks the color's lightness until it
+   clears WCAG AA against that theme's surfaces. Authored values that already pass are left alone.
+   Custom themes get the same treatment, so a user-picked palette cannot produce unreadable text.
+2. **Never use a raw Tailwind palette color on a themed surface.** `bg-red-50` stays pale pink on a
+   dark theme. Use the state tokens, or the `.alert-*` / `.badge-*` classes in
+   [index.css](../frontend/src/index.css).
+
+Both rules are enforced by tests rather than review:
+`utils/__tests__/themes.contrast.test.ts` checks every preset theme against every text/background
+pair the UI renders, and `utils/__tests__/themeTokens.test.ts` fails if raw palette colors appear
+outside the two exempt areas (character sheets, which are deliberately styled as light "paper" cards,
+and the dark DM map overlays).
 
 ### Data Flow (Campaign Page)
 
@@ -204,6 +241,7 @@ erDiagram
         string displayName
         PlatformRole platformRole
         bool isGlobalAssetManager
+        bool templateEditor
         bool approved
         bool mustChangePassword
         string bio
@@ -233,6 +271,16 @@ erDiagram
         string tokenImageUrl
     }
 
+    CharacterTemplate {
+        string id PK
+        string name
+        string description
+        GameSystem gameSystem
+        json data
+        string tokenImageUrl
+        string createdById FK
+    }
+
     Map {
         string id PK
         string name
@@ -260,12 +308,31 @@ erDiagram
         json metadata
     }
 
-    GameSession {
+    Session {
         string id PK
+        int sessionNumber
         datetime startedAt
         datetime endedAt
-        string status
-        json capturedState
+        json savedState
+        string notes
+    }
+
+    PersonalNote {
+        string id PK
+        string userId FK
+        string campaignId FK
+        string title
+        string content
+        datetime updatedAt
+    }
+
+    DiceMacro {
+        string id PK
+        string userId FK
+        string campaignId FK
+        string name
+        string expression
+        datetime createdAt
     }
 
     CreatureTemplate {
@@ -292,13 +359,26 @@ erDiagram
         datetime createdAt
     }
 
+    CampaignDocument {
+        string id PK
+        string campaignId FK
+        string assetId FK
+        string linkedById FK
+        datetime createdAt
+    }
+
     User ||--o{ CampaignMembership : "belongs to"
     Campaign ||--o{ CampaignMembership : "has"
     User ||--o{ Character : "owns"
+    User ||--o{ CharacterTemplate : "published"
     Campaign ||--o{ Character : "has assigned"
     Campaign ||--o{ Map : "has"
     Campaign ||--o{ Message : "has"
-    Campaign ||--o{ GameSession : "has"
+    Campaign ||--o{ Session : "has"
+    Campaign ||--o{ PersonalNote : "has"
+    User ||--o{ PersonalNote : "writes"
+    Campaign ||--o{ DiceMacro : "has"
+    User ||--o{ DiceMacro : "saves"
     User ||--o{ Asset : "uploaded"
     Campaign ||--o{ Asset : "scoped to"
     Map ||--o{ Asset : "uses"
@@ -307,15 +387,21 @@ erDiagram
     CreatureTemplate ||--o{ CreatureFavorite : "favorited as"
     User ||--o{ CreatureFavorite : "has favorites"
     Campaign ||--o{ CreatureFavorite : "scoped to"
+    Campaign ||--o{ CampaignDocument : "shares"
+    Asset ||--o{ CampaignDocument : "shared as"
+    User ||--o{ CampaignDocument : "linked by"
 ```
 
 ### Key Schema Notes
 
 - **Token data is stored as JSON inside `Map.tokens`** — tokens are not a separate table. This simplifies real-time updates (the whole token list is atomically replaced on moves).
 - **Character sheet data is stored as JSON in `Character.data`** — the schema is validated at the API layer by game-system-specific Zod schemas but stored untyped in Postgres. This allows flexible incremental saves.
-- **`vibeSettings` and `capturedState` are JSON columns** — used to persist complex nested state that changes frequently.
+- **`vibeSettings` and `Session.savedState` are JSON columns** — used to persist complex nested state that changes frequently.
 - **`CreatureTemplate` uses two scopes** — SRD creatures have `campaignId = null` (global, read-only) while custom creatures have a campaign FK. The `source` field distinguishes them (`'srd'` vs `'custom'`).
+- **`DiceMacro` is private to whoever saved it**, on the same terms as `PersonalNote` and enforced the same way. Its `expression` is validated when written by rolling it and discarding the result, so a stored macro is always one the roller accepts — ordered by `createdAt` rather than `updatedAt` because these are buttons, and editing one must not move it.
+- **`PersonalNote` is private to its author** — every query is scoped by both `campaignId` and the signed-in `userId`, and a note belonging to someone else answers 404 rather than 403 so the response cannot confirm that it exists. Nobody reads these but the person who wrote them, the DM included.
 - **`CreatureFavorite` is a per-campaign, per-user join table** — with a unique constraint on `(campaignId, userId, creatureId)` to prevent duplicate favorites. Cascade deletes ensure cleanup when creatures, users, or campaigns are removed.
+- **`CampaignDocument` shares a document with a campaign without copying it.** A document is an ordinary `Asset` of type `DOCUMENT`; the join row, unique on `(campaignId, assetId)`, is what lets a `USER`-scoped rulebook be read by the members of every campaign it is linked to. It is the one place the asset read rule looks beyond scope: `canReadAsset` is the single function both the serving route and the linking route consult, so a DM cannot link a file they could not read themselves; and linking further requires the document to be the DM's own or `GLOBAL`, so a share into one campaign cannot be forwarded by a member of it who runs another. Unlinking revokes access; deleting the asset removes its links, and deleting the campaign leaves the document intact.
 
 ---
 
@@ -361,6 +447,30 @@ if (!membership || membership.role !== CampaignRole.DM) {
   return res.status(403).json({ error: 'DM access required' });
 }
 ```
+
+### Ownership is a separate axis from the DM role
+
+`Campaign.ownerId` and `CampaignMembership.role === 'DM'` are different facts.
+They name the same person in a campaign whose creator still runs it, which is
+most of them — and that coincidence is why five call sites independently worked
+out "the DM" by looking up the owner, and only diverged once the DM seat became
+movable (`PUT /api/campaigns/:id/dm`).
+
+Decide **"is this user the DM?"** from the membership, never from `ownerId`.
+Ownership gates exactly one thing, deleting the campaign, so that the
+destructive power stays with whoever created it and a handover can never lock an
+owner out. The frontend asks `src/utils/campaignRoles.ts`, which exists so the
+answer has one home rather than five.
+
+### Roles are a snapshot on an open socket
+
+`socket.role` is read once, when the socket authenticates to a campaign, and
+trusted by every gated handler thereafter — the right place to read it from,
+since a handler must never take a role off the wire, but it means the value
+goes stale if the role changes underneath it. A DM transfer therefore updates
+connected sockets in place (`applyRoleToLiveSockets`) and broadcasts
+`campaign.dm.transferred`, rather than waiting for a reconnect. REST needs no
+equivalent: `loadCampaignMembership` reads the membership per request.
 
 ### MFA (TOTP)
 
@@ -430,16 +540,75 @@ uploads/
                 {id}_thumb.webp
   audio/        {id}.{ext}
   avatars/       {userId}_avatar.{ext}
+  documents/    global/{id}.{ext}             Global and personal documents
+                campaigns/{campaignId}/{id}.{ext}
   backups/      cozyvtt_{timestamp}.sql.gz
 ```
 
 ### Upload Pipeline
 
 1. **Multer** receives the multipart upload and streams to a temp file
-2. **Magic byte validation** (`file-type` library) — verifies the actual file type matches the declared MIME type
+2. **Magic byte validation** (`file-type` library) — verifies the actual file type matches the declared MIME type. Anything `file-type` can identify must match; only a file it cannot identify falls through to a per-format check, and that check is positive rather than by extension: a PDF or MP3 must start with its header bytes, and a `.txt` or `.md` must decode as UTF-8 with no NUL or control bytes. An executable renamed `.md` fails here.
 3. **Size limit check** — configurable per asset type via environment variables
 4. **Sharp** generates a WebP thumbnail (for maps and tokens)
 5. File is moved to its final location; the `Asset` record is created in the database
+
+### Security Headers
+
+Two policies, because two different servers answer. `backend/src/server.ts`
+(helmet) covers what the backend sends, which in the production stack is `/api`
+and `/socket.io`. The app page comes from the frontend container, so its
+headers live in `frontend/security-headers.conf` and travel with it, including
+when a self-hoster removes the bundled proxy and points their own at that
+container. A Content-Security-Policy on a JSON response governs nothing, which
+is why the page had no protection until the second file existed.
+
+The page's policy is the wider of the two: themes load a stylesheet from
+`fonts.googleapis.com` and its fonts from `fonts.gstatic.com`, which the API
+never does. It is strict where it counts, `script-src 'self'` with no
+`unsafe-inline`, which the built page allows because Vite emits no inline
+script. It deliberately omits `upgrade-insecure-requests`, since CozyVTT is
+commonly served over plain HTTP on a home network and that directive would
+break such an instance.
+
+nginx does not inherit `add_header` into a location that sets one of its own,
+and `try_files` routes `/` through the `= /index.html` block, so the headers
+are included per location rather than declared once at server level. A test
+asserts that per block.
+
+### Serving Audio
+
+Ambient audio is not relayed through the server. The DM's choice is broadcast as
+a URL and each player's browser fetches the file itself, so a track must be
+readable by every member while it plays. `canReadAsset` grants exactly that: the
+asset id recorded in the campaign's `vibeSettings.atmosphereAudio` is readable by
+that campaign's members for as long as it is recorded. Because setting a track is
+therefore an act of sharing, the socket handler checks the DM can read it first,
+and never as an admin. It is also the only writer of that setting: the campaign
+settings routes and campaign import carry the stored value through untouched,
+because neither can make that check. The route sends the `Content-Type` from the file's
+validated extension, never the uploader-supplied `mimeType`, with `nosniff` on
+both whole-file and range responses.
+
+### Serving Documents
+
+The server never parses a document; the defence is in how it is served. `GET /api/assets/documents/:id` chooses the `Content-Type` from the validated extension, never from the stored `mimeType` the uploader supplied, and sends Markdown and text as `text/plain` so a browser never renders a document as HTML. The response carries `X-Content-Type-Options: nosniff` and a `default-src 'none'; sandbox` Content-Security-Policy. The reader renders Markdown with `react-markdown` (raw HTML disabled, `javascript:` and `data:` links stripped, images from any origin but this instance replaced by their alt text so a shared document cannot make readers' browsers call out to another host) and shows PDFs in an `<iframe sandbox="allow-scripts">`, which gives the frame a null origin: it cannot reach the session cookie or call the API. "Open in a new tab" shows a PDF in the browser's own viewer at the app's origin, with the isolation that viewer provides and nothing more; that is the same trust every site with a PDF link extends, and the reason the in-app reader uses a sandboxed frame instead. A read the caller is not allowed answers 404, not 403, so the response cannot confirm the document exists. Text documents are served `Cache-Control: private, no-cache` with an ETag taken from the file, because they can be edited in place; the immutable caching the other asset routes use would hand a reader the old text.
+
+### Serving Images
+
+Maps, tokens and avatars are served with an explicit `Content-Type` from a small
+whitelist of image types (and a PDF, for maps), keyed on the file's extension,
+with `X-Content-Type-Options: nosniff`. Anything whose extension is not on that
+list goes out as `application/octet-stream`, which a browser downloads rather
+than renders. This matters because the extension is not trusted on its own: the
+upload accepts a file by its bytes, so a genuine image can arrive named
+`evil.html`, or a GIF whose header is also valid JavaScript named `x.js`. Two
+things stop that reaching a browser as a page or a script. The upload renames
+the stored file to the extension its validated content calls for, so nothing but
+a real image extension is ever written. And the serving routes send the safe
+type above, so a file already on disk under a bad name is still served as bytes,
+never executed. Both are needed: the first for new uploads, the second for
+anything already stored.
 
 ### Asset Scoping
 
@@ -448,7 +617,7 @@ Assets have three scopes:
 | Scope | Who can see/use it | Who can upload |
 |-------|--------------------|----------------|
 | `GLOBAL` | All users on the platform | Admins and Global Asset Managers |
-| `USER` | The uploading user only | Any user |
+| `USER` | The uploading user only, plus members of any campaign that is *using* the asset: a map on the table, token art, or the track it is currently playing, and for a document, one shared with it | Any user |
 | `CAMPAIGN` | All campaign members | Campaign DM, players (tokens only) |
 
 ---
@@ -499,7 +668,7 @@ JWTs are stateless, which makes revocation difficult — a compromised token sta
 
 ### Why Zustand + React Query alongside React Context?
 
-Each tool owns what it's good at. React Query handles server resources — caching, deduping, and refetch-on-reconnect for campaigns, characters, and assets — so pages don't hand-roll `useEffect` + loading/error state. Zustand holds live, high-frequency socket state (token positions, fog, lights, initiative) because it can be written from **outside** React, so a token move updates only its subscribers instead of re-rendering the whole campaign tree through a context provider. React Context is kept for genuinely app-wide wiring (auth, the socket connection) and slow-changing campaign metadata. The boundary rule — one layer per datum — keeps the three from fighting over the same state.
+Each tool owns what it's good at. React Query handles server resources — caching, deduping, and refetch-on-reconnect for campaigns, characters, and assets — so pages don't hand-roll `useEffect` + loading/error state. Zustand holds live, high-frequency socket state (token positions, combat/initiative) because it can be written from **outside** React, so a token move updates only its subscribers instead of re-rendering the whole campaign tree through a context provider. React Context is kept for genuinely app-wide wiring (auth, the socket connection) and slow-changing campaign metadata. The boundary rule — one layer per datum — keeps the three from fighting over the same state.
 
 ### Why store tokens in `Map.tokens` JSON instead of a separate table?
 

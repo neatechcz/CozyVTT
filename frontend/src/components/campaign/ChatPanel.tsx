@@ -3,18 +3,26 @@
 // Real-time chat with message history and WebSocket integration
 // ============================================
 
-import { useState, useEffect, useRef, FormEvent, KeyboardEvent } from 'react';
-import { MessageCircle, Send, Loader, AlertCircle } from 'lucide-react';
+import { useState, useEffect, useLayoutEffect, useRef, FormEvent, KeyboardEvent } from 'react';
+import { MessageCircle, Send, Loader, AlertCircle, Eraser } from 'lucide-react';
 import { useParams } from 'react-router-dom';
 import { useWebSocket } from '@/contexts/WebSocketContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { useCampaign } from '@/contexts/CampaignContext';
 import { getMessages } from '@/services/message.service';
+import { mergeMessages } from '@/utils/messageMerge';
+import { api } from '@/services/api';
+import ConfirmDialog from '@/components/common/ConfirmDialog';
 import ChatMessage from './ChatMessage';
 import ChatMessageSkeleton from '@/components/skeletons/ChatMessageSkeleton';
 import { MessageType, PlatformRole } from '@/types';
 import type { Message, ChatMessageBroadcast } from '@/types';
 import Button from '@/components/ui/Button';
+import { errorMessage } from '@/utils/errors';
+import type { ChatSystemBroadcast } from '@/types';
+
+/** Messages per page. The server caps this at 100. */
+const PAGE_SIZE = 50;
 
 export default function ChatPanel() {
   const { id: campaignId } = useParams<{ id: string }>();
@@ -22,12 +30,43 @@ export default function ChatPanel() {
   const { user } = useAuth();
   const { userRole, campaign } = useCampaign();
 
+  // Older versions wrote a chat message every time someone connected or
+  // dropped, which on a flaky connection buried the actual conversation. They
+  // are no longer written, but existing campaigns still carry the backlog —
+  // this lets the DM clear it when they choose rather than a migration doing it
+  // silently on upgrade.
+  const [confirmClearJoins, setConfirmClearJoins] = useState(false);
+  const [clearingJoins, setClearingJoins] = useState(false);
+
+  const handleClearJoinLeave = async () => {
+    if (!campaign?.id) return;
+    setConfirmClearJoins(false);
+    setClearingJoins(true);
+    try {
+      const { deleted } = await api.clearJoinLeaveMessages(campaign.id);
+      if (deleted > 0) {
+        setMessages((prev) =>
+          prev.filter((m) => {
+            const action = (m.metadata as { action?: string } | null)?.action;
+            return action !== 'user.joined' && action !== 'user.left';
+          })
+        );
+      }
+    } catch (err) {
+      console.error('[ChatPanel] Failed to clear join/leave messages:', err);
+    } finally {
+      setClearingJoins(false);
+    }
+  };
+
   // State
   const [messages, setMessages] = useState<Message[]>([]);
   const [messageInput, setMessageInput] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(true);
+  /** Where the last page stopped. Minted by the server; passed back untouched. */
+  const [cursor, setCursor] = useState<string | null>(null);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
 
   // Rate limiting state (10 messages per minute = 1 per 6 seconds)
@@ -37,6 +76,8 @@ export default function ChatPanel() {
   // Refs
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
+  /** Distance from the bottom to restore once an older page has been added. */
+  const restoreScrollRef = useRef<number | null>(null);
   const wasAtBottomRef = useRef(true);
 
   // ============================================
@@ -61,6 +102,24 @@ export default function ChatPanel() {
    * Uses scrollTo on the container directly to avoid scrollIntoView
    * propagating up to parent scrollable elements (e.g. the sidebar).
    */
+  /**
+   * Put the reader back where they were after older messages are added above.
+   *
+   * Laid out before paint rather than after, so the list does not visibly jump.
+   * Measured from the bottom because that distance is what the new content does
+   * not change.
+   */
+  useLayoutEffect(() => {
+    const offsetFromBottom = restoreScrollRef.current;
+    if (offsetFromBottom === null) return;
+    restoreScrollRef.current = null;
+
+    const container = messagesContainerRef.current;
+    if (container) {
+      container.scrollTop = container.scrollHeight - offsetFromBottom;
+    }
+  }, [messages]);
+
   const scrollToBottom = (smooth = true) => {
     const container = messagesContainerRef.current;
     if (!container) return;
@@ -92,16 +151,18 @@ export default function ChatPanel() {
         setIsLoading(true);
         setError(null);
 
-        const fetchedMessages = await getMessages(campaignId, 50);
+        const page = await getMessages(campaignId, PAGE_SIZE);
 
-        setMessages(fetchedMessages.reverse()); // API returns newest first, we want oldest first
-        setHasMore(fetchedMessages.length === 50);
+        // The server sends newest first; the panel reads oldest first.
+        setMessages(mergeMessages([], page.messages));
+        setHasMore(page.pagination.hasMore);
+        setCursor(page.pagination.nextCursor);
 
         // Scroll to bottom after initial load (without smooth)
         setTimeout(() => scrollToBottom(false), 100);
-      } catch (err: any) {
+      } catch (err) {
         console.error('[ChatPanel] Failed to load messages:', err);
-        setError(err.message || 'Failed to load messages');
+        setError(errorMessage(err) || 'Failed to load messages');
       } finally {
         setIsLoading(false);
       }
@@ -128,24 +189,12 @@ export default function ChatPanel() {
 
     const resync = async () => {
       try {
-        const fetched = await getMessages(campaignId, 50);
-        const fresh = fetched.reverse(); // API returns newest first
+        const page = await getMessages(campaignId, PAGE_SIZE);
+        const fresh = page.messages;
 
-        setMessages((prev) => {
-          const seen = new Set(prev.map((m) => m.id));
-          const merged = [...prev];
-          for (const msg of fresh) {
-            if (!seen.has(msg.id)) {
-              merged.push(msg);
-            }
-          }
-          // Re-sort by createdAt to keep order correct if a gap was filled
-          merged.sort(
-            (a, b) =>
-              new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime()
-          );
-          return merged;
-        });
+        // mergeMessages already orders and dedupes; sorting again here on the
+        // timestamp alone would undo the id tiebreak it applies.
+        setMessages((prev) => mergeMessages(prev, fresh));
       } catch (err) {
         console.error('[ChatPanel] Failed to resync messages after reconnect:', err);
         // Non-fatal — user will still see new messages going forward
@@ -159,28 +208,31 @@ export default function ChatPanel() {
    * Load more messages (pagination)
    */
   const loadMoreMessages = async () => {
-    if (!campaignId || isLoadingMore || !hasMore || messages.length === 0) return;
+    if (!campaignId || isLoadingMore || !hasMore) return;
 
     try {
       setIsLoadingMore(true);
 
-      // Get the oldest message timestamp for cursor-based pagination
-      const oldestMessage = messages[0];
-      const before = oldestMessage.createdAt;
+      // Older messages are added above what is on screen, which would otherwise
+      // push the reader's place down by the height of the new page and make a
+      // second Load More impossible to aim at. Remember where the bottom was.
+      const container = messagesContainerRef.current;
+      restoreScrollRef.current = container
+        ? container.scrollHeight - container.scrollTop
+        : null;
 
-      const fetchedMessages = await getMessages(campaignId, 50, before);
+      // Hand back exactly what the server gave us. It decides what a position
+      // in the history is; the panel does not construct one.
+      const page = await getMessages(campaignId, PAGE_SIZE, cursor ?? undefined);
 
-      if (fetchedMessages.length === 0) {
-        setHasMore(false);
-        return;
-      }
-
-      // Add older messages to the beginning
-      setMessages((prev) => [...fetchedMessages.reverse(), ...prev]);
-      setHasMore(fetchedMessages.length === 50);
-    } catch (err: any) {
+      // Merged rather than prepended: a page that overlaps what is on screen
+      // would otherwise show its messages twice, duplicate keys and all.
+      setMessages((prev) => mergeMessages(prev, page.messages));
+      setHasMore(page.pagination.hasMore);
+      setCursor(page.pagination.nextCursor);
+    } catch (err) {
       console.error('[ChatPanel] Failed to load more messages:', err);
-      setError(err.message || 'Failed to load more messages');
+      setError(errorMessage(err) || 'Failed to load more messages');
     } finally {
       setIsLoadingMore(false);
     }
@@ -210,6 +262,7 @@ export default function ChatPanel() {
           email: '',
           platformRole: PlatformRole.USER,
           globalAssetManager: false,
+          templateEditor: false,
           mfaEnabled: false,
           avatarUrl: null,
           bio: null,
@@ -255,11 +308,13 @@ export default function ChatPanel() {
       }
     };
 
-    const handleSystemMessage = (data: { content: string; metadata?: any; timestamp: string }) => {
+    const handleSystemMessage = (data: ChatSystemBroadcast) => {
       console.log('[ChatPanel] Received system message:', data);
 
       const systemMessage: Message = {
-        id: `system-${Date.now()}`,
+        // The server's own id, not one made up here. A fabricated id can never
+        // match the row when history replays it, so the notice appeared twice.
+        id: data.id,
         campaignId: campaignId!,
         userId: null,
         type: MessageType.SYSTEM,
@@ -268,7 +323,7 @@ export default function ChatPanel() {
         createdAt: data.timestamp,
       };
 
-      setMessages((prev) => [...prev, systemMessage]);
+      setMessages((prev) => mergeMessages(prev, [systemMessage]));
 
       if (wasAtBottomRef.current) {
         setTimeout(() => scrollToBottom(true), 50);
@@ -366,6 +421,7 @@ export default function ChatPanel() {
           email: user.email,
           platformRole: user.platformRole,
           globalAssetManager: user.globalAssetManager,
+          templateEditor: user.templateEditor,
           mfaEnabled: user.mfaEnabled,
           avatarUrl: user.avatarUrl,
           bio: user.bio,
@@ -402,7 +458,7 @@ export default function ChatPanel() {
       <div className="glass-panel h-full flex flex-col">
         {/* Header skeleton */}
         <div className="flex items-center gap-2 p-4 border-b border-moss-green/20">
-          <MessageCircle className="w-5 h-5 text-moss-green/40" />
+          <MessageCircle className="w-5 h-5 text-brand-ink/40" />
           <div className="h-5 w-10 bg-moss-green/15 rounded animate-pulse" />
         </div>
         {/* Message skeletons */}
@@ -425,20 +481,44 @@ export default function ChatPanel() {
     <div className="glass-panel h-full flex flex-col">
       {/* Chat Header */}
       <div className="flex items-center gap-2 p-4 border-b border-moss-green/20">
-        <MessageCircle className="w-5 h-5 text-moss-green" />
-        <h3 className="text-lg font-semibold text-moss-green">Chat</h3>
+        <MessageCircle className="w-5 h-5 text-brand-ink" />
+        <h3 className="text-lg font-semibold text-brand-ink">Chat</h3>
         {messages.length > 0 && (
           <span className="text-xs text-stone-gray/70 ml-auto">
             {messages.length} {messages.length === 1 ? 'message' : 'messages'}
           </span>
         )}
+        {userRole === 'DM' && (
+          <button
+            onClick={() => setConfirmClearJoins(true)}
+            disabled={clearingJoins}
+            aria-label="Clear old join and leave messages"
+            title="Clear old join and leave messages"
+            className={`p-1.5 rounded-lg text-stone-gray hover:text-brand-ink hover:bg-moss-green/10 transition-colors disabled:opacity-50 ${
+              messages.length > 0 ? '' : 'ml-auto'
+            }`}
+          >
+            <Eraser className="w-4 h-4" />
+          </button>
+        )}
       </div>
+
+      <ConfirmDialog
+        isOpen={confirmClearJoins}
+        title="Clear join and leave messages?"
+        message="Removes the old “has joined” and “has left” notices from this campaign's chat for everyone. The rest of the conversation is untouched, and no new ones are created."
+        confirmLabel="Clear"
+        cancelLabel="Keep"
+        variant="warning"
+        onConfirm={handleClearJoinLeave}
+        onCancel={() => setConfirmClearJoins(false)}
+      />
 
       {/* Error Display */}
       {error && (
-        <div className="mx-4 mt-4 p-3 bg-red-50 border border-red-200 rounded-lg flex items-center gap-2">
-          <AlertCircle className="w-4 h-4 text-red-600 flex-shrink-0" />
-          <p className="text-sm text-red-800">{error}</p>
+        <div className="mx-4 mt-4 p-3 bg-danger/10 border border-danger/30 rounded-lg flex items-center gap-2">
+          <AlertCircle className="w-4 h-4 text-danger-ink flex-shrink-0" />
+          <p className="text-sm text-danger-ink">{error}</p>
         </div>
       )}
 
@@ -475,7 +555,7 @@ export default function ChatPanel() {
         {/* Messages List */}
         {messages.length === 0 ? (
           <div className="text-center py-8">
-            <MessageCircle className="w-12 h-12 text-moss-green/30 mx-auto mb-3" />
+            <MessageCircle className="w-12 h-12 text-brand-ink/30 mx-auto mb-3" />
             <p className="text-sm text-warm-gray mb-2">No messages yet</p>
             <p className="text-xs text-stone-gray/70">
               Start a conversation with your party
@@ -527,7 +607,7 @@ export default function ChatPanel() {
 
           {/* Rate Limiting Feedback */}
           {!canSend && cooldownSeconds > 0 && (
-            <p className="text-xs text-amber-700 text-center">
+            <p className="text-xs text-warning-ink text-center">
               Wait {cooldownSeconds}s before sending another message
             </p>
           )}

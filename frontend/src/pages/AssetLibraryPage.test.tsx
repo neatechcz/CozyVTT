@@ -9,6 +9,7 @@ vi.mock('@/contexts/AuthContext', () => ({
 }));
 
 vi.mock('@/hooks/queries', () => ({
+  useServerConfigQuery: () => ({ data: undefined }),
   useAssetsQuery: () => ({
     data: { assets: [], pagination: { totalPages: 1, total: 0 } },
     isPending: false,

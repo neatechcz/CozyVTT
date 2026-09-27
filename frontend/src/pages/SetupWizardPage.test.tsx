@@ -5,7 +5,7 @@ import SetupWizardPage from './SetupWizardPage';
 const mocks = vi.hoisted(() => ({
   checkSetupStatus: vi.fn(),
   initializeSetup: vi.fn(),
-  refreshUser: vi.fn(),
+  adoptSession: vi.fn(),
   navigate: vi.fn(),
 }));
 
@@ -17,7 +17,7 @@ vi.mock('@/services/setup.service', () => ({
 }));
 
 vi.mock('@/contexts/AuthContext', () => ({
-  useAuth: () => ({ refreshUser: mocks.refreshUser }),
+  useAuth: () => ({ adoptSession: mocks.adoptSession }),
 }));
 
 vi.mock('@/contexts/ThemeContext', () => ({
@@ -38,7 +38,6 @@ describe('SetupWizardPage', () => {
       needsSetup: true,
     });
     mocks.initializeSetup.mockResolvedValue({ message: 'Setup completed', user: {} });
-    mocks.refreshUser.mockResolvedValue(undefined);
   });
 
   it('submits the reviewed instance name, timezone, and registration setting', async () => {
@@ -81,7 +80,7 @@ describe('SetupWizardPage', () => {
       timezone: 'Europe/Prague',
       allowRegistration: true,
     }));
-    expect(mocks.refreshUser).toHaveBeenCalledTimes(1);
+    expect(mocks.adoptSession).toHaveBeenCalledWith({});
     expect(mocks.navigate).toHaveBeenCalledWith('/dashboard');
   });
 });

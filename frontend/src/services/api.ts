@@ -1,4 +1,5 @@
 import axios, { AxiosInstance, AxiosError, InternalAxiosRequestConfig } from 'axios';
+import { isPublicPath } from '@/utils/publicRoutes';
 import type {
   User,
   AuthResponse,
@@ -28,11 +29,17 @@ import type {
   UpdateTokenRequest,
   Token,
   CreatureTemplate,
+  CharacterTemplate,
   TokenTemplate,
   CampaignImportPreview,
   CampaignImportResult,
-  Message,
+
+  MessageHistoryPage,
+  DiceRolledEvent,
   Session,
+  SessionSummary,
+  PersonalNote,
+  PersonalNoteSummary,
   CampaignInvitation,
   ApiError,
   SystemStats,
@@ -42,6 +49,9 @@ import type {
   AdminBackup,
   AppearanceSettings,
   UserPreferences,
+  ServerConfig,
+  RosterMember,
+  CampaignMembership,
 } from '@/types';
 
 /** One field-level change for `PATCH /api/characters/:id/data`. */
@@ -120,23 +130,26 @@ class ApiClient {
           const { status, data } = error.response;
 
           // Unauthorized - redirect to login, but only from protected pages.
-          // Public pages (auth flows, reset password, setup, welcome) should
-          // not redirect — their 401s are expected (user is not yet logged in).
-          if (status === 401) {
-            const pathname = window.location.pathname;
-            const isPublicPage =
-              pathname.startsWith('/auth') ||
-              pathname === '/reset-password' ||
-              pathname === '/setup' ||
-              pathname === '/';
-            if (!isPublicPage) {
-              window.location.href = '/auth/login';
-            }
+          // On a public page a 401 is expected, because nobody has signed in
+          // yet. The route list lives in utils/publicRoutes so it can be tested
+          // against App.tsx — see the note there on why a missing entry breaks
+          // tokenised links rather than merely redirecting them.
+          if (status === 401 && !isPublicPath(window.location.pathname)) {
+            window.location.href = '/auth/login';
           }
 
           // Forbidden
           if (status === 403) {
-            console.error('Permission denied:', data.message);
+            // The account must replace an admin-issued password before it can
+            // do anything else. Covers tabs left open when the flag was set.
+            const code = (data as { code?: string })?.code;
+            if (code === 'PASSWORD_CHANGE_REQUIRED') {
+              if (window.location.pathname !== '/auth/change-password') {
+                window.location.href = '/auth/change-password';
+              }
+            } else {
+              console.error('Permission denied:', data.message);
+            }
           }
 
           // Rate limited
@@ -191,6 +204,15 @@ class ApiClient {
     return response.data;
   }
 
+  /**
+   * Server-enforced upload limits (from the MAX_*_SIZE_MB environment variables).
+   * Fetched at runtime so limit changes don't require rebuilding the SPA.
+   */
+  async getServerConfig(): Promise<ServerConfig> {
+    const response = await this.client.get<ServerConfig>('/api/config');
+    return response.data;
+  }
+
   async forgotPassword(data: ForgotPasswordRequest): Promise<{ message: string }> {
     const response = await this.client.post('/api/auth/forgot-password', data);
     return response.data;
@@ -224,9 +246,9 @@ class ApiClient {
     email: string;
     password: string;
     displayName: string;
-    instanceName: string;
-    timezone: string;
-    allowRegistration: boolean;
+    instanceName?: string;
+    timezone?: string;
+    allowRegistration?: boolean;
   }): Promise<{ message: string; user: User }> {
     const response = await this.client.post('/api/setup/init', data);
     return response.data;
@@ -344,12 +366,33 @@ class ApiClient {
     return response.data;
   }
 
+  /**
+   * Create a user with a temporary password. `temporaryPassword` is only
+   * returned when the welcome email could not be sent (no SMTP, or delivery
+   * failed) — otherwise the user has it and the admin does not need it.
+   */
   async createAdminUser(data: {
     email: string;
     displayName?: string;
     platformRole?: string;
-  }): Promise<{ message: string; user: User; temporaryPassword: string }> {
+  }): Promise<{ message: string; user: User; emailSent: boolean; temporaryPassword?: string }> {
     const response = await this.client.post('/api/admin/users', data);
+    return response.data;
+  }
+
+  /** Invite a user by email — no password is created or returned. */
+  async inviteAdminUser(data: {
+    email: string;
+    displayName?: string;
+    platformRole?: string;
+  }): Promise<{ message: string; user: User; expiresInDays: number }> {
+    const response = await this.client.post('/api/admin/users/invite', data);
+    return response.data;
+  }
+
+  /** Issue a fresh invitation link, invalidating any outstanding one. */
+  async resendAdminUserInvite(userId: string): Promise<{ message: string; expiresInDays: number }> {
+    const response = await this.client.post(`/api/admin/users/${userId}/resend-invite`);
     return response.data;
   }
 
@@ -440,8 +483,20 @@ class ApiClient {
     return response.data;
   }
 
-  async inviteUserToCampaign(campaignId: string, userId: string): Promise<{ message: string }> {
-    const response = await this.client.post(`/api/campaigns/${campaignId}/invite`, { userId });
+  /**
+   * Invite a user to a campaign.
+   *
+   * `sendEmail` is opt-in and defaults to false: the invitation always appears
+   * on the invitee's dashboard, and an email only goes out if the DM asked for
+   * one. `emailSent` reports what actually happened, since a server with no
+   * SMTP configured will decline to send even when asked.
+   */
+  async inviteUserToCampaign(
+    campaignId: string,
+    userId: string,
+    sendEmail = false
+  ): Promise<{ message: string; emailSent: boolean }> {
+    const response = await this.client.post(`/api/campaigns/${campaignId}/invite`, { userId, sendEmail });
     return response.data;
   }
 
@@ -455,6 +510,18 @@ class ApiClient {
     return response.data;
   }
 
+  /**
+   * Hand the DM role to another member. The outgoing DM becomes a player in the
+   * same action, and campaign ownership does not move.
+   */
+  async transferDM(
+    campaignId: string,
+    userId: string,
+  ): Promise<{ message: string; memberships: import('@/types').CampaignMembership[] }> {
+    const response = await this.client.put(`/api/campaigns/${campaignId}/dm`, { userId });
+    return response.data;
+  }
+
   async updateVibeSettings(
     campaignId: string,
     vibeSettings: import('@/types').VibeSettings,
@@ -463,7 +530,7 @@ class ApiClient {
     return response.data;
   }
 
-  async getCampaignCharacters(campaignId: string): Promise<{ roster: any[] }> {
+  async getCampaignCharacters(campaignId: string): Promise<{ roster: RosterMember[] }> {
     const response = await this.client.get(`/api/campaigns/${campaignId}/characters`);
     return response.data;
   }
@@ -482,7 +549,7 @@ class ApiClient {
     return response.data;
   }
 
-  async acceptInvitation(invitationId: string, characterIds: string[]): Promise<{ message: string; membership: any }> {
+  async acceptInvitation(invitationId: string, characterIds: string[]): Promise<{ message: string; membership: CampaignMembership }> {
     const response = await this.client.post(`/api/invitations/${invitationId}/accept`, { characterIds });
     return response.data;
   }
@@ -495,6 +562,158 @@ class ApiClient {
   // ============================================
   // Sessions
   // ============================================
+
+  // ============================================
+  // Documents
+  //
+  // Shared, not private: a campaign's members read what its DM shares. The
+  // server decides who may read, edit or share each one; these calls only ask.
+  // ============================================
+
+  /**
+   * The documents a campaign's members may read: shared in by the DM, or
+   * created for the campaign. Any member can list.
+   */
+  async listCampaignDocuments(
+    campaignId: string,
+  ): Promise<{ documents: import('@/types').CampaignDocument[] }> {
+    const response = await this.client.get(`/api/campaigns/${campaignId}/documents`);
+    return response.data;
+  }
+
+  /** Share a document with a campaign. DM only; the DM must already be able to read it. */
+  async linkCampaignDocument(campaignId: string, assetId: string): Promise<{ link: { id: string } }> {
+    const response = await this.client.post(`/api/campaigns/${campaignId}/documents`, { assetId });
+    return response.data;
+  }
+
+  /** Stop sharing a document with a campaign. The document itself is untouched. */
+  async unlinkCampaignDocument(campaignId: string, assetId: string): Promise<{ message: string }> {
+    const response = await this.client.delete(`/api/campaigns/${campaignId}/documents/${assetId}`);
+    return response.data;
+  }
+
+  /**
+   * Create a text or Markdown document from typed content. The same scope rules
+   * as an upload apply; the content is stored as typed and never interpreted.
+   */
+  async createDocument(body: {
+    name: string;
+    format: 'txt' | 'md';
+    content: string;
+    description?: string;
+    scope?: 'USER' | 'CAMPAIGN' | 'GLOBAL';
+    campaignId?: string;
+  }): Promise<{ asset: import('@/types').Asset }> {
+    const response = await this.client.post('/api/assets/documents', body);
+    return response.data;
+  }
+
+  /** Replace a text or Markdown document's content. Uploader or admin only. */
+  async updateDocumentContent(assetId: string, content: string): Promise<{ asset: import('@/types').Asset }> {
+    const response = await this.client.put(`/api/assets/documents/${assetId}/content`, { content });
+    return response.data;
+  }
+
+  /**
+   * The URL a document is read from. Same-origin, so a browser can show it in
+   * an iframe under the current Content Security Policy.
+   */
+  getDocumentUrl(assetId: string): string {
+    return this.getAssetUrl(assetId, 'documents');
+  }
+
+  // ============================================
+  // Personal notes and dice macros
+  //
+  // Private to the signed-in user; the server scopes every one of these by the
+  // session's own id, so there is no user parameter to pass or to get wrong.
+  // ============================================
+
+  /**
+   * Your own saved dice macros for this campaign, oldest first, the order they
+   * appear as buttons, which stays put when one is edited.
+   */
+  async listDiceMacros(campaignId: string): Promise<{ macros: import('@/types').DiceMacro[] }> {
+    const response = await this.client.get(`/api/campaigns/${campaignId}/macros`);
+    return response.data;
+  }
+
+  async createDiceMacro(
+    campaignId: string,
+    body: { name: string; expression: string },
+  ): Promise<{ macro: import('@/types').DiceMacro }> {
+    const response = await this.client.post(`/api/campaigns/${campaignId}/macros`, body);
+    return response.data;
+  }
+
+  async updateDiceMacro(
+    campaignId: string,
+    macroId: string,
+    body: { name?: string; expression?: string },
+  ): Promise<{ macro: import('@/types').DiceMacro }> {
+    const response = await this.client.put(`/api/campaigns/${campaignId}/macros/${macroId}`, body);
+    return response.data;
+  }
+
+  async deleteDiceMacro(campaignId: string, macroId: string): Promise<{ message: string }> {
+    const response = await this.client.delete(`/api/campaigns/${campaignId}/macros/${macroId}`);
+    return response.data;
+  }
+
+  /** The caller's notes for a campaign, newest first. Titles only, no bodies. */
+  async listNotes(campaignId: string): Promise<{ notes: PersonalNoteSummary[] }> {
+    const response = await this.client.get(`/api/campaigns/${campaignId}/notes`);
+    return response.data;
+  }
+
+  /** One note, with its Markdown source. */
+  async getNote(campaignId: string, noteId: string): Promise<{ note: PersonalNote }> {
+    const response = await this.client.get(`/api/campaigns/${campaignId}/notes/${noteId}`);
+    return response.data;
+  }
+
+  async createNote(
+    campaignId: string,
+    title: string,
+    content = ''
+  ): Promise<{ note: PersonalNote }> {
+    const response = await this.client.post(`/api/campaigns/${campaignId}/notes`, { title, content });
+    return response.data;
+  }
+
+  async updateNote(
+    campaignId: string,
+    noteId: string,
+    patch: { title?: string; content?: string }
+  ): Promise<{ note: PersonalNote }> {
+    const response = await this.client.put(`/api/campaigns/${campaignId}/notes/${noteId}`, patch);
+    return response.data;
+  }
+
+  async deleteNote(campaignId: string, noteId: string): Promise<{ message: string }> {
+    const response = await this.client.delete(`/api/campaigns/${campaignId}/notes/${noteId}`);
+    return response.data;
+  }
+
+  /** Past sessions and the notes recorded when each ended. Newest first. */
+  async listSessions(campaignId: string): Promise<{ sessions: SessionSummary[] }> {
+    const response = await this.client.get(`/api/campaigns/${campaignId}/sessions`);
+    return response.data;
+  }
+
+  /** Rewrite a past session's recap. An empty string clears it. DM only. */
+  async updateSessionNotes(
+    campaignId: string,
+    sessionId: string,
+    notes: string
+  ): Promise<{ session: SessionSummary }> {
+    const response = await this.client.put(
+      `/api/campaigns/${campaignId}/sessions/${sessionId}/notes`,
+      { notes }
+    );
+    return response.data;
+  }
 
   async startSession(campaignId: string): Promise<{ message: string; session: Session }> {
     const response = await this.client.post(`/api/campaigns/${campaignId}/sessions`);
@@ -645,7 +864,7 @@ class ApiClient {
     return response.data;
   }
 
-  getAssetUrl(id: string, type: 'maps' | 'tokens' | 'audio' | 'avatars'): string {
+  getAssetUrl(id: string, type: import('@/utils/assetUrl').AssetDirectory): string {
     return `${API_BASE_URL}/api/assets/${type}/${id}`;
   }
 
@@ -681,16 +900,27 @@ class ApiClient {
     return `/api/campaigns/${campaignId}/maps/${mapId}/export-uvtt`;
   }
 
+  /**
+   * Import a Universal VTT file as a new map.
+   *
+   * Answers 409 with `UVTT_IMPORT_NEEDS_CONFIRMATION` when the file needs the
+   * DM's answer first, having created nothing: its walls reach outside its
+   * picture, or it carries walls for its furniture. Send the answer back in
+   * `options`. See MapManager, which is where it is asked.
+   */
   async importUVTT(
     campaignId: string,
     file: File,
     name?: string,
     gridSize?: number,
-  ): Promise<{ map: Map; wallCount: number; portalCount: number; totalSegments: number }> {
+    options?: { confirm?: boolean; includeObjectWalls?: boolean },
+  ): Promise<{ map: Map; wallCount: number; portalCount: number; totalSegments: number; lightCount: number }> {
     const formData = new FormData();
     formData.append('file', file);
     if (name) formData.append('name', name);
     if (gridSize) formData.append('gridSize', String(gridSize));
+    if (options?.confirm) formData.append('confirm', 'true');
+    if (options?.includeObjectWalls) formData.append('includeObjectWalls', 'true');
     const response = await this.client.post(
       `/api/campaigns/${campaignId}/maps/import-uvtt`,
       formData,
@@ -728,6 +958,78 @@ class ApiClient {
   // Creature Library
   // ============================================
 
+  // ── Character templates ──────────────────────────────────────────────────
+  // Server-wide starter sheets any user can publish and copy. Distinct from
+  // GET /api/characters/templates/:system/:name, which serves the hardcoded
+  // presets compiled into the backend.
+
+  /**
+   * One of the starter sheets compiled into the backend — the blank for a game
+   * system, or a named preset like the level 1 fighter.
+   *
+   * Here rather than fetched directly so it goes through the same base URL and
+   * credentials as everything else; two dialogs used to call `fetch` and so
+   * ignored `VITE_API_URL` entirely.
+   *
+   * @param gameSystem - A GameSystem value, or 'null' for the flexible sheet.
+   * @param templateName - 'blank', or a preset name such as 'fighter'.
+   */
+  async getStarterSheet(
+    gameSystem: string,
+    templateName: string
+  ): Promise<{ name: string; description: string; gameSystem: string | null; data: Record<string, unknown> }> {
+    const response = await this.client.get(
+      `/api/characters/templates/${gameSystem}/${templateName}`
+    );
+    return response.data;
+  }
+
+  async listCharacterTemplates(params?: {
+    search?: string;
+    /** A GameSystem value, or 'flexible' for the system-agnostic ones. */
+    gameSystem?: string;
+    mine?: boolean;
+    limit?: number;
+    offset?: number;
+  }): Promise<{ templates: CharacterTemplate[]; total: number; limit: number; offset: number }> {
+    const response = await this.client.get('/api/character-templates', { params });
+    return response.data;
+  }
+
+  async getCharacterTemplate(id: string): Promise<CharacterTemplate> {
+    const response = await this.client.get(`/api/character-templates/${id}`);
+    return response.data;
+  }
+
+  async createCharacterTemplate(data: {
+    name: string;
+    description?: string | null;
+    gameSystem?: string | null;
+    tokenImageUrl?: string | null;
+    data?: unknown;
+  }): Promise<CharacterTemplate> {
+    const response = await this.client.post('/api/character-templates', data);
+    return response.data;
+  }
+
+  async updateCharacterTemplate(
+    id: string,
+    data: {
+      name?: string;
+      description?: string | null;
+      tokenImageUrl?: string | null;
+      data?: unknown;
+    }
+  ): Promise<CharacterTemplate> {
+    const response = await this.client.put(`/api/character-templates/${id}`, data);
+    return response.data;
+  }
+
+  async deleteCharacterTemplate(id: string): Promise<{ message: string }> {
+    const response = await this.client.delete(`/api/character-templates/${id}`);
+    return response.data;
+  }
+
   async listCreatures(
     campaignId: string,
     params?: { search?: string; source?: string; cr?: string; gameSystem?: string; limit?: number; offset?: number }
@@ -761,7 +1063,7 @@ class ApiClient {
     return response.data;
   }
 
-  async seedSrdCreatures(campaignId: string): Promise<{ message: string; fetched: number; created: number; skipped: number; alreadyExisted: number; updatedHp: number }> {
+  async seedSrdCreatures(campaignId: string): Promise<{ message: string; fetched: number; created: number; updated: number; skipped: number; alreadyExisted: number }> {
     const response = await this.client.post(`/api/campaigns/${campaignId}/creatures/seed`);
     return response.data;
   }
@@ -854,8 +1156,40 @@ class ApiClient {
   // Messages
   // ============================================
 
-  async getMessages(campaignId: string, params?: { limit?: number; before?: string }): Promise<{ messages: Message[] }> {
-    const response = await this.client.get<{ messages: Message[] }>(`/api/campaigns/${campaignId}/messages`, { params });
+  async getMessages(
+    campaignId: string,
+    params?: { limit?: number; cursor?: string }
+  ): Promise<MessageHistoryPage> {
+    const response = await this.client.get<MessageHistoryPage>(
+      `/api/campaigns/${campaignId}/messages`,
+      { params }
+    );
+    return response.data;
+  }
+
+  /**
+   * Remove the legacy "X has joined / has left" system messages from a
+   * campaign's chat. DM only. These are no longer written; this clears what
+   * earlier versions left behind.
+   */
+  async clearJoinLeaveMessages(campaignId: string): Promise<{ message: string; deleted: number }> {
+    const response = await this.client.delete(`/api/campaigns/${campaignId}/messages/join-leave`);
+    return response.data;
+  }
+
+  /**
+   * Roll history for a campaign, newest first. The server decides what the
+   * caller may see — a player never receives someone else's secret rolls — so
+   * the response can be rendered as-is.
+   */
+  async getDiceRolls(
+    campaignId: string,
+    params?: { limit?: number; offset?: number }
+  ): Promise<{ rolls: DiceRolledEvent[] }> {
+    const response = await this.client.get<{ rolls: DiceRolledEvent[] }>(
+      `/api/campaigns/${campaignId}/dice-rolls`,
+      { params }
+    );
     return response.data;
   }
 }

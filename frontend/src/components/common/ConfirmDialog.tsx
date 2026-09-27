@@ -23,6 +23,11 @@ interface ConfirmDialogProps {
   variant?: ConfirmVariant;
   /** Show spinner and disable buttons while action is in progress */
   isLoading?: boolean;
+  /**
+   * Anything the decision needs beyond the message, such as an option the
+   * confirm should carry. Sits under the message, inside the dialog body.
+   */
+  children?: React.ReactNode;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -43,7 +48,7 @@ const VARIANT_CONFIG: Record<ConfirmVariant, {
     confirmClass: 'bg-warm-amber hover:bg-sunset-orange focus:ring-warm-amber text-white',
   },
   info: {
-    icon: <HelpCircle className="w-6 h-6 text-brand" aria-hidden="true" />,
+    icon: <HelpCircle className="w-6 h-6 text-brand-ink" aria-hidden="true" />,
     iconBg: 'bg-brand/10',
     confirmClass: 'bg-brand hover:bg-brand-dark focus:ring-brand text-white',
   },
@@ -57,6 +62,7 @@ export default function ConfirmDialog({
   cancelLabel = 'Cancel',
   variant = 'danger',
   isLoading = false,
+  children,
   onConfirm,
   onCancel,
 }: ConfirmDialogProps) {
@@ -106,7 +112,10 @@ export default function ConfirmDialog({
         <div className={`p-2.5 rounded-full ${iconBg} flex-shrink-0`} aria-hidden="true">
           {icon}
         </div>
-        <p className="text-sm text-ink-secondary pt-2">{message}</p>
+        <div className="pt-2 space-y-3">
+          <p className="text-sm text-ink-secondary">{message}</p>
+          {children}
+        </div>
       </div>
     </Modal>
   );

@@ -5,7 +5,7 @@
  * auto-calculation, validation, color customization, and token upload.
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Target,
   Swords,
@@ -24,6 +24,7 @@ import { ProficiencyRank, calculateProficiencyBonus } from './components/Profici
 import { api } from '../../../services/api';
 
 interface Pathfinder2eCharacterEditorProps {
+  onDirtyChange?: (dirty: boolean) => void;
   character: any;
   onSave: (data: any, showToast?: boolean, tokenImageUrl?: string) => Promise<void>;
   onCancel: () => void;
@@ -85,6 +86,7 @@ export const Pathfinder2eCharacterEditor: React.FC<Pathfinder2eCharacterEditorPr
   character,
   onSave,
   onCancel,
+  onDirtyChange,
 }) => {
   const [activeTab, setActiveTab] = useState<TabId>('stats');
   const [isSaving, setIsSaving] = useState(false);
@@ -173,6 +175,25 @@ export const Pathfinder2eCharacterEditor: React.FC<Pathfinder2eCharacterEditorPr
     notes: data.notes || '',
     treasure: data.treasure || '',
   }));
+
+  const dirtyRef = useRef(false);
+  const hasInteractedRef = useRef(false);
+  const cleanSnapshotRef = useRef<string | null>(null);
+  if (cleanSnapshotRef.current === null) cleanSnapshotRef.current = JSON.stringify(formData);
+  const latestFormDataRef = useRef(formData);
+  latestFormDataRef.current = formData;
+  useEffect(() => {
+    if (!hasInteractedRef.current) {
+      cleanSnapshotRef.current = JSON.stringify(formData);
+      return;
+    }
+    const dirty = JSON.stringify(formData) !== cleanSnapshotRef.current;
+    if (dirty !== dirtyRef.current) {
+      dirtyRef.current = dirty;
+      onDirtyChange?.(dirty);
+    }
+  }, [formData, onDirtyChange]);
+  const noteInteraction = () => { hasInteractedRef.current = true; };
 
   const [tokenImageFile, setTokenImageFile] = useState<File | null>(null);
   const [tokenImagePreview, setTokenImagePreview] = useState<string | null>(character.tokenImageUrl);
@@ -505,6 +526,7 @@ export const Pathfinder2eCharacterEditor: React.FC<Pathfinder2eCharacterEditorPr
 
   const handleSubmit = async () => {
     if (!validateForm()) return;
+    const savedSnapshot = JSON.stringify(formData);
     setIsSaving(true);
     try {
       const updatedData = { ...formData, themeColor: isCustomColor ? customColorHex : selectedColor.name };
@@ -539,6 +561,10 @@ export const Pathfinder2eCharacterEditor: React.FC<Pathfinder2eCharacterEditorPr
 
       // Pass the tokenImageUrl as a separate parameter if it was uploaded
       await onSave(updatedData, true, newTokenImageUrl);
+      cleanSnapshotRef.current = savedSnapshot;
+      const stillDirty = JSON.stringify(latestFormDataRef.current) !== savedSnapshot;
+      dirtyRef.current = stillDirty;
+      onDirtyChange?.(stillDirty);
     } catch (error) {
       console.error('Error saving character:', error);
       setErrors({ ...errors, submit: 'Failed to save character. Please try again.' });
@@ -1466,7 +1492,12 @@ export const Pathfinder2eCharacterEditor: React.FC<Pathfinder2eCharacterEditorPr
   );
 
   return (
-    <div className="bg-white border-2 border-stone-200 rounded-lg overflow-hidden shadow-lg">
+    <div
+      className="bg-white border-2 border-stone-200 rounded-lg overflow-hidden shadow-lg"
+      onInputCapture={noteInteraction}
+      onChangeCapture={noteInteraction}
+      onPointerDownCapture={noteInteraction}
+    >
       {renderHeader()}
       {renderTabs()}
       <div className="p-6">

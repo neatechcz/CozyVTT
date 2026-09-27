@@ -8,7 +8,18 @@
 
 import type { FogState, FogOperation } from '../types/walls';
 
-// Token interface
+/**
+ * A token as stored in the `Map.tokens` JSON column.
+ *
+ * This is the single declaration of that shape for the backend — `routes/maps.ts`
+ * imports it rather than keeping its own. It used to keep its own, and the two
+ * drifted: this copy was missing `type`, `disposition`, `hp` and `initiative`,
+ * all of which the REST routes write and the websocket handlers read. Nothing
+ * caught it because every reader reached the column through `as any[]`.
+ *
+ * The fields the REST routes only set conditionally are optional here, because
+ * tokens placed by older versions of the app genuinely do not carry them.
+ */
 export interface Token {
   id: string;
   characterId?: string | null;
@@ -21,9 +32,16 @@ export interface Token {
   controlledBy?: string | null;
   rotation: number;
   conditions: string[];
-  metadata: Record<string, any>;
+  metadata: Record<string, unknown>;
+  type?: 'player' | 'npc' | 'object';
+  disposition?: 'friendly' | 'neutral' | 'hostile' | null;
+  hp?: { current: number; max: number; temp: number } | null;
+  showHpBar?: boolean;
+  notes?: string;
+  initiative?: number | null;
+  sightRadius?: number;
   displayMode?: 'pog' | 'top-down' | 'full-art';
-  statBlock?: Record<string, any> | null;
+  statBlock?: Record<string, unknown> | null;
   creatureTemplateId?: string | null;
 }
 
@@ -89,6 +107,10 @@ export const fogOperationLimiter = new RateLimiter(); // Max 10 fog ops/second p
 // silently rather than surfaced as an error toast (same policy as fog).
 export const tokenMoveLimiter = new RateLimiter(); // Max 150 token-move events/second per socket
 export const mapEditLimiter = new RateLimiter();   // Max 40 wall/light edits/second per socket
+// Map pings are a deliberate human gesture, so the ceiling is low compared to
+// the drag/edit streams above. Over-limit pings are dropped silently — an error
+// toast for pressing the ping key too often is worse than nothing happening.
+export const pingLimiter = new RateLimiter();      // Max 10 pings/10s per socket
 
 // Cleanup old events every 5 minutes. unref() so this housekeeping timer
 // never holds the process open on its own (matters for test runners and
@@ -99,6 +121,7 @@ setInterval(() => {
   fogOperationLimiter.cleanup(5 * 1000); // Fog ops: 5 second window
   tokenMoveLimiter.cleanup(1000); // Token moves: 1 second window
   mapEditLimiter.cleanup(1000); // Map edits: 1 second window
+  pingLimiter.cleanup(10 * 1000); // Map pings: 10 second window
 }, 5 * 60 * 1000).unref();
 
 // ── Fog/Wall Helpers ─────────────────────────────────────────────────────────

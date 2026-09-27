@@ -5,8 +5,9 @@
 // ============================================
 
 import { useNavigate } from 'react-router-dom';
+import { campaignDmName, campaignOwnerName, ownerDiffersFromDm } from '@/utils/campaignRoles';
 import type { Campaign, CampaignRole, CampaignStatus } from '@/types';
-import { Users, Calendar, Crown, Eye, Gamepad2 } from 'lucide-react';
+import { Users, Calendar, Crown, Eye, Gamepad2, KeyRound} from 'lucide-react';
 import GameSystemBadge from './common/GameSystemBadge';
 
 interface CampaignCardProps {
@@ -26,7 +27,7 @@ export default function CampaignCard({ campaign, userRole }: CampaignCardProps) 
       },
       ACTIVE: {
         label: 'Active',
-        class: 'bg-moss-green/20 text-moss-green border-moss-green/30',
+        class: 'bg-moss-green/20 text-brand-ink border-moss-green/30',
       },
       PAUSED: {
         label: 'Paused',
@@ -55,7 +56,7 @@ export default function CampaignCard({ campaign, userRole }: CampaignCardProps) 
       DM: {
         label: 'DM',
         icon: Crown,
-        class: 'bg-moss-green/20 text-moss-green border-moss-green/40',
+        class: 'bg-moss-green/20 text-brand-ink border-moss-green/40',
       },
       PLAYER: {
         label: 'Player',
@@ -96,8 +97,12 @@ export default function CampaignCard({ campaign, userRole }: CampaignCardProps) 
   // Get member count
   const memberCount = campaign.memberships?.length || 0;
 
-  // Get owner display name
-  const ownerName = campaign.memberships?.find(m => m.userId === campaign.ownerId)?.user?.displayName || 'Unknown';
+  // Who runs it, and who owns it — the same person until somebody hands the
+  // game over, and different facts regardless. This card used to look up the
+  // owner and print them under a "DM:" label.
+  const dmName = campaignDmName(campaign);
+  const showOwner = ownerDiffersFromDm(campaign);
+  const ownerName = campaignOwnerName(campaign);
 
   return (
     <button
@@ -119,7 +124,7 @@ export default function CampaignCard({ campaign, userRole }: CampaignCardProps) 
       </div>
 
       {/* Campaign Name */}
-      <h3 className="text-xl font-semibold text-moss-green mb-2 pr-20
+      <h3 className="text-xl font-semibold text-brand-ink mb-2 pr-20
                      group-hover:text-spirit-purple transition-colors">
         {campaign.name}
       </h3>
@@ -143,10 +148,20 @@ export default function CampaignCard({ campaign, userRole }: CampaignCardProps) 
       <div className="space-y-2 text-sm">
         {/* DM Name */}
         <div className="flex items-center gap-2 text-stone-gray">
-          <Crown className="w-4 h-4 text-moss-green" />
+          <Crown className="w-4 h-4 text-brand-ink" />
           <span className="text-warm-gray">DM:</span>
-          <span className="text-stone-gray font-medium">{ownerName}</span>
+          <span className="text-stone-gray font-medium">{dmName}</span>
         </div>
+
+        {/* Only worth saying once the two have come apart — while the creator
+            still runs the game, naming them twice is noise. */}
+        {showOwner && (
+          <div className="flex items-center gap-2 text-stone-gray">
+            <KeyRound className="w-4 h-4 text-warm-amber" />
+            <span className="text-warm-gray">Owner:</span>
+            <span className="text-stone-gray font-medium">{ownerName}</span>
+          </div>
+        )}
 
         {/* Member Count */}
         <div className="flex items-center gap-2 text-stone-gray">

@@ -2,6 +2,11 @@ import { withAdvantage, withDisadvantage } from './characterRolls';
 
 export type RollMode = 'normal' | 'advantage' | 'disadvantage';
 
+/** The survival ledger is authoritative; older or upstream sheets may only have the top-level field. */
+export function trackedExhaustionLevel(data: { survival?: { exhaustionLevel?: number }; exhaustionLevel?: number }): number | undefined {
+  return data.survival?.exhaustionLevel ?? data.exhaustionLevel;
+}
+
 const EFFECTS = [
   'Disadvantage on ability checks',
   'Speed halved',

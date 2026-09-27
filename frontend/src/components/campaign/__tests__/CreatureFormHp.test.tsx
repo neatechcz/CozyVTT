@@ -92,6 +92,23 @@ describe('CreatureForm hit points', () => {
     fireEvent.click(screen.getByText('Save Changes'));
     await waitFor(() => expect(mocks.updateCreature).toHaveBeenCalled());
     expect(savedStatBlock(mocks.updateCreature).hp).toEqual({ average: 12, formula: '3d6+2' });
+    expect(savedStatBlock(mocks.updateCreature)).toMatchObject({ hpMax: 12, hitDice: '3d6+2' });
+  });
+
+  it('reads an upstream-only hpMax and hitDice pair and retains printed skill bonuses', async () => {
+    renderForm(creature({ ...baseStatBlock, hpMax: 7, hitDice: '2d6', skills: { stealth: 6 } }));
+    expect(screen.getByLabelText('Hit points average')).toHaveValue('7');
+    expect(screen.getByLabelText('Hit dice formula')).toHaveValue('2d6');
+    expect(screen.getByText('Saving Throws & Skills')).toBeInTheDocument();
+
+    fireEvent.click(screen.getByText('Save Changes'));
+    await waitFor(() => expect(mocks.updateCreature).toHaveBeenCalled());
+    expect(savedStatBlock(mocks.updateCreature)).toMatchObject({
+      hp: { average: 7, formula: '2d6' },
+      hpMax: 7,
+      hitDice: '2d6',
+      skills: { stealth: 6 },
+    });
   });
 
   it('does not invent hp for a creature that had none', async () => {
@@ -213,7 +230,7 @@ describe('CreatureForm keeps the whole stat block', () => {
     fireEvent.click(screen.getByText('Save Changes'));
     await waitFor(() => expect(mocks.updateCreature).toHaveBeenCalled());
     const saved = savedStatBlock(mocks.updateCreature);
-    expect(saved).toEqual(srdStatBlock);
+    expect(saved).toEqual({ ...srdStatBlock, hpMax: 7, hitDice: '2d6' });
     expect(saved).toHaveProperty('legendaryDescription', 'The goblin can take 3 legendary actions.');
     expect(saved.abilities).toHaveProperty('hon', 11);
   });
@@ -225,7 +242,7 @@ describe('CreatureForm keeps the whole stat block', () => {
 
     fireEvent.click(screen.getByText('Save Changes'));
     await waitFor(() => expect(mocks.updateCreature).toHaveBeenCalled());
-    expect(savedStatBlock(mocks.updateCreature)).toEqual({ ...srdStatBlock, ac: 17, languages: 'Common' });
+    expect(savedStatBlock(mocks.updateCreature)).toEqual({ ...srdStatBlock, hpMax: 7, hitDice: '2d6', ac: 17, languages: 'Common' });
   });
 
   it('removes a form field the user cleared but keeps the rest', async () => {

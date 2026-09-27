@@ -1,60 +1,11 @@
 import { z } from 'zod';
+import { NpcStatBlockSchema } from './statBlock';
+import { TokenSizeSchema, TokenHpSchema } from './tokens';
 
 // ── Shared sub-schemas ──────────────────────────────────────────────────────
 
-const TokenSizeSchema = z.object({
-  width: z.number().int().min(1).max(10),
-  height: z.number().int().min(1).max(10),
-});
-
-const TokenHpSchema = z.object({
-  current: z.number().int().min(0).max(99999),
-  max: z.number().int().min(1).max(99999),
-  temp: z.number().int().min(0).max(99999),
-});
-
-const NameDescPairSchema = z.object({
-  name: z.string().max(200),
-  description: z.string().max(5000),
-});
-
-const NpcStatBlockHpSchema = z.object({
-  average: z.number().int().min(0).max(100000),
-  formula: z.string().max(100).optional(),
-});
-
-const NpcStatBlockSchema = z.object({
-  ac: z.number().int().min(0).max(99),
-  hp: NpcStatBlockHpSchema.optional(),
-  speed: z.string().max(200),
-  abilities: z.object({
-    str: z.number().int().min(0).max(30),
-    dex: z.number().int().min(0).max(30),
-    con: z.number().int().min(0).max(30),
-    int: z.number().int().min(0).max(30),
-    wis: z.number().int().min(0).max(30),
-    cha: z.number().int().min(0).max(30),
-  }),
-  savingThrows: z.record(z.string(), z.number()).optional(),
-  skills: z.record(z.string(), z.number()).optional(),
-  damageVulnerabilities: z.string().max(500).optional(),
-  damageResistances: z.string().max(500).optional(),
-  damageImmunities: z.string().max(500).optional(),
-  conditionImmunities: z.string().max(500).optional(),
-  senses: z.string().max(500).optional(),
-  languages: z.string().max(500).optional(),
-  challengeRating: z.string().max(10).optional(),
-  xp: z.number().int().min(0).optional(),
-  traits: z.array(NameDescPairSchema).max(50).optional(),
-  actions: z.array(NameDescPairSchema).max(50).optional(),
-  bonusActions: z.array(NameDescPairSchema).max(50).optional(),
-  reactions: z.array(NameDescPairSchema).max(50).optional(),
-  legendaryActions: z.array(NameDescPairSchema).max(50).optional(),
-  creatureType: z.string().max(200).optional(),
-  alignment: z.string().max(100).optional(),
-  gameSystem: z.string().max(50).optional(),
-  notes: z.string().max(5000).optional(),
-}).passthrough();
+// Shared with the map-token routes — see validators/tokens. They used to live
+// here alone, which is why a token placed on a map was never checked.
 
 // ── Create / Update schemas ─────────────────────────────────────────────────
 

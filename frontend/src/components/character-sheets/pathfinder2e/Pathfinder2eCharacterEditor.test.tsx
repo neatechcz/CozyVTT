@@ -3,6 +3,7 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 import { pathfinder2eCharacterDataSchema } from '../../../../../backend/src/validators/game-systems/pathfinder2e.schema';
 import minimalPathfinder from '../../../../../Examples/Pathfinder_2e_character_minimal.json';
 import { Pathfinder2eCharacterEditor } from './Pathfinder2eCharacterEditor';
+import { GameSystem } from '@/types';
 
 const mocks = vi.hoisted(() => ({
   uploadAsset: vi.fn(),
@@ -19,7 +20,7 @@ function makeCharacter(overrides: Record<string, unknown> = {}) {
     id: 'aria-id',
     userId: 'player-id',
     campaignId: null,
-    gameSystem: 'PATHFINDER_2E',
+    gameSystem: GameSystem.PATHFINDER_2E,
     name: minimalPathfinder.character.name,
     data: { ...minimalData, ...overrides },
     tokenImageUrl: null,
@@ -36,6 +37,18 @@ function expectValidPathfinderSave(savedData: unknown) {
 describe('Pathfinder2eCharacterEditor', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it('reports a real edit as dirty and clears the flag after saving', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const onDirtyChange = vi.fn();
+    render(<Pathfinder2eCharacterEditor character={makeCharacter()} onSave={onSave} onCancel={vi.fn()} onDirtyChange={onDirtyChange} />);
+    expect(onDirtyChange).not.toHaveBeenCalledWith(true);
+    fireEvent.change(screen.getByPlaceholderText('Player Name'), { target: { value: 'Luna' } });
+    await waitFor(() => expect(onDirtyChange).toHaveBeenCalledWith(true));
+    fireEvent.click(screen.getByRole('button', { name: /save/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(false));
   });
 
   it('saves an imported minimal character unchanged without null spellcasting', async () => {

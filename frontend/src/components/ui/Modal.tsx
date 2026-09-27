@@ -33,6 +33,14 @@ export interface ModalProps {
   closeOnBackdrop?: boolean;
   /** z-index tier — 'overlay' sits above other modals (confirm-on-modal). */
   layer?: 'base' | 'overlay';
+  /**
+   * Pin the dialog to the viewport and let only the body scroll. Header and
+   * footer stay in view whatever the body holds. By default the whole dialog
+   * scrolls, which suits a long form; a reader with a footer of controls wants
+   * this instead, or the controls end up below the fold. The body's children
+   * should size themselves with flex-1 and min-h-0.
+   */
+  fitViewport?: boolean;
   children: React.ReactNode;
 }
 
@@ -54,6 +62,7 @@ export default function Modal({
   closeOnBackdrop = true,
   layer = 'base',
   children,
+  fitViewport = false,
 }: ModalProps) {
   const titleId = useId();
 
@@ -96,20 +105,20 @@ export default function Modal({
               className={cn(
                 'w-full p-6 relative rounded-cozy-lg border border-brand/20 shadow-2xl',
                 'bg-surface-light/95 backdrop-blur-cozy',
-                'max-h-[90vh] overflow-y-auto',
+                fitViewport ? 'h-[90vh] flex flex-col overflow-hidden' : 'max-h-[90vh] overflow-y-auto',
                 SIZE_CLASSES[size]
               )}
               onClick={(e) => e.stopPropagation()}
             >
               {/* Header */}
-              <div className="flex items-center justify-between mb-6">
+              <div className="flex items-center justify-between mb-6 flex-shrink-0">
                 <div className="flex items-center gap-3">
                   {Icon && (
                     <div className="p-2 rounded-lg bg-brand/10" aria-hidden="true">
-                      <Icon className="w-6 h-6 text-brand" />
+                      <Icon className="w-6 h-6 text-brand-ink" />
                     </div>
                   )}
-                  <h2 id={titleId} className="text-2xl font-semibold text-brand font-heading">
+                  <h2 id={titleId} className="text-2xl font-semibold text-brand-ink font-heading">
                     {title}
                   </h2>
                 </div>
@@ -128,10 +137,10 @@ export default function Modal({
               </div>
 
               {/* Body */}
-              {children}
+              {fitViewport ? <div className="flex-1 min-h-0 flex flex-col">{children}</div> : children}
 
               {/* Footer */}
-              {footer && <div className="flex gap-3 justify-end pt-4">{footer}</div>}
+              {footer && <div className="flex gap-3 justify-end pt-4 flex-shrink-0">{footer}</div>}
             </motion.div>
           </div>
         </>

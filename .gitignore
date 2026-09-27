@@ -12,6 +12,11 @@
 .env.production
 .env.*.local
 *.env.local
+# Any other suffix too (.env.test, .env.staging, .env.dev, …) — these hold real
+# credentials just as often as .env does. The committed templates are re-included
+# below.
+.env.*
+!.env.example
 
 # ---- Dependencies -----------------------------------------------------------
 node_modules/
@@ -37,6 +42,14 @@ desktop.ini
 
 # ---- Docker -----------------------------------------------------------------
 .docker/
+
+# Local-only Compose overrides: test stacks, machine-specific ports, container
+# renames. `docker-compose.override.yml` is picked up automatically by Compose,
+# so it is the usual home for local tweaks that must never ship.
+# The committed docker-compose.yml and docker-compose.dev.yml are NOT matched.
+docker-compose.override.yml
+docker-compose.*.local.yml
+*.local.yml
 
 # ---- Secrets / keys / certs — never commit private key material ------------
 # Broad, repo-wide patterns so a key or alternately-named env file dropped
@@ -84,3 +97,39 @@ backend/tests/
 
 # ---- Claude Code local settings ---------------------------------------------
 .claude/
+
+# ---- Scratch space -----------------------------------------------------------
+# Throwaway compose overrides, env files and fixtures used to stand a test
+# instance up against this checkout. Nothing here belongs in the repository.
+scratchpad/
+
+# ---- Playwright output -------------------------------------------------------
+# Page snapshots, console logs and screenshots written into the working
+# directory when a browser is driven against a local dev instance, plus the
+# report and trace directories the Playwright test runner produces.
+.playwright-mcp/
+test-results/
+playwright-report/
+
+# Ad-hoc screenshots and database dumps dropped at the repo root. Scoped to the
+# root with a leading slash so committed artwork under assets/ and
+# frontend/public/ is unaffected — no image or dump is tracked at the top level.
+/*.png
+/*.jpg
+/*.jpeg
+/*.gif
+/*.sql
+
+# ---- TypeScript incremental build cache --------------------------------------
+*.tsbuildinfo
+
+# ---- Game system rulebooks ---------------------------------------------------
+# Publisher PDFs and OCR text kept locally for rules reference while developing.
+# These are copyrighted material and must never be committed — CozyVTT ships
+# rules-reference scaffolding only (see the legal note in docs/GAME_SYSTEMS.md).
+system-docs/
+
+# Throwaway local stacks used to rehearse upgrades against a real backup.
+# These carry generated secrets and point at real data; never commit them.
+.env.live
+docker-compose.live.yml

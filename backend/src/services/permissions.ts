@@ -1,5 +1,6 @@
-import { CampaignRole, PlatformRole } from '@prisma/client';
+import { CampaignRole, PlatformRole, AssetType, AssetScope } from '@prisma/client';
 import { prisma } from '../config/database';
+import { readTokens } from '../utils/prisma-json';
 
 /**
  * Permission Verification Helpers
@@ -218,6 +219,51 @@ export async function canDeleteCampaign(
 }
 
 /**
+ * Check whether a user may hand the DM seat to another member.
+ *
+ * Three people can, and they are not the same person by necessity:
+ * - the sitting DM, handing off deliberately;
+ * - the campaign owner, who keeps this even while playing as a player, so a
+ *   campaign they own cannot be locked away from them by whoever holds the seat;
+ * - a platform admin, the escape hatch for a DM who left without handing over.
+ *
+ * Ownership and the DM role are separate facts and a transfer moves only the
+ * role, so the owner check reads `ownerId` and the DM check reads the
+ * membership. Deliberately not the `campaignDM` middleware: that loads the
+ * caller's membership first and refuses a non-member outright, which would shut
+ * out an admin who is not at the table.
+ */
+export async function canTransferDM(
+  userId: string,
+  campaignId: string,
+  platformRole: PlatformRole
+): Promise<boolean> {
+  if (isAdmin(platformRole)) {
+    return true;
+  }
+
+  const campaign = await prisma.campaign.findUnique({
+    where: { id: campaignId },
+    select: { ownerId: true },
+  });
+
+  if (!campaign) {
+    return false;
+  }
+
+  if (campaign.ownerId === userId) {
+    return true;
+  }
+
+  const membership = await prisma.campaignMembership.findUnique({
+    where: { userId_campaignId: { userId, campaignId } },
+    select: { role: true },
+  });
+
+  return membership?.role === 'DM';
+}
+
+/**
  * Check if user can send chat messages
  * DM and Players can chat, Spectators cannot
  */
@@ -265,4 +311,265 @@ export async function canExportCampaign(
   }
 
   return campaign.ownerId === userId;
+}
+
+/**
+ * Whether a user may place a new asset at a scope.
+ *
+ * The single rule for anything that creates an asset row, whether by uploading
+ * a file or by typing a document. It used to live inline in the upload route,
+ * and the document-creation route would have needed a copy.
+ *
+ * - USER: anyone signed in, into their own library.
+ * - GLOBAL: an admin, or a user granted globalAssetManager.
+ * - CAMPAIGN: the campaign's DM. Tokens are the one exception, because a player
+ *   uploads their own character's token art.
+ *
+ * Returns the refusal's status and message so a caller can answer exactly as
+ * the upload route always has.
+ */
+/**
+ * The answer also carries the campaign the asset may be filed under, because
+ * `campaignId` is what decides which campaign lists an asset and a caller's own
+ * value cannot be trusted for that. Only a CAMPAIGN-scoped asset has one.
+ */
+export type ScopeDecision =
+  | { allowed: true; campaignId: string | null }
+  | { allowed: false; status: 400 | 403; message: string };
+
+export async function canPlaceAssetAtScope(
+  userId: string,
+  type: AssetType,
+  scope: AssetScope,
+  campaignId: string | undefined
+): Promise<ScopeDecision> {
+  if (scope === 'USER') {
+    return { allowed: true, campaignId: null };
+  }
+
+  if (scope === 'GLOBAL') {
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { platformRole: true, globalAssetManager: true },
+    });
+    if (user?.platformRole !== 'ADMIN' && !user?.globalAssetManager) {
+      return {
+        allowed: false,
+        status: 403,
+        message: 'Only administrators or global asset managers can upload GLOBAL assets',
+      };
+    }
+    return { allowed: true, campaignId: null };
+  }
+
+  // CAMPAIGN
+  if (!campaignId) {
+    return { allowed: false, status: 400, message: 'Campaign ID is required for CAMPAIGN scope' };
+  }
+  const membership = await prisma.campaignMembership.findUnique({
+    where: { userId_campaignId: { userId, campaignId } },
+  });
+  if (!membership) {
+    return { allowed: false, status: 403, message: 'You do not have access to this campaign' };
+  }
+  if (membership.role !== 'DM' && type !== 'TOKEN') {
+    return {
+      allowed: false,
+      status: 403,
+      message: 'Only the Dungeon Master can upload campaign assets',
+    };
+  }
+  return { allowed: true, campaignId };
+}
+
+/**
+ * Check whether something in a campaign this user belongs to uses an asset.
+ *
+ * Access to an image follows its **use**, not only its upload. A DM may pick a
+ * map out of their own asset library — the picker lists personal assets with no
+ * campaign filter — and that map then *is* the campaign's battlemap. Until this
+ * existed, every player got 403 on it and saw "Failed to load map image", and
+ * token art fell back to plain initial circles for the same reason. The
+ * campaign's atmosphere track is the same story in sound: the DM picks it, each
+ * player's browser fetches it, and a personal track was silent for everyone
+ * but the DM.
+ *
+ * Deliberately not solved by re-scoping the asset to the campaign on use:
+ * `Asset.scope` carries a single campaignId, and one map is commonly shared by
+ * several campaigns at once, so promoting it would break the others.
+ *
+ * This grants READ only. Who may edit or delete an asset is decided elsewhere
+ * and is unchanged — being able to see the battlemap must not mean being able
+ * to delete it.
+ *
+ * The asset id is matched as a substring of the stored URL, which is the shape
+ * everything writes (`/api/assets/maps/<id>`). Ids are UUIDs, so a partial
+ * collision is not a practical concern.
+ */
+export async function assetUsedInUserCampaign(
+  assetId: string,
+  userId: string,
+  uploaderId: string | null
+): Promise<boolean> {
+  // The owner has to be in the room too.
+  //
+  // Without this, "used in a campaign you belong to" meant "named by any row
+  // you can write" — and nothing stops someone creating a campaign of their own
+  // and a map whose imageUrl is a stranger's asset id, which the map route
+  // formats but never checks. Referencing an asset therefore granted the right
+  // to read it. Requiring the uploader's membership expresses what the rule was
+  // always meant to say: you see an asset because somebody who has it brought
+  // it somewhere you both are.
+  //
+  // A null uploader (their account was deleted) grants nothing, deliberately —
+  // there is no longer anyone whose access is being shared.
+  if (!uploaderId) return false;
+
+  const [viewerIn, uploaderIn] = await Promise.all([
+    prisma.campaignMembership.findMany({ where: { userId }, select: { campaignId: true } }),
+    prisma.campaignMembership.findMany({ where: { userId: uploaderId }, select: { campaignId: true } }),
+  ]);
+
+  const uploaderCampaigns = new Set(uploaderIn.map((m) => m.campaignId));
+  const campaignIds = viewerIn
+    .map((m) => m.campaignId)
+    .filter((id) => uploaderCampaigns.has(id));
+
+  if (campaignIds.length === 0) return false;
+
+  // A map's own layers first: that is the common case, and it answers without
+  // reading any JSON.
+  const mapLayer = await prisma.map.findFirst({
+    where: {
+      campaignId: { in: campaignIds },
+      OR: [
+        { imageUrl: { contains: assetId } },
+        { baseLayerUrl: { contains: assetId } },
+        { spiritLayerUrl: { contains: assetId } },
+      ],
+    },
+    select: { id: true },
+  });
+  if (mapLayer) return true;
+
+  const [character, creature, tokenTemplate] = await Promise.all([
+    prisma.character.findFirst({
+      where: { campaignId: { in: campaignIds }, tokenImageUrl: { contains: assetId } },
+      select: { id: true },
+    }),
+    prisma.creatureTemplate.findFirst({
+      where: { campaignId: { in: campaignIds }, imageUrl: { contains: assetId } },
+      select: { id: true },
+    }),
+    prisma.tokenTemplate.findFirst({
+      where: { campaignId: { in: campaignIds }, imageUrl: { contains: assetId } },
+      select: { id: true },
+    }),
+  ]);
+  if (character || creature || tokenTemplate) return true;
+
+  // The track a campaign is playing. The DM sets it and every player's browser
+  // fetches it, so it is used by the whole table for as long as it is set.
+  // Stored inside the campaign's vibeSettings JSON.
+  const ambience = await prisma.campaign.findFirst({
+    where: {
+      id: { in: campaignIds },
+      vibeSettings: { path: ['atmosphereAudio', 'assetId'], equals: assetId },
+    },
+    select: { id: true },
+  });
+  if (ambience) return true;
+
+  // Tokens live as JSON on the map, so they cannot be matched by column. Only
+  // the art URL is read, and only once everything cheaper has missed.
+  const maps = await prisma.map.findMany({
+    where: { campaignId: { in: campaignIds } },
+    select: { tokens: true },
+  });
+  return maps.some((map) =>
+    readTokens(map.tokens).some((token) => token?.imageUrl?.includes(assetId))
+  );
+}
+
+/** The asset fields the read decision depends on. */
+export interface AssetAccessFacts {
+  id: string;
+  scope: string;
+  uploadedById: string | null;
+  campaignId: string | null;
+}
+
+/**
+ * Whether a user may read an asset's bytes.
+ *
+ * The single rule, used both by the route that serves an asset and by every
+ * route that lets a user *point* at one. Those two were separate before, which
+ * is how referencing a stranger's asset came to grant the right to read it:
+ * only the serving side asked the question, and by then the reference already
+ * existed and answered it in the affirmative.
+ */
+export async function canReadAsset(
+  asset: AssetAccessFacts,
+  userId: string,
+  isAdmin: boolean
+): Promise<boolean> {
+  if (isAdmin) return true;
+
+  if (asset.scope === 'USER') {
+    if (asset.uploadedById === userId) return true;
+    if (await assetUsedInUserCampaign(asset.id, userId, asset.uploadedById)) return true;
+    return documentSharedWithUser(asset.id, userId);
+  }
+
+  if (asset.scope === 'CAMPAIGN' && asset.campaignId) {
+    const membership = await prisma.campaignMembership.findUnique({
+      where: { userId_campaignId: { userId, campaignId: asset.campaignId } },
+    });
+    if (membership) return true;
+    // Scoped to one campaign, but a map in another may point at it.
+    if (await assetUsedInUserCampaign(asset.id, userId, asset.uploadedById)) return true;
+    return documentSharedWithUser(asset.id, userId);
+  }
+
+  // GLOBAL, or a campaign asset with no campaign recorded.
+  return true;
+}
+
+/**
+ * Whether a document has been shared with a campaign this user belongs to.
+ *
+ * A document is private to its uploader until a DM links it to a campaign, and
+ * the link is the only thing that opens it to that campaign's members. Checked
+ * last, after the cheaper questions, and only for the scopes where privacy is
+ * in question at all.
+ */
+async function documentSharedWithUser(assetId: string, userId: string): Promise<boolean> {
+  const link = await prisma.campaignDocument.findFirst({
+    where: {
+      assetId,
+      campaign: { memberships: { some: { userId } } },
+    },
+    select: { id: true },
+  });
+  return link !== null;
+}
+
+/**
+ * The same decision, given only an id — for routes that are about to store a
+ * reference to an asset and must check the caller may use it first.
+ *
+ * An asset that does not exist answers false: a reference to nothing is not
+ * something to write into a map either.
+ */
+export async function canReadAssetById(
+  assetId: string,
+  userId: string,
+  isAdmin: boolean
+): Promise<boolean> {
+  const asset = await prisma.asset.findUnique({
+    where: { id: assetId },
+    select: { id: true, scope: true, uploadedById: true, campaignId: true },
+  });
+  if (!asset) return false;
+  return canReadAsset(asset, userId, isAdmin);
 }

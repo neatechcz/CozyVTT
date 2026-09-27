@@ -1,3 +1,5 @@
+import { collectSheetFeatures } from '@/utils/featureEntries';
+import { trackedExhaustionLevel } from '@/utils/dnd5eSurvival';
 /**
  * D&D 5e editor form shape.
  *
@@ -47,6 +49,7 @@ export const categorizeProficiencies = (all: string[]) => {
  * object exists only when the sheet has one (or the user edits a category).
  */
 export const buildDnd5eFormData = (data: any): any => {
+  const exhaustionLevel = trackedExhaustionLevel(data);
   const { proficiencies: sourceProficiencies, ...characterData } = data;
   const proficienciesAndLanguages = Array.isArray(data.proficienciesAndLanguages)
     ? data.proficienciesAndLanguages
@@ -61,6 +64,10 @@ export const buildDnd5eFormData = (data: any): any => {
 
   return {
     ...characterData,
+    ...(exhaustionLevel === undefined ? {} : {
+      exhaustionLevel,
+      survival: { ...data.survival, exhaustionLevel },
+    }),
     // Ensure nested objects exist
     stats: data.stats || {},
     savingThrows: data.savingThrows || {},
@@ -75,7 +82,7 @@ export const buildDnd5eFormData = (data: any): any => {
     conditions: data.conditions || [],
     proficienciesAndLanguages,
     ...structuredProficiencies,
-    featuresAndTraits: data.featuresAndTraits || [],
+    featuresAndTraits: collectSheetFeatures(data),
     appearance: data.appearance || {},
     personality: data.personality || {},
     alliesAndOrganizations: data.alliesAndOrganizations || { name: '', description: '' },
@@ -107,6 +114,10 @@ export const saveFormInputsOf = (path: string): string[] => {
 export const prepareDnd5eFormForSave = (form: any, defaultThemeColor: string): any => {
   const updatedData = { ...form };
 
+  if (form.survival?.exhaustionLevel !== undefined) {
+    updatedData.exhaustionLevel = form.survival.exhaustionLevel;
+  }
+
   if (updatedData.themeColor === undefined) {
     updatedData.themeColor = defaultThemeColor;
   }
@@ -137,7 +148,8 @@ export const prepareDnd5eFormForSave = (form: any, defaultThemeColor: string): a
   }
 
   // Features & Traits
-  updatedData.featuresAndTraits = parseCommaSeparated(updatedData.featuresAndTraits);
+  updatedData.featuresAndTraits = collectSheetFeatures(updatedData);
+  delete updatedData.features;
 
   // Cantrips
   if (updatedData.spellcasting) {

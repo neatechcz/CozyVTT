@@ -11,6 +11,7 @@ import { broadcastTokenEvent, sendSystemMessage } from '../utils';
 import logger from '../../utils/logger';
 import { bumpMapVersion } from '../mapVersion';
 import { Token } from '../shared';
+import { toJson } from '../../utils/prisma-json';
 
 export function registerSpiritHandlers(io: Server, socket: AuthenticatedSocket): void {
   /**
@@ -74,8 +75,8 @@ export function registerSpiritHandlers(io: Server, socket: AuthenticatedSocket):
             const filteredMap = filterMapData(
               {
                 ...currentMap,
-                tokens: currentMap.tokens as any,
-                annotations: currentMap.annotations as any,
+                tokens: currentMap.tokens,
+                annotations: currentMap.annotations,
               },
               viewer.role,
               spiritVisible,
@@ -169,7 +170,7 @@ export function registerSpiritHandlers(io: Server, socket: AuthenticatedSocket):
 
       await prisma.map.update({
         where: { id: mapId },
-        data: { tokens: updatedTokens as any },
+        data: { tokens: toJson(updatedTokens) },
       });
 
       // The full token (DM notes included) goes to DMs only.

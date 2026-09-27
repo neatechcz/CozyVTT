@@ -20,6 +20,7 @@ import {
 import logger from '../../utils/logger';
 import { Token, tokenMoveLimiter } from '../shared';
 import { bumpMapVersion, getMapVersion } from '../mapVersion';
+import { toJson } from '../../utils/prisma-json';
 
 /** A socket in the campaign room with the inputs of its token view. */
 interface RoomViewer {
@@ -294,6 +295,15 @@ export function registerTokenHandlers(io: Server, socket: AuthenticatedSocket): 
 
       // The frame's position decides who sees it (line of sight on lighting maps).
       const storedTokens = (Array.isArray(ctx.map.tokens) ? ctx.map.tokens : []) as unknown as Token[];
+      const token = storedTokens.find((candidate) => candidate.id === tokenId);
+      if (!token || socket.role === 'SPECTATOR' ||
+          (socket.role !== 'DM' && token.controlledBy !== socket.userId)) {
+        return;
+      }
+      if (token.layer === 'spirit' && socket.role !== 'DM' &&
+          !(await getSpiritVisibility(socket.campaignId, socket.userId!))) {
+        return;
+      }
       const frameTokens = storedTokens.map((t) => (t.id === tokenId ? { ...t, position: { x, y } } : t));
       await emitToTokenViewers(
         io,
@@ -404,6 +414,14 @@ export function registerTokenHandlers(io: Server, socket: AuthenticatedSocket): 
         return;
       }
 
+      // Spectators cannot move tokens. controlledBy is set once and is not
+      // cleared when someone is demoted, so the check above can still pass for
+      // a spectator holding a token from before.
+      if (socket.role === 'SPECTATOR') {
+        socket.emit('error', { message: 'Spectators cannot move tokens' });
+        return;
+      }
+
       // Spirit layer check: non-DMs cannot interact with spirit tokens when spirit layer is disabled
       if (token.layer === 'spirit' && socket.role !== 'DM') {
         const spiritVisible = await getSpiritVisibility(socket.campaignId, socket.userId!);
@@ -422,7 +440,7 @@ export function registerTokenHandlers(io: Server, socket: AuthenticatedSocket): 
 
       await prisma.map.update({
         where: { id: mapId },
-        data: { tokens: updatedTokens as any },
+        data: { tokens: toJson(updatedTokens) },
       });
       bumpMapVersion(mapId); // other sockets' drag snapshots of this map are stale now
 

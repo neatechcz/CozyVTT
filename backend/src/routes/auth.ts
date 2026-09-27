@@ -7,6 +7,7 @@ import { registerUser, authenticateUser, sanitizeUser, hashPassword, verifyPassw
 import { rememberMeMaxAge } from '../config/session';
 import { validatePasswordStrength } from '../utils/validation';
 import { isSmtpConfigured, sendPasswordResetEmail } from '../services/email';
+import { destroyUserLoginSessions } from '../services/sessionStore';
 import { requireAuth } from '../middleware/auth';
 import { prisma } from '../config/database';
 import { getSystemSettings, getAppearanceSettings } from '../services/systemSettings';
@@ -34,13 +35,61 @@ function hashBackupCode(code: string): string {
 const router = Router();
 
 /**
- * Rate limiting for authentication endpoints
- * 5 attempts per 15 minutes
+ * Rate limiting for endpoints that check a credential.
+ *
+ * `skipSuccessfulRequests` is the important part: only failures count towards
+ * the allowance. A brute-force guard exists to stop repeated *wrong* answers, so
+ * counting the right ones as well punishes the legitimate user — five correct
+ * logins in fifteen minutes locked the account out, which on a self-hosted
+ * instance behind a proxy meant an entire household sharing one budget of five.
+ *
+ * Exported for the tests, which mount it on a bare app: the auth e2e suite mocks
+ * express-rate-limit away entirely, so nothing else can exercise this.
  */
-const authLimiter = rateLimit({
+export const credentialLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5, // 5 requests per window
+  max: 5, // 5 failed attempts per window
   message: 'Too many authentication attempts, please try again later',
+  standardHeaders: true,
+  legacyHeaders: false,
+  skipSuccessfulRequests: true,
+});
+
+/**
+ * Rate limiting for endpoints whose *success* is the thing worth limiting.
+ *
+ * `/forgot-password` answers 200 whether or not the address exists — deliberately,
+ * so it cannot be used to discover who has an account — and sends an email on the
+ * way. Skipping successful requests there would leave the send path with no limit
+ * at all, turning it into a way to mail somebody repeatedly. So every request
+ * counts here, which is the behaviour every one of these endpoints had before.
+ */
+export const emailDispatchLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5, // 5 requests per window, successful or not
+  message: 'Too many authentication attempts, please try again later',
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+/**
+ * Rate limiting for creating accounts.
+ *
+ * Registration is not a credential check: there is no wrong answer to repeat,
+ * and the thing worth limiting is how many accounts one client can create. It
+ * shared the credential limiter for a while, which skips successful requests —
+ * so only *failed* registrations counted, and an instance with open
+ * registration could be filled with accounts by anyone who could reach it.
+ *
+ * More generous than the credential limiter because a household behind one
+ * address may legitimately sign several people up in a sitting, and nothing
+ * here is a lockout: it delays a stranger rather than shutting anyone out of an
+ * account they already have.
+ */
+export const accountCreationLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 10, // 10 accounts per hour per address, successful or not
+  message: 'Too many accounts created from this address, please try again later',
   standardHeaders: true,
   legacyHeaders: false,
 });
@@ -77,7 +126,7 @@ export const loginVolumeLimiter = rateLimit({
  * Register a new user account
  * First user automatically becomes ADMIN
  */
-router.post('/register', authLimiter, async (req: Request, res: Response) => {
+router.post('/register', accountCreationLimiter, async (req: Request, res: Response) => {
   try {
     const { email, password, displayName } = req.body;
 
@@ -214,6 +263,8 @@ router.post('/login', loginVolumeLimiter, loginLimiter, async (req: Request, res
     req.session.email = user.email;
     req.session.displayName = user.displayName;
     req.session.platformRole = user.platformRole;
+    // Gates every other API call until the password is replaced
+    req.session.mustChangePassword = user.mustChangePassword;
 
     // Extend session if "Remember Me" is checked
     if (rememberMe && req.session.cookie) {
@@ -303,7 +354,7 @@ router.get('/me', async (req: Request, res: Response) => {
  * Request a password reset email
  * Always returns 200 to prevent email enumeration
  */
-router.post('/forgot-password', authLimiter, async (req: Request, res: Response) => {
+router.post('/forgot-password', emailDispatchLimiter, async (req: Request, res: Response) => {
   try {
     const { email } = req.body;
 
@@ -361,7 +412,7 @@ router.post('/forgot-password', authLimiter, async (req: Request, res: Response)
  * POST /api/auth/reset-password
  * Reset password using a valid token
  */
-router.post('/reset-password', authLimiter, async (req: Request, res: Response) => {
+router.post('/reset-password', credentialLimiter, async (req: Request, res: Response) => {
   try {
     const { token, newPassword } = req.body;
 
@@ -476,6 +527,15 @@ router.post('/change-password', requireAuth, async (req: Request, res: Response)
         mustChangePassword: false,
       },
     });
+
+    // Lift the gate for this session immediately (see middleware/passwordChange.ts)
+    req.session.mustChangePassword = false;
+
+    // Changing a password is how someone recovers an account they think is
+    // compromised, so the sessions opened with the old one have to end. This
+    // one is kept, so the person doing it is not signed out of the device they
+    // are holding.
+    await destroyUserLoginSessions(user.id, req.sessionID);
 
     return res.status(200).json({
       message: 'Password changed successfully',
@@ -665,7 +725,7 @@ router.post('/mfa/verify', requireAuth, async (req: Request, res: Response) => {
  * Verify TOTP or backup code during login MFA flow.
  * Requires: mfaPending session state (set by /login when user has MFA enabled)
  */
-router.post('/mfa/verify-login', authLimiter, async (req: Request, res: Response) => {
+router.post('/mfa/verify-login', credentialLimiter, async (req: Request, res: Response) => {
   try {
     if (!req.session.mfaPending || !req.session.mfaPendingUserId) {
       return res.status(401).json({
@@ -747,7 +807,17 @@ router.post('/mfa/verify-login', authLimiter, async (req: Request, res: Response
       req.session.cookie.maxAge = rememberMeMaxAge;
     }
 
-    const response: any = {
+    // Typed rather than `any` because the backup-code fields below are added
+    // conditionally: with `any` a typo in one of those names would have compiled
+    // and silently dropped the warning a user needs to see.
+    const response: {
+      message: string;
+      user: ReturnType<typeof sanitizeUser>;
+      mustChangePassword: boolean;
+      backupCodeUsed?: boolean;
+      remainingBackupCodes?: number;
+      warning?: string;
+    } = {
       message: 'Login successful',
       user: sanitizeUser(user),
       mustChangePassword: user.mustChangePassword,
@@ -830,6 +900,11 @@ router.post('/mfa/disable', requireAuth, async (req: Request, res: Response) => 
         mfaBackupCodes: [],
       },
     });
+
+    // Turning the second factor off is a change to how the account is
+    // protected, so the sessions opened while it was on end with it. This one
+    // is kept, as with a password change.
+    await destroyUserLoginSessions(user.id, req.sessionID);
 
     return res.status(200).json({ message: 'MFA disabled successfully' });
   } catch (error) {

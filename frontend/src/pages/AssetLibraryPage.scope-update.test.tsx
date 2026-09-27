@@ -111,7 +111,7 @@ describe('AssetLibraryPage scope updates', () => {
 
     const cardRow = screen.getByRole('heading', { name: 'Alpha Audit Map' }).parentElement?.parentElement;
     expect(cardRow).not.toBeNull();
-    expect(within(cardRow as HTMLElement).getByText('CAMPAIGN')).toBeInTheDocument();
+    expect(within(cardRow as HTMLElement).getByText('Campaign')).toBeInTheDocument();
     expect(within(cardRow as HTMLElement).queryByText('Personal')).not.toBeInTheDocument();
   });
 });

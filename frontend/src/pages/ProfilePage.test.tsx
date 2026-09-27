@@ -45,6 +45,10 @@ vi.mock('@/services/api', () => ({
   },
 }));
 
+vi.mock('@/hooks/queries', () => ({
+  useServerConfigQuery: () => ({ data: undefined }),
+}));
+
 vi.mock('@/components/profile/MFASection', () => ({ default: () => null }));
 vi.mock('@/components/appearance/ThemePicker', () => ({
   default: () => null,

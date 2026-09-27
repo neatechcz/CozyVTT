@@ -21,12 +21,13 @@ import {
   Dices,
 } from 'lucide-react';
 import { Character } from '../../../types';
+import { hitDieExpression, hitDiceMaximum, spendRoll, canSpendHitDie } from '@/utils/hitDice';
 import { StatBlock } from './components/StatBlock';
 import { SkillsList } from './components/SkillsList';
 import { AttacksList } from './components/AttacksList';
 import { InventoryList } from './components/InventoryList';
 import { SpellcastingBlock } from './components/SpellcastingBlock';
-import { effectiveMaximumHp, effectiveSpeed, exhaustionEffects, rollWithExhaustion, type RollMode } from '../../../utils/dnd5eSurvival';
+import { effectiveMaximumHp, effectiveSpeed, exhaustionEffects, rollWithExhaustion, trackedExhaustionLevel, type RollMode } from '../../../utils/dnd5eSurvival';
 import { categorizeProficiencies } from './dnd5eFormData';
 
 interface DnD5eCharacterViewProps {
@@ -34,6 +35,7 @@ interface DnD5eCharacterViewProps {
   onEdit?: () => void;
   /** Called when the user clicks a rollable stat. Omit outside campaign context. */
   onRoll?: (expression: string, purpose: string) => void;
+  onSpendHitDie?: (index: number) => void;
 }
 
 interface RollPopupState {
@@ -79,9 +81,10 @@ const COLOR_PRESETS = [
 /**
  * DnD5eCharacterView - Read-only D&D 5e character sheet
  */
-export const DnD5eCharacterView: React.FC<DnD5eCharacterViewProps> = ({ character, onEdit, onRoll }) => {
+export const DnD5eCharacterView: React.FC<DnD5eCharacterViewProps> = ({ character, onEdit, onRoll, onSpendHitDie }) => {
   const [activeTab, setActiveTab] = useState<TabId>('stats');
   const data = character.data as any; // Type will be DnD5eCharacterData
+  const exhaustionLevel = trackedExhaustionLevel(data);
   const [themeColor, setThemeColor] = useState(COLOR_PRESETS[0]);
   const [isCustomColor, setIsCustomColor] = useState(false);
   const [customColorHex, setCustomColorHex] = useState('');
@@ -101,7 +104,7 @@ export const DnD5eCharacterView: React.FC<DnD5eCharacterViewProps> = ({ characte
   }, [rollPopup]);
 
   const handleRoll = (expression: string, purpose: string, mode: RollMode = 'normal') => {
-    const rolled = rollWithExhaustion(expression, purpose, data.survival?.exhaustionLevel ?? 0, mode);
+    const rolled = rollWithExhaustion(expression, purpose, exhaustionLevel ?? 0, mode);
     const actualMode = rolled.startsWith('2d20kh1') ? 'Advantage'
       : rolled.startsWith('2d20kl1') ? 'Disadvantage' : '';
     if (onRoll) onRoll(rolled, actualMode ? `${purpose} (${actualMode})` : purpose);
@@ -302,7 +305,7 @@ export const DnD5eCharacterView: React.FC<DnD5eCharacterViewProps> = ({ characte
           <div className="bg-stone-50 border border-stone-200 rounded-lg p-4">
             <SkillsList
               skills={data.skills}
-              passivePerception={data.passivePerception}
+              passivePerception={10 + (Number(data.skills.perception?.bonus) || 0) + (Number(data.passivePerceptionBonus) || 0)}
               onRoll={onRoll ? (expr, purpose) => handleRoll(expr, purpose) : undefined}
               onRollContext={onRoll ? (e, expr, purpose) => showRollPopup(e, expr, purpose) : undefined}
             />
@@ -353,8 +356,8 @@ export const DnD5eCharacterView: React.FC<DnD5eCharacterViewProps> = ({ characte
           <div className="bg-stone-50 border-2 border-stone-300 rounded-lg p-4 text-center">
             <Footprints className="w-6 h-6 mx-auto mb-2 text-blue-600" />
             <div className="text-xs text-stone-500 mb-1">Speed</div>
-            <div className="text-2xl font-bold text-stone-800">{effectiveSpeed(data.speed, data.survival?.exhaustionLevel ?? 0)} ft</div>
-            {(data.survival?.exhaustionLevel ?? 0) >= 2 && <div className="text-xs text-stone-500">Base {data.speed} ft</div>}
+            <div className="text-2xl font-bold text-stone-800">{effectiveSpeed(data.speed, exhaustionLevel ?? 0)} ft</div>
+            {(exhaustionLevel ?? 0) >= 2 && <div className="text-xs text-stone-500">Base {data.speed} ft</div>}
           </div>
         )}
         {data.hp && (
@@ -362,9 +365,9 @@ export const DnD5eCharacterView: React.FC<DnD5eCharacterViewProps> = ({ characte
             <Heart className="w-6 h-6 mx-auto mb-2 text-red-600" />
             <div className="text-xs text-stone-500 mb-1">Hit Points</div>
             <div className="text-2xl font-bold text-red-700">
-              {Math.min(data.hp.current, effectiveMaximumHp(data.hp.maximum, data.survival?.exhaustionLevel ?? 0))}/{effectiveMaximumHp(data.hp.maximum, data.survival?.exhaustionLevel ?? 0)}
+              {Math.min(data.hp.current, effectiveMaximumHp(data.hp.maximum, exhaustionLevel ?? 0))}/{effectiveMaximumHp(data.hp.maximum, exhaustionLevel ?? 0)}
             </div>
-            {(data.survival?.exhaustionLevel ?? 0) >= 4 && <div className="text-xs text-red-700 mt-1">Base maximum {data.hp.maximum}; reconcile current HP on the sheet</div>}
+            {(exhaustionLevel ?? 0) >= 4 && <div className="text-xs text-red-700 mt-1">Base maximum {data.hp.maximum}; reconcile current HP on the sheet</div>}
             {data.hp.temporary > 0 && (
               <div className="text-xs text-blue-600 mt-1">+{data.hp.temporary} temp</div>
             )}
@@ -374,7 +377,10 @@ export const DnD5eCharacterView: React.FC<DnD5eCharacterViewProps> = ({ characte
 
       <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
         <h3 className="text-lg font-semibold text-stone-800 mb-2">Food, Water & Exhaustion</h3>
-        {!data.survival && <p className="text-sm text-amber-900">Daily needs have not been recorded on this sheet.</p>}
+        {!data.survival && <>
+          <p className="text-sm text-amber-900">Daily needs have not been recorded on this sheet.</p>
+          {exhaustionLevel !== undefined && <p className="text-sm text-stone-700">Exhaustion: {exhaustionLevel} / 6{exhaustionLevel > 0 && ` · Effects: ${exhaustionEffects(exhaustionLevel).join('; ')}`}</p>}
+        </>}
         {data.survival && (
           <div className="text-sm text-stone-700 space-y-1">
             <p>Last resolved day: {data.survival.lastResolvedDay || 'unknown'}</p>
@@ -388,11 +394,11 @@ export const DnD5eCharacterView: React.FC<DnD5eCharacterViewProps> = ({ characte
                 <p className="font-semibold text-amber-900">Water short by {data.survival.waterRequiredGallons - data.survival.waterTodayGallons} gal on the resolved day.</p>
               )}
             <p>Days without food: {data.survival.daysWithoutFood ?? 'unknown'}</p>
-            <p>Exhaustion: {data.survival.exhaustionLevel ?? 'unknown'} / 6 · Deprivation-locked: {data.survival.deprivationLockedLevels ?? 'unknown'}</p>
-            {(data.survival.exhaustionLevel ?? 0) > 0 && <p>Effects: {exhaustionEffects(data.survival.exhaustionLevel).join('; ')}.</p>}
+            <p>Exhaustion: {exhaustionLevel ?? 'unknown'} / 6 · Deprivation-locked: {data.survival.deprivationLockedLevels ?? 'unknown'}</p>
+            {(exhaustionLevel ?? 0) > 0 && <p>Effects: {exhaustionEffects(exhaustionLevel!).join('; ')}.</p>}
           </div>
         )}
-        {data.conditions?.includes('exhausted') && data.survival?.exhaustionLevel === undefined && (
+        {data.conditions?.includes('exhausted') && exhaustionLevel === undefined && (
           <p className="text-sm text-amber-900 mt-2">Exhausted is marked, but its level is unknown.</p>
         )}
       </div>
@@ -402,14 +408,34 @@ export const DnD5eCharacterView: React.FC<DnD5eCharacterViewProps> = ({ characte
         <div className="bg-stone-50 border border-stone-200 rounded-lg p-4">
           <h3 className="text-lg font-semibold text-stone-800 mb-3">Hit Dice</h3>
           <div className="flex flex-wrap gap-3">
-            {data.hitDice.map((hd: any, idx: number) => (
-              <div key={idx} className="px-4 py-2 bg-white border border-stone-300 rounded-lg">
-                <div className="text-xs text-stone-500 capitalize">{hd.class}</div>
-                <div className="font-semibold text-stone-800">
-                  {hd.remaining}/{hd.total.replace(/\d+/, hd.total.match(/\d+/)[0])}
+            {data.hitDice!.map((hd: any, idx: number) => {
+              // `total` is the pool ("5d10"), so spending rolls one die plus
+              // Constitution — never the stored string, which would roll all
+              // five. A pool with nothing left, or a total that is not a die,
+              // stays as plain text rather than offering a roll it cannot make.
+              const die = hitDieExpression(hd);
+              const max = hitDiceMaximum(hd);
+              const spendable = !!onRoll && canSpendHitDie(hd);
+              const expr = die === null ? '' : spendRoll(die, data.stats?.constitution?.modifier ?? 0);
+              const purpose = `Spend a Hit Die${hd.class ? ` (${hd.class})` : ''}`;
+              return (
+                <div
+                  key={idx}
+                  className={`px-4 py-2 bg-white border border-stone-300 rounded-lg group ${
+                    spendable ? 'cursor-pointer hover:bg-red-50 select-none' : ''
+                  }`}
+                  onClick={spendable ? () => { handleRoll(expr, purpose); onSpendHitDie?.(idx); } : undefined}
+                  title={spendable ? `Spend one hit die: roll ${expr}` : undefined}
+                >
+                  <div className="text-xs text-stone-500 capitalize">{hd.class}</div>
+                  <div className="font-semibold text-stone-800 flex items-center gap-1">
+                    {hd.remaining}{max === null ? '' : `/${max}`}
+                    {die && <span className="ml-1 font-normal text-stone-500">{die}</span>}
+                    {spendable && <Dices className="w-3 h-3 text-red-700 opacity-0 group-hover:opacity-60 transition-opacity" />}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}

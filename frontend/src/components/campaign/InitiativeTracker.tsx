@@ -8,7 +8,9 @@
  * Architecture:
  * - Server holds canonical CombatState in memory (initiativeState.ts)
  * - Any mutation emits the full updated state back to all campaign members via 'initiative.state'
- * - On mount, client requests state with 'initiative.request_state'
+ * - CampaignPage's useInitiativeSync() owns the subscription and mirrors that
+ *   state into the game store; this panel and the map's active-token ring are
+ *   both readers. Mutations still emit straight from here.
  */
 
 import React, { useState, useEffect, useRef, useCallback } from 'react';
@@ -28,20 +30,21 @@ import {
   GripVertical,
 } from 'lucide-react';
 import { useCampaign } from '@/contexts/CampaignContext';
-import { useTokenListIgnoringMovement } from '@/stores/gameStore';
+import { useAuth } from '@/contexts/AuthContext';
+import { useTokenListIgnoringMovement, useCombatState, usePeekTokenId, useGameStore } from '@/stores/gameStore';
 import { useWebSocket } from '@/contexts/WebSocketContext';
 import ConfirmDialog from '@/components/common/ConfirmDialog';
 
-import type { CombatState, CombatantEntry, Token } from '@/types';
+import type { CombatantEntry, Token } from '@/types';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 function dispositionColor(entry: CombatantEntry): string {
-  if (entry.type === 'player') return 'text-moss-green';
-  if (entry.disposition === 'friendly') return 'text-moss-green';
-  if (entry.disposition === 'hostile') return 'text-red-600';
+  if (entry.type === 'player') return 'text-brand-ink';
+  if (entry.disposition === 'friendly') return 'text-brand-ink';
+  if (entry.disposition === 'hostile') return 'text-danger-ink';
   return 'text-stone-gray';
 }
 
@@ -83,7 +86,7 @@ function AddCombatantModal({ tokens, combatantIds, mapId: _mapId, onAdd, onClose
         className="bg-soft-cream border-2 border-moss-green/30 rounded-xl shadow-2xl w-full max-w-sm mx-4"
       >
         <div className="flex items-center justify-between p-4 border-b border-moss-green/20">
-          <h3 className="font-bold text-moss-green">Add Combatant</h3>
+          <h3 className="font-bold text-brand-ink">Add Combatant</h3>
           <button onClick={onClose} className="p-1 rounded hover:bg-stone-gray/10 transition-colors">
             <XCircle className="w-4 h-4 text-stone-gray" />
           </button>
@@ -112,14 +115,18 @@ function AddCombatantModal({ tokens, combatantIds, mapId: _mapId, onAdd, onClose
                   </div>
                 )}
                 <div className="flex-1 min-w-0">
-                  <div className="font-medium text-sm text-moss-green truncate">{token.name}</div>
+                  <div className="font-medium text-sm text-brand-ink truncate">{token.name}</div>
                   <div className="text-xs text-stone-gray capitalize">
                     {token.type ?? 'npc'}{token.disposition ? ` · ${token.disposition}` : ''}
                   </div>
                 </div>
-                {token.initiative !== null && (
-                  <span className="text-xs font-bold text-warm-amber">Init {token.initiative}</span>
-                )}
+                {/*
+                  No initiative is shown here on purpose. A token keeps its last
+                  rolled value, but adding it to the order no longer carries that
+                  value in — a combatant joins as "—" and takes its place when
+                  something rolls. Advertising the old number on the button that
+                  adds it promised something the tracker would not deliver.
+                */}
               </button>
             ))
           )}
@@ -136,7 +143,15 @@ function AddCombatantModal({ tokens, combatantIds, mapId: _mapId, onAdd, onClose
 interface CombatantRowProps {
   entry: CombatantEntry;
   isActive: boolean;
+  /** This token is being pointed at — from this list, or from the map. */
+  isPeeked: boolean;
   isDM: boolean;
+  /**
+   * Whether this viewer may roll initiative for this combatant. True for the DM
+   * on every row, and for a player only on a token they control — so a player
+   * sees one die, beside their own name.
+   */
+  canRoll: boolean;
   mapId: string | null;
   isDragOver: boolean;
   onSetInitiative: (tokenId: string, value: number | null) => void;
@@ -149,7 +164,7 @@ interface CombatantRowProps {
 }
 
 function CombatantRow({
-  entry, isActive, isDM, isDragOver,
+  entry, isActive, isPeeked, isDM, canRoll, isDragOver,
   onSetInitiative, onRoll, onRemove,
   onDragStart, onDragOver, onDrop, onDragEnd,
 }: CombatantRowProps) {
@@ -182,12 +197,17 @@ function CombatantRow({
       onDragOver={isDM ? (e) => onDragOver(e, entry.tokenId) : undefined}
       onDrop={isDM ? (e) => onDrop(e, entry.tokenId) : undefined}
       onDragEnd={isDM ? onDragEnd : undefined}
+      onMouseEnter={() => useGameStore.getState().setPeekToken(entry.tokenId, 'tracker')}
+      onMouseLeave={() => useGameStore.getState().setPeekToken(null, 'tracker')}
       className={`flex items-center gap-2 p-2 rounded-lg transition-colors ${
         isDragOver
           ? 'border-t-2 border-moss-green'
           : isActive
             ? 'bg-warm-amber/20 border border-warm-amber/40'
-            : 'hover:bg-moss-green/5 border border-transparent'
+            : isPeeked
+              // Mirrors the map: hovering a token there tints its row here.
+              ? 'bg-moss-green/10 border border-moss-green/40'
+              : 'hover:bg-moss-green/5 border border-transparent'
       } ${isDM ? 'cursor-grab active:cursor-grabbing' : ''}`}
     >
       {/* Drag handle (DM) or active dot (players) */}
@@ -218,7 +238,7 @@ function CombatantRow({
 
       {/* Name + disposition */}
       <div className="flex-1 min-w-0">
-        <div className={`text-sm font-medium truncate ${isActive ? 'text-warm-amber' : 'text-moss-green'}`}>
+        <div className={`text-sm font-medium truncate ${isActive ? 'text-warm-amber' : 'text-brand-ink'}`}>
           {entry.name}
         </div>
         {entry.hp && (
@@ -256,23 +276,28 @@ function CombatantRow({
         )}
       </div>
 
-      {/* DM actions */}
-      {isDM && (
+      {/* Actions. Rolling and removing are gated separately: a player may roll
+          for their own combatant, but only the DM decides who is in the fight. */}
+      {(canRoll || isDM) && (
         <div className="flex items-center gap-1 flex-shrink-0">
-          <button
-            onClick={() => onRoll(entry.tokenId)}
-            title="Roll initiative for this token"
-            className="p-1 rounded hover:bg-moss-green/10 text-stone-gray hover:text-moss-green transition-colors"
-          >
-            <Dices className="w-3.5 h-3.5" />
-          </button>
-          <button
-            onClick={() => onRemove(entry.tokenId)}
-            title="Remove from initiative"
-            className="p-1 rounded hover:bg-red-100 text-stone-gray hover:text-red-600 transition-colors"
-          >
-            <Trash2 className="w-3.5 h-3.5" />
-          </button>
+          {canRoll && (
+            <button
+              onClick={() => onRoll(entry.tokenId)}
+              title={isDM ? 'Roll initiative for this token' : 'Roll your initiative'}
+              className="p-1 rounded hover:bg-moss-green/10 text-stone-gray hover:text-brand-ink transition-colors"
+            >
+              <Dices className="w-3.5 h-3.5" />
+            </button>
+          )}
+          {isDM && (
+            <button
+              onClick={() => onRemove(entry.tokenId)}
+              title="Remove from initiative"
+              className="p-1 rounded hover:bg-danger/10 text-stone-gray hover:text-danger-ink transition-colors"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </button>
+          )}
         </div>
       )}
     </div>
@@ -285,15 +310,17 @@ function CombatantRow({
 
 export default function InitiativeTracker() {
   const { userRole, currentMap } = useCampaign();
+  const { user } = useAuth();
   // Initiative reads token names/ids, not coordinates — skip move re-renders.
   const tokens = useTokenListIgnoringMovement();
   const { socket } = useWebSocket();
-  const [combatState, setCombatState] = useState<CombatState>({
-    active: false,
-    round: 0,
-    currentTokenId: null,
-    combatants: [],
-  });
+  // Combat state is mirrored into the game store by useInitiativeSync(), which
+  // CampaignPage owns — the map's active-token ring reads the same snapshot,
+  // and the subscription no longer dies with this panel.
+  const combatState = useCombatState();
+  // Cross-highlight: set when a row here is hovered, and when a token is
+  // hovered on the map. Either way the matching row tints.
+  const peekTokenId = usePeekTokenId();
   const [collapsed, setCollapsed] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
   const [showEndConfirm, setShowEndConfirm] = useState(false);
@@ -305,24 +332,27 @@ export default function InitiativeTracker() {
   const isDM = userRole === 'DM';
   const mapId = currentMap?.id ?? null;
 
-  // ── WebSocket listeners ──────────────────────────────────────────────────
+  /**
+   * Who may roll for a given combatant: the DM for anyone, a player only for a
+   * token they control. `controlledBy` is the same field that decides who may
+   * move a token, so the die appears exactly where the player already has
+   * authority. The server enforces the same rule — this only decides whether to
+   * draw the button.
+   */
+  const canRollFor = useCallback((tokenId: string) => {
+    if (isDM) return true;
+    if (!user || userRole === 'SPECTATOR') return false;
+    // Only before the fight starts: re-rolling re-sorts the order, and the turn
+    // pointer walks it by position, so a mid-combat change can skip someone's
+    // turn. The server enforces the same rule.
+    if (combatState.active) return false;
+    return tokens.some((t) => t.id === tokenId && t.controlledBy === user.id);
+  }, [isDM, user, userRole, combatState.active, tokens]);
 
-  useEffect(() => {
-    if (!socket) return;
-
-    const handleState = (state: CombatState) => {
-      setCombatState(state);
-    };
-
-    socket.onInitiativeState(handleState);
-
-    // Request current state on mount (handles reconnects too)
-    socket.emitInitiativeRequestState();
-
-    return () => {
-      socket.off('initiative.state', handleState);
-    };
-  }, [socket]);
+  /** A player has a combatant of their own that still has no initiative value. */
+  const playerNeedsToRoll = !isDM && combatState.combatants.some(
+    (c) => c.initiative === null && canRollFor(c.tokenId)
+  );
 
   // ── DM Actions ───────────────────────────────────────────────────────────
 
@@ -344,20 +374,15 @@ export default function InitiativeTracker() {
   const handleRollForToken = useCallback((tokenId: string) => {
     if (!socket || !mapId) return;
 
-    // Try to find a linked character to get the system-specific expression
+    // No expression is sent. The server derives initiative from the combatant's
+    // character sheet or stat block — it holds both, and this panel holds
+    // neither. It also means a roll from here and a roll from the map's
+    // right-click menu produce the same number by construction.
+    //
+    // This used to send a flat `1d20` for everything, so a Dexterity 20 rogue
+    // rolled exactly what a Dexterity 8 wizard did.
     const token = tokens.find((t) => t.id === tokenId);
-    let expression: string | null = null;
-
-    if (token?.characterId) {
-      // We'll derive the expression client-side from the character in context
-      // (characters are loaded in CampaignContext via the roster)
-      // Fall back to 1d20 if we can't determine the system
-      expression = '1d20';
-    } else {
-      expression = '1d20';
-    }
-
-    socket.emitInitiativeRoll({ tokenId, mapId, expression, characterName: token?.name });
+    socket.emitInitiativeRoll({ tokenId, mapId, characterName: token?.name });
   }, [socket, mapId, tokens]);
 
   const handleStart = useCallback(() => {
@@ -402,13 +427,13 @@ export default function InitiativeTracker() {
     const [moved] = reordered.splice(fromIndex, 1);
     reordered.splice(toIndex, 0, moved);
 
-    // Optimistic update
-    setCombatState((prev) => ({ ...prev, combatants: reordered }));
+    // Optimistic update — the server's broadcast replaces this moments later.
+    useGameStore.getState().setCombatState({ ...combatState, combatants: reordered });
     socket.emitInitiativeReorder({ orderedTokenIds: reordered.map((c) => c.tokenId) });
 
     dragTokenId.current = null;
     setDragOverTokenId(null);
-  }, [socket, combatState.combatants]);
+  }, [socket, combatState]);
 
   const handleDragEnd = useCallback(() => {
     dragTokenId.current = null;
@@ -433,8 +458,8 @@ export default function InitiativeTracker() {
           className="w-full flex items-center justify-between px-4 py-3 bg-parchment/40 hover:bg-parchment/60 transition-colors"
         >
           <div className="flex items-center gap-2">
-            <Swords className="w-4 h-4 text-moss-green" />
-            <span className="font-semibold text-moss-green text-sm">Initiative Tracker</span>
+            <Swords className="w-4 h-4 text-brand-ink" />
+            <span className="font-semibold text-brand-ink text-sm">Initiative Tracker</span>
             {combatState.active && (
               <span className="text-xs font-bold text-warm-amber bg-warm-amber/10 border border-warm-amber/20 rounded px-1.5 py-0.5">
                 Round {combatState.round}
@@ -473,7 +498,9 @@ export default function InitiativeTracker() {
                     key={entry.tokenId}
                     entry={entry}
                     isActive={combatState.active && entry.tokenId === combatState.currentTokenId}
+                    isPeeked={entry.tokenId === peekTokenId}
                     isDM={isDM}
+                    canRoll={canRollFor(entry.tokenId)}
                     mapId={mapId}
                     isDragOver={isDM && dragOverTokenId === entry.tokenId}
                     onSetInitiative={handleSetInitiative}
@@ -503,7 +530,7 @@ export default function InitiativeTracker() {
                 {mapId && (
                   <button
                     onClick={() => setShowAddModal(true)}
-                    className="w-full flex items-center justify-center gap-2 py-1.5 px-3 text-xs font-medium text-moss-green border border-dashed border-moss-green/30 rounded-lg hover:bg-moss-green/5 transition-colors"
+                    className="w-full flex items-center justify-center gap-2 py-1.5 px-3 text-xs font-medium text-brand-ink border border-dashed border-moss-green/30 rounded-lg hover:bg-moss-green/5 transition-colors"
                   >
                     <Plus className="w-3.5 h-3.5" />
                     Add Combatant
@@ -532,7 +559,7 @@ export default function InitiativeTracker() {
                         </button>
                         <button
                           onClick={handleEnd}
-                          className="flex items-center justify-center gap-1.5 py-1.5 px-3 text-xs font-semibold border border-red-200 text-red-600 rounded-lg hover:bg-red-50 transition-colors"
+                          className="flex items-center justify-center gap-1.5 py-1.5 px-3 text-xs font-semibold border border-danger/30 text-danger-ink rounded-lg hover:bg-danger/10 transition-colors"
                           title="End combat"
                         >
                           <XCircle className="w-3.5 h-3.5" />
@@ -548,6 +575,14 @@ export default function InitiativeTracker() {
             {isDM && hasCombatants && !combatState.active && (
               <p className="text-xs text-stone-gray text-center">
                 Drag to reorder · Click a value to edit · <Dices className="w-3 h-3 inline" /> to roll
+              </p>
+            )}
+
+            {/* The same nudge for a player who has a combatant of their own and
+                has not rolled yet — the die is small and easy to miss. */}
+            {!isDM && hasCombatants && !combatState.active && playerNeedsToRoll && (
+              <p className="text-xs text-stone-gray text-center">
+                <Dices className="w-3 h-3 inline" /> to roll your initiative
               </p>
             )}
           </div>

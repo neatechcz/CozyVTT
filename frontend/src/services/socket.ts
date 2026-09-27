@@ -9,6 +9,7 @@ import type {
   DiceRolledSecretEvent,
   ChatMessageEvent,
   ChatMessageBroadcast,
+  ChatSystemBroadcast,
   SessionStartEvent,
   SessionStartedBroadcast,
   VibeUpdateEvent,
@@ -22,6 +23,10 @@ import type {
   AtmosphereAudioUpdatedBroadcast,
   CharacterHpUpdateEvent,
   CharacterHpUpdatedBroadcast,
+  DmTransferredBroadcast,
+  HitDiceSpendEvent,
+  MapPingEvent,
+  MapPingedBroadcast,
   CombatState,
   InitiativeAddEvent,
   InitiativeRemoveEvent,
@@ -257,10 +262,10 @@ class SocketClient {
         if (this.socket === socket) this.emitLifecycle('failed');
       };
 
-      manager.on('reconnect_failed', handleReconnectFailed);
+      manager?.on('reconnect_failed', handleReconnectFailed);
 
       this.reconnectManagerCleanup = () => {
-        manager.off('reconnect_failed', handleReconnectFailed);
+        manager?.off('reconnect_failed', handleReconnectFailed);
       };
 
       // Error events from server
@@ -446,7 +451,7 @@ class SocketClient {
     this.on('chat.message', callback);
   }
 
-  onChatSystem(callback: EventCallback<{ content: string; metadata?: any; timestamp: string }>) {
+  onChatSystem(callback: EventCallback<ChatSystemBroadcast>) {
     this.on('chat.system', callback);
   }
 
@@ -564,6 +569,30 @@ class SocketClient {
 
   onCharacterHpUpdated(callback: EventCallback<CharacterHpUpdatedBroadcast>) {
     this.on('character.hp.updated', callback);
+  }
+
+  onDmTransferred(callback: EventCallback<DmTransferredBroadcast>) {
+    this.on('campaign.dm.transferred', callback);
+  }
+
+  emitHitDiceSpend(data: HitDiceSpendEvent) {
+    this.socket?.emit('character.hitdice.spend', data);
+  }
+
+  onPresenceState(callback: EventCallback<{ campaignId: string; onlineUserIds: string[] }>) {
+    this.on('presence.state', callback);
+  }
+
+  requestPresence() {
+    this.socket?.emit('presence.request');
+  }
+
+  emitMapPing(data: MapPingEvent) {
+    this.socket?.emit('map.ping', data);
+  }
+
+  onMapPinged(callback: EventCallback<MapPingedBroadcast>) {
+    this.on('map.pinged', callback);
   }
 
   // ============================================

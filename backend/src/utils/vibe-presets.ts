@@ -58,6 +58,35 @@ export const DEFAULT_VIBE_SETTINGS: VibeSettings = {
 };
 
 /**
+ * Carry the stored atmosphere track through a settings write.
+ *
+ * `vibeSettings.atmosphereAudio` names an asset, and naming one there lets
+ * everyone at the table read it. Only the socket handler that sets a track may
+ * decide that, because it checks the DM can read the asset first. Every other
+ * writer of this column keeps whatever is already stored and ignores the
+ * client's value, so an ordinary settings update neither opens a file nor stops
+ * the music.
+ *
+ * `stored` is the campaign's current vibeSettings, or undefined for a campaign
+ * that does not exist yet.
+ */
+export function preserveAtmosphereAudio(incoming: unknown, stored?: unknown): unknown {
+  if (!incoming || typeof incoming !== 'object' || Array.isArray(incoming)) {
+    return incoming;
+  }
+
+  const next: Record<string, unknown> = { ...(incoming as Record<string, unknown>) };
+  delete next.atmosphereAudio;
+
+  if (stored && typeof stored === 'object' && !Array.isArray(stored)) {
+    const current = (stored as Record<string, unknown>).atmosphereAudio;
+    if (current !== undefined) next.atmosphereAudio = current;
+  }
+
+  return next;
+}
+
+/**
  * Validate a vibe settings object structure.
  * Returns null if valid, or an error message string if invalid.
  */

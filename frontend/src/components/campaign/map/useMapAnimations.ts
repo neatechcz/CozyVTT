@@ -113,3 +113,53 @@ export function useFogRevealAnimation(
 
   return revealOpacityRef;
 }
+
+/** Milliseconds between ticks (~30fps). */
+const TICK_FRAME_MS = 33;
+
+/**
+ * Open-ended repaint ticker — a self-sustaining loop that calls `onTick`
+ * while `active` holds. Used by the initiative turn-ring pulse and by map
+ * pings; both are time-driven effects with no finite work queue to drain,
+ * so unlike the two hooks above the caller decides when they end (combat
+ * finishing, the last ping expiring, or the user preferring reduced
+ * motion, in which case no loop starts at all).
+ *
+ * Ticks are gated to ~30fps rather than the display rate. Both effects run
+ * on ~1.6s cycles, so half the frames are visually indistinguishable, and
+ * this repaints a map layer continuously for the duration — worth halving.
+ */
+export function useCanvasTicker(active: boolean, onTick: () => void) {
+  const tickRef = useRef(onTick);
+  tickRef.current = onTick;
+
+  useEffect(() => {
+    if (!active) return;
+
+    let animationFrameId: number;
+    let lastTick = 0;
+
+    const animate = (timestamp: number) => {
+      if (timestamp - lastTick >= TICK_FRAME_MS) {
+        lastTick = timestamp;
+        tickRef.current();
+      }
+      animationFrameId = requestAnimationFrame(animate);
+    };
+
+    animationFrameId = requestAnimationFrame(animate);
+    return () => { cancelAnimationFrame(animationFrameId); };
+  }, [active]);
+}
+
+/** Full period of one breath, in milliseconds. */
+const PULSE_PERIOD_MS = 1600;
+
+/**
+ * Pulse phase in [0, 1] for a given frame time — 0 at the tightest point
+ * of the breath, 1 at the widest. Pure, so the draw layer stays testable:
+ * pass a fixed `now` and the geometry is deterministic.
+ */
+export function pulsePhaseAt(now: number): number {
+  return 0.5 - 0.5 * Math.cos((now % PULSE_PERIOD_MS) / PULSE_PERIOD_MS * Math.PI * 2);
+}

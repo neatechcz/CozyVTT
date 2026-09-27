@@ -20,7 +20,10 @@ jest.mock('../auth', () => ({
   ...jest.requireActual('../auth'),
   authenticateSocket: jest.fn(),
 }));
-jest.mock('../utils', () => ({ sendSystemMessage: jest.fn() }));
+jest.mock('../utils', () => ({
+  broadcastPresence: jest.fn(),
+  getOnlineUserIds: jest.fn().mockResolvedValue(['user-1']),
+}));
 jest.mock('../../utils/logger', () => ({
   __esModule: true,
   default: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
@@ -40,14 +43,14 @@ jest.mock('../handlers/lights', () => ({ registerLightHandlers: jest.fn() }));
 
 import { prisma } from '../../config/database';
 import { authenticateSocket } from '../auth';
-import { sendSystemMessage } from '../utils';
+import { broadcastPresence } from '../utils';
 import { registerEventHandlers } from '../events';
 
 const findUser = prisma.user.findUnique as jest.Mock;
 const authSocket = authenticateSocket as jest.Mock;
 const findCampaign = prisma.campaign.findUnique as jest.Mock;
 const findMembership = prisma.campaignMembership.findUnique as jest.Mock;
-const systemMessage = sendSystemMessage as jest.Mock;
+const presence = broadcastPresence as jest.Mock;
 
 type Handler = (payload?: unknown) => Promise<void> | void;
 
@@ -116,10 +119,7 @@ describe('authenticate', () => {
     expect(emitted('authenticated')).toEqual([
       expect.objectContaining({ userId: 'user-1', campaignId: 'camp-1', role: 'PLAYER' }),
     ]);
-    expect(systemMessage).toHaveBeenCalledWith('camp-1', 'Václav has joined the campaign.', {
-      userId: 'user-1',
-      action: 'user.joined',
-    });
+    expect(presence).toHaveBeenCalledWith('camp-1');
     expect(roomEvents('user.joined')).toEqual([
       { room: 'camp-1', event: 'user.joined', payload: expect.objectContaining({ userId: 'user-1' }) },
     ]);
@@ -137,7 +137,7 @@ describe('authenticate', () => {
     expect(emitted('authenticated')).toEqual([
       expect.objectContaining({ userId: 'user-1', campaignId: 'camp-1', role: 'PLAYER' }),
     ]);
-    expect(systemMessage).not.toHaveBeenCalled();
+    expect(presence).toHaveBeenCalledWith('camp-1');
     expect(roomEvents('user.joined')).toEqual([]);
   });
 
@@ -163,7 +163,7 @@ describe('authenticate', () => {
     expect(socket.campaignId).toBe('camp-2');
     expect(roomEvents('user.left')).toEqual([]);
     expect(roomEvents('user.joined')).toEqual([]);
-    expect(systemMessage).not.toHaveBeenCalled();
+    expect(presence).toHaveBeenCalledWith('camp-2');
   });
 
   test('a normal socket switching campaigns still announces the leave (unchanged behaviour)', async () => {
@@ -187,8 +187,7 @@ describe('authenticate', () => {
     // camp-1 never saw a join, so it sees no leave; camp-2 sees the join
     expect(roomEvents('user.left')).toEqual([]);
     expect(roomEvents('user.joined').map((e) => e.room)).toEqual(['camp-2']);
-    expect(systemMessage).toHaveBeenCalledTimes(1);
-    expect(systemMessage).toHaveBeenCalledWith('camp-2', 'Václav has joined the campaign.', expect.anything());
+    expect(presence).toHaveBeenCalledWith('camp-2');
   });
 });
 
@@ -227,11 +226,11 @@ describe('campaign switch', () => {
     const { handlers, roomEvents } = await connectSocket();
     await handlers.authenticate({ campaignId: 'camp-1' });
     await handlers.authenticate({ campaignId: 'camp-1', quiet: true });
-    systemMessage.mockClear();
+    presence.mockClear();
 
     await handlers.disconnect('transport close');
 
-    expect(systemMessage).toHaveBeenCalledWith('camp-1', 'Václav has left the campaign.', expect.anything());
+    expect(presence).toHaveBeenCalledWith('camp-1');
     expect(roomEvents('user.left').map((e) => e.room)).toEqual(['camp-1']);
   });
 
@@ -251,14 +250,11 @@ describe('disconnect', () => {
   test('non-quiet disconnect is announced (unchanged behaviour)', async () => {
     const { handlers, roomEvents } = await connectSocket();
     await handlers.authenticate({ campaignId: 'camp-1' });
-    systemMessage.mockClear();
+    presence.mockClear();
 
     await handlers.disconnect('transport close');
 
-    expect(systemMessage).toHaveBeenCalledWith('camp-1', 'Václav has left the campaign.', {
-      userId: 'user-1',
-      action: 'user.left',
-    });
+    expect(presence).toHaveBeenCalledWith('camp-1');
     expect(roomEvents('user.left')).toEqual([
       { room: 'camp-1', event: 'user.left', payload: expect.objectContaining({ userId: 'user-1' }) },
     ]);
@@ -270,7 +266,7 @@ describe('disconnect', () => {
 
     await handlers.disconnect('client namespace disconnect');
 
-    expect(systemMessage).not.toHaveBeenCalled();
+    expect(presence).toHaveBeenCalledWith('camp-1');
     expect(roomEvents('user.left')).toEqual([]);
     expect(socket.leave).toHaveBeenCalledWith('camp-1');
   });

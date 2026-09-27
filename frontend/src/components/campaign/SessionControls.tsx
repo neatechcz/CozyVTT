@@ -15,6 +15,7 @@ import api from '@/services/api';
 import { CampaignStatus } from '@/types';
 import EndSessionModal from '@/components/campaign/EndSessionModal';
 import Button from '@/components/ui/Button';
+import { apiErrorMessage } from '@/utils/errors';
 
 // ============================================
 // Session timer hook
@@ -85,8 +86,8 @@ export default function SessionControls() {
         startedAt: result.session.startedAt,
       });
       showToast(`Session ${result.session.sessionNumber} started!`, 'success');
-    } catch (err: any) {
-      showToast(err.response?.data?.message || 'Failed to start session', 'error');
+    } catch (err) {
+      showToast(apiErrorMessage(err) || 'Failed to start session', 'error');
     } finally {
       setIsLoading(false);
     }
@@ -99,8 +100,8 @@ export default function SessionControls() {
       await api.pauseSession(campaign.id, activeSession.id);
       updateCampaignStatus(CampaignStatus.PAUSED);
       showToast('Session paused. Game state saved.', 'success');
-    } catch (err: any) {
-      showToast(err.response?.data?.message || 'Failed to pause session', 'error');
+    } catch (err) {
+      showToast(apiErrorMessage(err) || 'Failed to pause session', 'error');
     } finally {
       setIsLoading(false);
     }
@@ -118,8 +119,8 @@ export default function SessionControls() {
         startedAt: new Date().toISOString(), // Resume resets timer display to now
       });
       showToast(`Session ${result.session.sessionNumber} resumed!`, 'success');
-    } catch (err: any) {
-      showToast(err.response?.data?.message || 'Failed to resume session', 'error');
+    } catch (err) {
+      showToast(apiErrorMessage(err) || 'Failed to resume session', 'error');
     } finally {
       setIsLoading(false);
     }
@@ -135,8 +136,8 @@ export default function SessionControls() {
       setActiveSession(null);
       setIsEndModalOpen(false);
       showToast(`Session ${activeSession.sessionNumber} ended.${saveState ? ' State saved.' : ''}`, 'success');
-    } catch (err: any) {
-      showToast(err.response?.data?.message || 'Failed to end session', 'error');
+    } catch (err) {
+      showToast(apiErrorMessage(err) || 'Failed to end session', 'error');
     } finally {
       setIsLoading(false);
     }
@@ -160,7 +161,7 @@ export default function SessionControls() {
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Clock className="w-4 h-4 text-warm-amber" />
-            <h3 className="text-sm font-semibold text-moss-green">Session Controls</h3>
+            <h3 className="text-sm font-semibold text-brand-ink">Session Controls</h3>
           </div>
 
           {/* Session number + timer */}
@@ -170,8 +171,8 @@ export default function SessionControls() {
               <span className="font-medium">{activeSession.sessionNumber}</span>
               {isActive && elapsed && (
                 <>
-                  <span className="text-moss-green/30">·</span>
-                  <span className="font-mono text-moss-green">{elapsed}</span>
+                  <span className="text-brand-ink/30">·</span>
+                  <span className="font-mono text-brand-ink">{elapsed}</span>
                 </>
               )}
             </div>
@@ -183,7 +184,7 @@ export default function SessionControls() {
           <div
             className={`w-2 h-2 rounded-full flex-shrink-0 ${
               isActive
-                ? 'bg-green-500 animate-pulse'
+                ? 'bg-success animate-pulse'
                 : isPaused
                   ? 'bg-warm-amber'
                   : 'bg-stone-gray/40'
@@ -237,7 +238,7 @@ export default function SessionControls() {
             <button
               onClick={() => setIsEndModalOpen(true)}
               disabled={isLoading}
-              className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg border border-red-200 text-red-600 hover:bg-red-50 transition-colors text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
+              className="w-full flex items-center justify-center gap-2 px-4 py-2 rounded-lg border border-danger/30 text-danger-ink hover:bg-danger/10 transition-colors text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <Square className="w-4 h-4" />
               End Session

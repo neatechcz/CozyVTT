@@ -282,16 +282,11 @@ describe('delegated character rolls', () => {
         orderBy: { rolledAt: 'desc' },
       });
       expect(savedRoll.characterName).toBeNull();
-      const savedMessage = await prisma.message.findFirstOrThrow({
-        where: {
-          campaignId,
-          type: 'DICE_ROLL',
-          content: { contains: '1d20+17' },
-        },
-        orderBy: { createdAt: 'desc' },
-      });
-      expect(savedMessage.content).not.toContain('Delegated Hero');
-      expect((savedMessage.metadata as { characterName: string | null }).characterName).toBeNull();
+      // Roll history has its own table in 1.4; a free-text label must not be
+      // promoted into either that record or a campaign chat message.
+      expect(await prisma.message.findFirst({
+        where: { campaignId, type: 'DICE_ROLL', content: { contains: '1d20+17' } },
+      })).toBeNull();
     } finally {
       player.disconnect();
       dm.disconnect();
@@ -638,6 +633,408 @@ describe('initiative', () => {
     dm.disconnect();
     player.disconnect();
   });
+
+  // A rolled value is persisted onto the map token and survives the fight it was
+  // rolled for — ending combat clears only the in-memory order. Adding a token
+  // to a new fight must therefore not seed from it, or the token arrives already
+  // placed in the order carrying last fight's result.
+  it('adds a token with no initiative, even when it still carries one from a previous fight', async () => {
+    const dm = await server.connectAndAuth(dmCookie, campaignId);
+
+    // First fight: roll for the Goblin, which persists the value on the token.
+    const firstAdd = waitForEvent<{ combatants: any[] }>(dm, 'initiative.state');
+    dm.emit('initiative.add', { tokenId: DM_TOKEN_ID, mapId });
+    await firstAdd;
+
+    const firstRoll = waitForEvent<{ combatants: any[] }>(dm, 'initiative.state');
+    dm.emit('initiative.roll', { tokenId: DM_TOKEN_ID, mapId, expression: '1d20' });
+    await firstRoll;
+
+    const map = await prisma.map.findUniqueOrThrow({ where: { id: mapId }, select: { tokens: true } });
+    const stored = (map.tokens as any[]).find((t) => t.id === DM_TOKEN_ID);
+    expect(typeof stored.initiative).toBe('number');   // the value that used to leak
+
+    // The fight ends, and the same token is added to the next one.
+    dm.emit('initiative.end');
+    await waitForEvent<{ active: boolean }>(dm, 'initiative.state');
+
+    const secondAdd = waitForEvent<{ combatants: any[] }>(dm, 'initiative.state');
+    dm.emit('initiative.add', { tokenId: DM_TOKEN_ID, mapId });
+    const state = await secondAdd;
+
+    const entry = state.combatants.find((c) => c.tokenId === DM_TOKEN_ID);
+    expect(entry.initiative).toBeNull();
+
+    dm.disconnect();
+  });
+
+  // Rolling is the one initiative action a player may take, and only for their
+  // own token, and only once the DM has put it in the order. Everything else —
+  // who is in the fight, the order, whose turn it is — stays with the DM.
+  describe('a player rolling their own initiative', () => {
+    it('is allowed once the DM has added their token', async () => {
+      const dm = await server.connectAndAuth(dmCookie, campaignId);
+      const player = await server.connectAndAuth(player1Cookie, campaignId);
+
+      const added = waitForEvent<{ combatants: any[] }>(player, 'initiative.state');
+      dm.emit('initiative.add', { tokenId: PLAYER_TOKEN_ID, mapId });
+      await added;
+
+      const rolled = waitForEvent<{ combatants: any[] }>(player, 'initiative.state');
+      const diceLogged = waitForEvent<{ purpose: string; userId: string }>(dm, 'dice.rolled');
+      player.emit('initiative.roll', { tokenId: PLAYER_TOKEN_ID, mapId, expression: '1d20' });
+
+      const state = await rolled;
+      const entry = state.combatants.find((c) => c.tokenId === PLAYER_TOKEN_ID);
+      expect(entry.initiative).toBeGreaterThanOrEqual(1);
+      expect(entry.initiative).toBeLessThanOrEqual(20);
+
+      // The roll is public — it reaches the DM's dice log, attributed to the
+      // player rather than to the DM.
+      const roll = await diceLogged;
+      expect(roll.purpose).toBe('Hero Initiative');
+      expect(roll.userId).toBe(player1Id);
+
+      // And it is persisted on the token, not just held in memory.
+      const map = await prisma.map.findUniqueOrThrow({ where: { id: mapId }, select: { tokens: true } });
+      const token = (map.tokens as any[]).find((t) => t.id === PLAYER_TOKEN_ID);
+      expect(token.initiative).toBe(entry.initiative);
+
+      dm.disconnect();
+      player.disconnect();
+    });
+
+    it('is refused before the DM has added their token', async () => {
+      const player = await server.connectAndAuth(player1Cookie, campaignId);
+      const denial = waitForEvent<{ message: string }>(player, 'error');
+      player.emit('initiative.roll', { tokenId: PLAYER_TOKEN_ID, mapId, expression: '1d20' });
+      expect((await denial).message).toBe('That token is not in the initiative order yet');
+      player.disconnect();
+    });
+
+    it("is refused for a token they do not control, even when it is in the order", async () => {
+      const dm = await server.connectAndAuth(dmCookie, campaignId);
+      const player = await server.connectAndAuth(player1Cookie, campaignId);
+
+      const added = waitForEvent<{ combatants: any[] }>(player, 'initiative.state');
+      dm.emit('initiative.add', { tokenId: DM_TOKEN_ID, mapId });   // the Goblin
+      await added;
+
+      const denial = waitForEvent<{ message: string }>(player, 'error');
+      player.emit('initiative.roll', { tokenId: DM_TOKEN_ID, mapId, expression: '1d20' });
+      expect((await denial).message).toBe('You can only roll initiative for your own token');
+
+      // Nothing was rolled for it.
+      const map = await prisma.map.findUniqueOrThrow({ where: { id: mapId }, select: { tokens: true } });
+      const token = (map.tokens as any[]).find((t) => t.id === DM_TOKEN_ID);
+      expect(token.initiative ?? null).toBeNull();
+
+      dm.disconnect();
+      player.disconnect();
+    });
+
+    it('is refused for another player\'s token', async () => {
+      const dm = await server.connectAndAuth(dmCookie, campaignId);
+      const player2 = await server.connectAndAuth(player2Cookie, campaignId);
+
+      const added = waitForEvent<{ combatants: any[] }>(player2, 'initiative.state');
+      dm.emit('initiative.add', { tokenId: PLAYER_TOKEN_ID, mapId });   // player1's Hero
+      await added;
+
+      const denial = waitForEvent<{ message: string }>(player2, 'error');
+      player2.emit('initiative.roll', { tokenId: PLAYER_TOKEN_ID, mapId, expression: '1d20' });
+      expect((await denial).message).toBe('You can only roll initiative for your own token');
+
+      dm.disconnect();
+      player2.disconnect();
+    });
+
+    it('is refused once combat has started', async () => {
+      // Re-rolling re-sorts the order, and the turn pointer walks it by
+      // position, so a player who rolls above the current combatant would end
+      // the round early and skip whoever was in between.
+      const dm = await server.connectAndAuth(dmCookie, campaignId);
+      const player = await server.connectAndAuth(player1Cookie, campaignId);
+
+      const added = waitForEvent<{ combatants: any[] }>(player, 'initiative.state');
+      dm.emit('initiative.add', { tokenId: PLAYER_TOKEN_ID, mapId });
+      await added;
+
+      const started = waitForEvent<{ active: boolean }>(player, 'initiative.state');
+      dm.emit('initiative.start');
+      expect((await started).active).toBe(true);
+
+      const denial = waitForEvent<{ message: string }>(player, 'error');
+      player.emit('initiative.roll', { tokenId: PLAYER_TOKEN_ID, mapId });
+      expect((await denial).message).toMatch(/Combat has started/);
+
+      dm.disconnect();
+      player.disconnect();
+    });
+
+    it('is refused for a spectator, even on a token still marked as theirs', async () => {
+      // `controlledBy` survives a demotion, so an ex-player would otherwise keep
+      // the ability to reorder a fight after losing the ability to move a token.
+      const dm = await server.connectAndAuth(dmCookie, campaignId);
+      const added = waitForEvent<{ combatants: any[] }>(dm, 'initiative.state');
+      dm.emit('initiative.add', { tokenId: PLAYER_TOKEN_ID, mapId });
+      await added;
+
+      await prisma.campaignMembership.updateMany({
+        where: { userId: player1Id, campaignId },
+        data: { role: 'SPECTATOR' },
+      });
+      try {
+        const spectator = await server.connectAndAuth(player1Cookie, campaignId);
+        const denial = waitForEvent<{ message: string }>(spectator, 'error');
+        spectator.emit('initiative.roll', { tokenId: PLAYER_TOKEN_ID, mapId });
+        expect((await denial).message).toBe('Spectators cannot roll initiative');
+        spectator.disconnect();
+      } finally {
+        await prisma.campaignMembership.updateMany({
+          where: { userId: player1Id, campaignId },
+          data: { role: 'PLAYER' },
+        });
+      }
+
+      dm.disconnect();
+    });
+
+    // A player's roll must never be a back door into the combatant list.
+    it('does not let a player add a combatant by rolling for it', async () => {
+      const player = await server.connectAndAuth(player1Cookie, campaignId);
+      const denial = waitForEvent<{ message: string }>(player, 'error');
+      player.emit('initiative.roll', { tokenId: PLAYER_TOKEN_ID, mapId, expression: '1d20' });
+      await denial;
+
+      const dm = await server.connectAndAuth(dmCookie, campaignId);
+      const state = waitForEvent<{ combatants: any[] }>(dm, 'initiative.state');
+      dm.emit('initiative.request_state');
+      expect((await state).combatants).toHaveLength(0);
+
+      dm.disconnect();
+      player.disconnect();
+    });
+
+    it('still lets the DM roll for any token, including one not yet in the order', async () => {
+      const dm = await server.connectAndAuth(dmCookie, campaignId);
+
+      const rolled = waitForEvent<{ combatants: any[] }>(dm, 'initiative.state');
+      dm.emit('initiative.roll', { tokenId: DM_TOKEN_ID, mapId, expression: '1d20' });
+
+      const state = await rolled;
+      const entry = state.combatants.find((c) => c.tokenId === DM_TOKEN_ID);
+      expect(entry).toBeDefined();
+      expect(entry.initiative).toBeGreaterThanOrEqual(1);
+
+      dm.disconnect();
+    });
+  });
+
+  // The server decides what initiative means, from the combatant's sheet. Every
+  // roll used to be a flat 1d20 whatever the character or the system.
+  describe('deriving the roll from the character', () => {
+    /** Attach a character to the player's token so the server can find it. */
+    async function linkCharacter(gameSystem: string, data: unknown) {
+      const character = await prisma.character.create({
+        data: { userId: player1Id, campaignId, name: 'Initiative Test', gameSystem: gameSystem as any, data: data as any },
+      });
+      const map = await prisma.map.findUniqueOrThrow({ where: { id: mapId }, select: { tokens: true } });
+      const tokens = (map.tokens as any[]).map((t) =>
+        t.id === PLAYER_TOKEN_ID ? { ...t, characterId: character.id } : t
+      );
+      await prisma.map.update({ where: { id: mapId }, data: { tokens: tokens as any } });
+      return character.id;
+    }
+
+    const dnd5eSheet = (dexScore: number, initiativeBonus = 0) => ({
+      stats: {
+        strength: { score: 10, modifier: 0 },
+        dexterity: { score: dexScore, modifier: Math.floor((dexScore - 10) / 2) },
+        constitution: { score: 10, modifier: 0 },
+        intelligence: { score: 10, modifier: 0 },
+        wisdom: { score: 10, modifier: 0 },
+        charisma: { score: 10, modifier: 0 },
+      },
+      initiativeBonus,
+    });
+
+    it('uses a D&D 5e character\'s Dexterity modifier', async () => {
+      // Dexterity 20 is +5, so every result must land in [6, 25]. A flat d20
+      // could return 1..5, which this rejects.
+      await linkCharacter('DND_5E', dnd5eSheet(20));
+      const dm = await server.connectAndAuth(dmCookie, campaignId);
+
+      for (let i = 0; i < 12; i++) {
+        const rolled = waitForEvent<{ combatants: any[] }>(dm, 'initiative.state');
+        dm.emit('initiative.roll', { tokenId: PLAYER_TOKEN_ID, mapId });
+        const state = await rolled;
+        const entry = state.combatants.find((c) => c.tokenId === PLAYER_TOKEN_ID);
+        expect(entry.initiative).toBeGreaterThanOrEqual(6);
+        expect(entry.initiative).toBeLessThanOrEqual(25);
+      }
+
+      dm.disconnect();
+    });
+
+    it('adds the manual bonus for feats like Alert', async () => {
+      // Dexterity 14 (+2) with Alert (+5) is +7, so results land in [8, 27].
+      await linkCharacter('DND_5E', dnd5eSheet(14, 5));
+      const dm = await server.connectAndAuth(dmCookie, campaignId);
+
+      const logged = waitForEvent<{ expression: string }>(dm, 'dice.rolled');
+      const rolled = waitForEvent<{ combatants: any[] }>(dm, 'initiative.state');
+      dm.emit('initiative.roll', { tokenId: PLAYER_TOKEN_ID, mapId });
+
+      expect((await logged).expression).toBe('1d20+7');
+      const entry = (await rolled).combatants.find((c) => c.tokenId === PLAYER_TOKEN_ID);
+      expect(entry.initiative).toBeGreaterThanOrEqual(8);
+      expect(entry.initiative).toBeLessThanOrEqual(27);
+
+      dm.disconnect();
+    });
+
+    it('ignores a dice expression the client tries to supply', async () => {
+      // The server derives its own, so a client cannot roll d100 for initiative.
+      await linkCharacter('DND_5E', dnd5eSheet(14));
+      const dm = await server.connectAndAuth(dmCookie, campaignId);
+
+      const logged = waitForEvent<{ expression: string }>(dm, 'dice.rolled');
+      dm.emit('initiative.roll', { tokenId: PLAYER_TOKEN_ID, mapId, expression: '1d100+99' });
+
+      expect((await logged).expression).toBe('1d20+2');
+      dm.disconnect();
+    });
+
+    it('takes a Call of Cthulhu investigator\'s DEX without rolling', async () => {
+      // Call of Cthulhu ranks combatants in DEX order; there is no roll.
+      await linkCharacter('CALL_OF_CTHULHU_7E', {
+        characteristics: { DEX: { regular: 65, half: 32, fifth: 13 } },
+      });
+      const dm = await server.connectAndAuth(dmCookie, campaignId);
+
+      const rolled = waitForEvent<{ combatants: any[] }>(dm, 'initiative.state');
+      const noDice = expectNoEvent(dm, 'dice.rolled', 600);
+      dm.emit('initiative.roll', { tokenId: PLAYER_TOKEN_ID, mapId });
+
+      const entry = (await rolled).combatants.find((c) => c.tokenId === PLAYER_TOKEN_ID);
+      expect(entry.initiative).toBe(65);   // exactly DEX, every time
+      await noDice;                        // and nothing claimed dice were thrown
+
+      dm.disconnect();
+    });
+
+    it('uses a Pathfinder 2e character\'s Perception, or the skill they switch to', async () => {
+      await linkCharacter('PATHFINDER_2E', {
+        initiative: { usedStat: 'stealth', bonus: 0 },
+        perception: { bonus: 9 },
+        skills: { stealth: { bonus: 4 } },
+      });
+      const dm = await server.connectAndAuth(dmCookie, campaignId);
+
+      const logged = waitForEvent<{ expression: string }>(dm, 'dice.rolled');
+      dm.emit('initiative.roll', { tokenId: PLAYER_TOKEN_ID, mapId });
+      expect((await logged).expression).toBe('1d20+4');
+
+      dm.disconnect();
+    });
+
+    it('falls back to a plain d20 for a token with nothing to derive from', async () => {
+      const dm = await server.connectAndAuth(dmCookie, campaignId);
+
+      const logged = waitForEvent<{ expression: string }>(dm, 'dice.rolled');
+      dm.emit('initiative.roll', { tokenId: DM_TOKEN_ID, mapId });   // plain NPC, no stat block
+      expect((await logged).expression).toBe('1d20');
+
+      dm.disconnect();
+    });
+
+    // A player may control a token with no sheet and no stat block — a DM can
+    // assign them one — which is the one path where a client expression would
+    // otherwise be used. It must not be, or a player could name their own dice.
+    it('ignores a player\'s dice expression even when nothing can be derived', async () => {
+      const dm = await server.connectAndAuth(dmCookie, campaignId);
+      const player = await server.connectAndAuth(player1Cookie, campaignId);
+
+      const added = waitForEvent<{ combatants: any[] }>(player, 'initiative.state');
+      dm.emit('initiative.add', { tokenId: PLAYER_TOKEN_ID, mapId });
+      await added;
+
+      const logged = waitForEvent<{ expression: string }>(dm, 'dice.rolled');
+      const rolled = waitForEvent<{ combatants: any[] }>(player, 'initiative.state');
+      // The seeded Hero token has no characterId and no statBlock.
+      player.emit('initiative.roll', { tokenId: PLAYER_TOKEN_ID, mapId, expression: '1d20+9999' });
+
+      expect((await logged).expression).toBe('1d20');
+      const entry = (await rolled).combatants.find((c) => c.tokenId === PLAYER_TOKEN_ID);
+      expect(entry.initiative).toBeLessThanOrEqual(20);
+
+      dm.disconnect();
+      player.disconnect();
+    });
+
+    // The DM keeps the fallback: they can type any initiative value in by hand
+    // anyway, so there is nothing to gain by restricting them.
+    it('still honours the DM\'s own expression on the fallback path', async () => {
+      const dm = await server.connectAndAuth(dmCookie, campaignId);
+
+      const logged = waitForEvent<{ expression: string }>(dm, 'dice.rolled');
+      dm.emit('initiative.roll', { tokenId: DM_TOKEN_ID, mapId, expression: '1d20+3' });
+      expect((await logged).expression).toBe('1d20+3');
+
+      dm.disconnect();
+    });
+  });
+});
+
+// ── 6b. Map pings ────────────────────────────────────────────────────────────
+
+describe('map pings', () => {
+  it('a PLAYER can ping, and every member including the sender receives it', async () => {
+    const dm = await server.connectAndAuth(dmCookie, campaignId);
+    const player = await server.connectAndAuth(player1Cookie, campaignId);
+
+    const dmSees = waitForEvent<{ mapId: string; x: number; y: number; userId: string }>(dm, 'map.pinged');
+    const senderSees = waitForEvent<{ x: number; y: number }>(player, 'map.pinged');
+
+    player.emit('map.ping', { mapId, x: 123.5, y: 456.25 });
+
+    const received = await dmSees;
+    expect(received.mapId).toBe(mapId);
+    expect(received.x).toBeCloseTo(123.5);
+    expect(received.y).toBeCloseTo(456.25);
+    // Only the id travels — clients resolve the name and colour locally
+    expect(received.userId).toBeTruthy();
+    expect(received).not.toHaveProperty('name');
+
+    // io.to (not socket.to) — the sender sees their own ping
+    expect((await senderSees).x).toBeCloseTo(123.5);
+
+    dm.disconnect();
+    player.disconnect();
+  });
+
+  it('ignores a ping with non-finite coordinates', async () => {
+    const dm = await server.connectAndAuth(dmCookie, campaignId);
+    const player = await server.connectAndAuth(player1Cookie, campaignId);
+
+    let seen = false;
+    dm.on('map.pinged', () => { seen = true; });
+
+    player.emit('map.ping', { mapId, x: Number.NaN, y: 10 });
+    player.emit('map.ping', { mapId, x: 10, y: Number.POSITIVE_INFINITY });
+    player.emit('map.ping', { mapId, x: '5' as unknown as number, y: 10 });
+
+    // A valid ping afterwards proves the socket is still live and that the
+    // three above were dropped rather than merely slow.
+    const valid = waitForEvent<{ x: number }>(dm, 'map.pinged');
+    player.emit('map.ping', { mapId, x: 7, y: 8 });
+    expect((await valid).x).toBe(7);
+    expect(seen).toBe(true); // only from the valid one
+
+    dm.disconnect();
+    player.disconnect();
+  });
 });
 
 // ── 7. Chat ──────────────────────────────────────────────────────────────────
@@ -832,6 +1229,100 @@ describe('spirit layer filtering', () => {
     const denial = waitForEvent<{ message: string }>(player, 'error');
     player.emit('token.move.end', { tokenId: SPIRIT_TOKEN_ID, mapId, x: 19, y: 19 });
     expect((await denial).message).toBe('You do not have permission to move this token');
+    player.disconnect();
+  });
+});
+
+// ── 10. Hit dice ─────────────────────────────────────────────────────────────
+
+describe('hit dice', () => {
+  /** A 5e character with one hit dice pool, owned by player 1 and in the campaign. */
+  async function giveHitDice(remaining: number, total = '5d10') {
+    const character = await prisma.character.create({
+      data: {
+        userId: player1Id,
+        campaignId,
+        name: 'Hit Dice Test',
+        gameSystem: 'DND_5E' as any,
+        data: { hitDice: [{ class: 'fighter', total, remaining }] } as any,
+      },
+    });
+    // The handler looks the character up through the membership, the same way
+    // character.hp.update does.
+    await prisma.campaignMembership.updateMany({
+      where: { campaignId, userId: player1Id },
+      data: { characterIds: [character.id] },
+    });
+    return character.id;
+  }
+
+  it('spends one die and tells the campaign', async () => {
+    const characterId = await giveHitDice(3);
+    const player = await server.connectAndAuth(player1Cookie, campaignId);
+    const dm = await server.connectAndAuth(dmCookie, campaignId);
+
+    const dmSees = waitForEvent<{ characterId: string; character: { data: any } }>(dm, 'character.updated');
+    player.emit('character.hitdice.spend', { characterId, index: 0 });
+
+    const update = await dmSees;
+    expect(update.characterId).toBe(characterId);
+    expect(update.character.data.hitDice[0].remaining).toBe(2);
+
+    // Persisted, not just broadcast.
+    const row = await prisma.character.findUniqueOrThrow({ where: { id: characterId } });
+    expect((row.data as any).hitDice[0].remaining).toBe(2);
+
+    player.disconnect();
+    dm.disconnect();
+  });
+
+  it('refuses to spend a die that is not there', async () => {
+    const characterId = await giveHitDice(0);
+    const player = await server.connectAndAuth(player1Cookie, campaignId);
+
+    const denial = waitForEvent<{ message: string }>(player, 'error');
+    player.emit('character.hitdice.spend', { characterId, index: 0 });
+    expect((await denial).message).toMatch(/no hit dice remaining/i);
+
+    const row = await prisma.character.findUniqueOrThrow({ where: { id: characterId } });
+    expect((row.data as any).hitDice[0].remaining).toBe(0);
+
+    player.disconnect();
+  });
+
+  it('refuses a player spending another player’s hit die', async () => {
+    const characterId = await giveHitDice(3);
+    const other = await server.connectAndAuth(player2Cookie, campaignId);
+
+    const denial = waitForEvent<{ message: string }>(other, 'error');
+    other.emit('character.hitdice.spend', { characterId, index: 0 });
+    expect((await denial).message).toMatch(/permission/i);
+
+    const row = await prisma.character.findUniqueOrThrow({ where: { id: characterId } });
+    expect((row.data as any).hitDice[0].remaining).toBe(3);
+
+    other.disconnect();
+  });
+
+  it('lets the DM spend for a player, to cover an absent one', async () => {
+    const characterId = await giveHitDice(3);
+    const dm = await server.connectAndAuth(dmCookie, campaignId);
+
+    const spent = waitForEvent<{ character: { data: any } }>(dm, 'character.updated');
+    dm.emit('character.hitdice.spend', { characterId, index: 0 });
+    expect((await spent).character.data.hitDice[0].remaining).toBe(2);
+
+    dm.disconnect();
+  });
+
+  it('refuses an index that is not in the pool', async () => {
+    const characterId = await giveHitDice(3);
+    const player = await server.connectAndAuth(player1Cookie, campaignId);
+
+    const denial = waitForEvent<{ message: string }>(player, 'error');
+    player.emit('character.hitdice.spend', { characterId, index: 7 });
+    expect((await denial).message).toMatch(/hit dice/i);
+
     player.disconnect();
   });
 });

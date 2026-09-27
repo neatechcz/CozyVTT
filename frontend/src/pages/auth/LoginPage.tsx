@@ -10,6 +10,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { isValidEmail } from '@/utils/validation';
 import { api } from '@/services/api';
 import Button from '@/components/ui/Button';
+import { apiErrorStatus, apiErrorText } from '@/utils/errors';
 
 export default function LoginPage() {
   const { login, authenticated, mfaPending } = useAuth();
@@ -87,13 +88,14 @@ export default function LoginPage() {
 
       // If MFA is not required, user is logged in and will be redirected by auth check above
       // If MFA is required, mfaPending will be true and user will be redirected to MFA page
-    } catch (err: any) {
+    } catch (err) {
       // Handle specific error messages
-      if (err.response?.data?.error) {
-        setError(err.response.data.error);
-      } else if (err.response?.status === 401) {
+      const serverError = apiErrorText(err);
+      if (serverError) {
+        setError(serverError);
+      } else if (apiErrorStatus(err) === 401) {
         setError('Invalid email or password');
-      } else if (err.response?.status === 429) {
+      } else if (apiErrorStatus(err) === 429) {
         setError('Too many login attempts. Please try again later.');
       } else {
         setError('An error occurred during login. Please try again.');
@@ -108,7 +110,7 @@ export default function LoginPage() {
       <main id="main-content" className="glass-panel max-w-md w-full p-8 space-y-6">
         {/* Header */}
         <div className="text-center">
-          <h1 className="text-3xl font-bold text-moss-green font-heading">
+          <h1 className="text-3xl font-bold text-brand-ink font-heading">
             Welcome Back
           </h1>
           <p className="mt-2 text-sm text-warm-gray">
@@ -129,7 +131,7 @@ export default function LoginPage() {
           <div>
             <label
               htmlFor="email"
-              className="block text-sm font-medium text-moss-green mb-1"
+              className="block text-sm font-medium text-brand-ink mb-1"
             >
               Email
             </label>
@@ -160,7 +162,7 @@ export default function LoginPage() {
           <div>
             <label
               htmlFor="password"
-              className="block text-sm font-medium text-moss-green mb-1"
+              className="block text-sm font-medium text-brand-ink mb-1"
             >
               Password
             </label>
@@ -208,7 +210,7 @@ export default function LoginPage() {
 
             <Link
               to="/auth/forgot-password"
-              className="text-sm text-moss-green hover:text-moss-green/80 transition-colors"
+              className="text-sm text-brand-ink hover:text-brand-ink/80 transition-colors"
             >
               Forgot password?
             </Link>
@@ -257,7 +259,7 @@ export default function LoginPage() {
               Don't have an account?{' '}
               <Link
                 to="/auth/register"
-                className="text-moss-green hover:text-moss-green/80 font-medium transition-colors"
+                className="text-brand-ink hover:text-brand-ink/80 font-medium transition-colors"
               >
                 Create one
               </Link>

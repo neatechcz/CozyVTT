@@ -33,4 +33,5 @@ export interface CharacterSheetProps {
    * owned by `useLiveCharacterSync` that the editor reads and edits.
    */
   formStore?: import('../../utils/characterFormStore').CharacterFormStore | null;
+  onDirtyChange?: (dirty: boolean) => void;
 }
