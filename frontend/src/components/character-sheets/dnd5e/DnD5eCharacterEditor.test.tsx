@@ -65,6 +65,17 @@ function makeNonSpellcaster(): Character {
 }
 
 describe('DnD5eCharacterEditor', () => {
+  it('explains and saves the Inspiration checkbox', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<DnD5eCharacterEditor character={makeNonSpellcaster()} onSave={onSave} onCancel={vi.fn()} />);
+    expect(screen.getByLabelText('Inspirace (2014)')).not.toBeChecked();
+    expect(screen.getByText(/Před hodem.*výhodu/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText('Inspirace (2014)'));
+    fireEvent.click(screen.getByRole('button', { name: /save/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0]?.[0].inspiration).toBe(true);
+  });
+
   it('preserves uncategorized legacy proficiencies when one category is edited', async () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
     render(

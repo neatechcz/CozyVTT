@@ -314,14 +314,13 @@ export const DnD5eCharacterView: React.FC<DnD5eCharacterViewProps> = ({ characte
             {formatModifier(data.proficiencyBonus)}
           </div>
         </div>
-        {data.inspiration !== undefined && (
-          <div className="bg-yellow-50 border-2 border-yellow-200 rounded-lg p-4 text-center">
-            <div className="text-sm text-stone-600 mb-1">Inspiration</div>
-            <div className="text-2xl font-bold text-yellow-700">
-              {data.inspiration ? 'Yes' : 'No'}
-            </div>
+        <div className="bg-yellow-50 border-2 border-yellow-200 rounded-lg p-4 text-center">
+          <div className="text-sm text-stone-600 mb-1">Inspirace</div>
+          <div className="text-2xl font-bold text-yellow-700">
+            {data.inspiration ? 'K dispozici' : 'Vyčerpána'}
           </div>
-        )}
+          <p className="mt-2 text-xs text-stone-600">Před hodem utratíš Inspiraci a získáš výhodu na útok, záchranný hod nebo ověření vlastnosti.</p>
+        </div>
       </div>
     </div>
   );

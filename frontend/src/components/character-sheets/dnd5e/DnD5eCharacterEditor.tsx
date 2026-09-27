@@ -804,9 +804,12 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
             onChange={(e) => updateField('inspiration', e.target.checked)}
             className="w-5 h-5 text-red-700 border-stone-300 rounded focus:ring-2 focus:ring-red-500"
           />
-          <label htmlFor="inspiration" className="text-sm font-semibold text-stone-700">
-            Inspiration
-          </label>
+          <div>
+            <label htmlFor="inspiration" className="text-sm font-semibold text-stone-700">
+              Inspirace (2014)
+            </label>
+            <p className="text-xs text-stone-600">Před hodem utratíš Inspiraci a získáš výhodu na útok, záchranný hod nebo ověření vlastnosti.</p>
+          </div>
         </div>
       </div>
 
