@@ -11,10 +11,12 @@
  */
 
 import { randomUUID } from 'crypto';
+import { Prisma } from '@prisma/client';
 import { io as ioc } from 'socket.io-client';
 import request from 'supertest';
 import { prisma } from '../../config/database';
-import { clearState as clearCombatState } from '../initiativeState';
+import { saveCampaignCombatState, withCampaignRowLock } from '../../services/combatStatePersistence';
+import { readCombatState } from '../initiativeState';
 import {
   createWsTestServer,
   waitForEvent,
@@ -61,8 +63,8 @@ function seedTokens() {
     metadata: {} as Record<string, unknown>,
   };
   return [
-    { ...base, id: PLAYER_TOKEN_ID, name: 'Hero', position: { x: 5, y: 5 }, layer: 'token', controlledBy: player1Id },
-    { ...base, id: DM_TOKEN_ID, name: 'Goblin', position: { x: 10, y: 10 }, layer: 'token', controlledBy: null },
+    { ...base, id: PLAYER_TOKEN_ID, name: 'Hero', position: { x: 5, y: 5 }, layer: 'token', type: 'player', characterId: characterId || null, controlledBy: player1Id },
+    { ...base, id: DM_TOKEN_ID, name: 'Goblin', position: { x: 10, y: 10 }, layer: 'token', type: 'npc', statBlock: { speed: '30 ft.' }, controlledBy: null },
     { ...base, id: SPIRIT_TOKEN_ID, name: 'Ghost', position: { x: 15, y: 15 }, layer: 'spirit', controlledBy: null },
   ];
 }
@@ -73,6 +75,14 @@ function seedWalls() {
     { id: DOOR_CLOSED_ID, x1: 5, y1: 0, x2: 6, y2: 0, type: 'door-closed' },
     { id: DOOR_LOCKED_ID, x1: 6, y1: 0, x2: 7, y2: 0, type: 'door-locked' },
   ];
+}
+
+async function connectQuietly(wsServer: WsTestServer, cookie: string, testCampaignId: string) {
+  const client = await wsServer.connectClient(cookie);
+  const authenticated = waitForEvent(client, 'authenticated');
+  client.emit('authenticate', { campaignId: testCampaignId, quiet: true });
+  await authenticated;
+  return client;
 }
 
 /** Reset all mutable map state and combat state between tests. */
@@ -88,9 +98,8 @@ async function resetGameState() {
   });
   await prisma.campaign.update({
     where: { id: campaignId },
-    data: { spiritLayerEnabled: false, chatCooldownEnabled: false },
+    data: { spiritLayerEnabled: false, chatCooldownEnabled: false, combatState: Prisma.DbNull },
   });
-  clearCombatState(campaignId);
 }
 
 beforeAll(async () => {
@@ -117,6 +126,7 @@ beforeAll(async () => {
     data: {
       name: `WS Test Campaign ${runId}`,
       ownerId: dmId,
+      gameSystem: 'DND_5E',
       vibeSettings: {},
     },
   });
@@ -154,7 +164,7 @@ beforeAll(async () => {
     campaignId,
     name: 'Delegated Hero',
     gameSystem: 'DND_5E',
-    data: { hp: { current: 10, maximum: 10, temporary: 0 } },
+    data: { hp: { current: 10, maximum: 10, temporary: 0 }, speed: 30, conditions: [], survival: { exhaustionLevel: 0 } },
   } });
   characterId = character.id;
   await prisma.campaignMembership.updateMany({
@@ -186,7 +196,7 @@ beforeEach(async () => {
   await resetGameState();
   await prisma.character.update({ where: { id: characterId }, data: {
     name: 'Delegated Hero',
-    data: { hp: { current: 10, maximum: 10, temporary: 0 } },
+    data: { hp: { current: 10, maximum: 10, temporary: 0 }, speed: 30, conditions: [], survival: { exhaustionLevel: 0 } },
   } });
   await prisma.campaignMembership.updateMany({
     where: { campaignId, role: 'PLAYER' }, data: { characterIds: [] },
@@ -402,11 +412,14 @@ describe('token movement', () => {
     const player = await server.connectAndAuth(player1Cookie, campaignId);
     const dm = await server.connectAndAuth(dmCookie, campaignId);
 
-    const denial = waitForEvent<{ message: string }>(player, 'error');
+    const denial = waitForEvent<{ error: { code: string; message: string } }>(player, 'token.move.rejected');
     const silence = expectNoEvent(dm, 'token.moved');
     player.emit('token.move.end', { tokenId: DM_TOKEN_ID, mapId, x: 12, y: 12 });
 
-    expect((await denial).message).toBe('You do not have permission to move this token');
+    expect((await denial).error).toEqual({
+      code: 'PERMISSION_DENIED',
+      message: 'You do not have permission to move this token.',
+    });
     await silence;
 
     const map = await prisma.map.findUniqueOrThrow({ where: { id: mapId }, select: { tokens: true } });
@@ -419,9 +432,12 @@ describe('token movement', () => {
 
   it('rejects out-of-bounds positions', async () => {
     const player = await server.connectAndAuth(player1Cookie, campaignId);
-    const denial = waitForEvent<{ message: string }>(player, 'error');
+    const denial = waitForEvent<{ error: { code: string; message: string } }>(player, 'token.move.rejected');
     player.emit('token.move.end', { tokenId: PLAYER_TOKEN_ID, mapId, x: 999, y: 5 });
-    expect((await denial).message).toBe('Token position out of bounds');
+    expect((await denial).error).toEqual({
+      code: 'OUT_OF_BOUNDS',
+      message: expect.stringContaining('Token footprint must remain within map bounds'),
+    });
     player.disconnect();
   });
 });
@@ -638,6 +654,130 @@ describe('initiative', () => {
     dm.disconnect();
     player.disconnect();
   });
+
+  it('persists turn identity and Dash allowance, restores state on a fresh server, and resets the ledger on next/end', async () => {
+    const dm = await connectQuietly(server, dmCookie, campaignId);
+    const player = await connectQuietly(server, player1Cookie, campaignId);
+    let restartedServer: WsTestServer | null = null;
+    try {
+      const added = waitForEvent<{ combatants: any[] }>(dm, 'initiative.state');
+      const playerAdded = waitForEvent<{ combatants: any[] }>(player, 'initiative.state');
+      dm.emit('initiative.add', { tokenId: PLAYER_TOKEN_ID, mapId });
+      await Promise.all([added, playerAdded]);
+
+      const started = waitForEvent<any>(dm, 'initiative.state');
+      const playerStarted = waitForEvent<any>(player, 'initiative.state');
+      dm.emit('initiative.start');
+      const startState = await started;
+      expect(await playerStarted).toEqual(startState);
+      expect(startState).toMatchObject({
+        active: true,
+        round: 1,
+        currentTokenId: PLAYER_TOKEN_ID,
+        mapId,
+        movement: {
+          tokenId: PLAYER_TOKEN_ID,
+          speedFeet: 30,
+          spentFeet: 0,
+          dashBonusFeet: 0,
+          dashUsed: false,
+          remainingMovementFeet: 30,
+        },
+      });
+      expect(startState.combatId).toEqual(expect.any(String));
+      expect(startState.turnId).toEqual(expect.any(String));
+
+      const dashed = waitForEvent<any>(player, 'initiative.state');
+      player.emit('initiative.dash', { tokenId: PLAYER_TOKEN_ID });
+      const dashState = await dashed;
+      expect(dashState.movement).toMatchObject({
+        speedFeet: 30,
+        spentFeet: 0,
+        dashBonusFeet: 30,
+        dashUsed: true,
+        remainingMovementFeet: 60,
+      });
+
+      const secondDash = waitForEvent<{ message: string }>(player, 'error');
+      player.emit('initiative.dash', { tokenId: PLAYER_TOKEN_ID });
+      expect((await secondDash).message).toContain('already been used');
+
+      // A committed movement request updates this same ledger while holding the Campaign lock.
+      await withCampaignRowLock(prisma, campaignId, async (tx, campaign) => {
+        const state = readCombatState(campaign.combatState);
+        state.movement = { ...state.movement!, spentFeet: 10, remainingMovementFeet: 50 };
+        await saveCampaignCombatState(tx, campaignId, state);
+      });
+
+      const nextTurn = waitForEvent<any>(dm, 'initiative.state');
+      dm.emit('initiative.next');
+      const nextState = await nextTurn;
+      expect(nextState.round).toBe(2);
+      expect(nextState.currentTokenId).toBe(PLAYER_TOKEN_ID);
+      expect(nextState.turnId).not.toBe(startState.turnId);
+      expect(nextState.combatId).toBe(startState.combatId);
+      expect(nextState.movement).toMatchObject({
+        tokenId: PLAYER_TOKEN_ID,
+        speedFeet: 30,
+        spentFeet: 0,
+        dashBonusFeet: 0,
+        dashUsed: false,
+        remainingMovementFeet: 30,
+      });
+
+      const addedNpc = waitForEvent<any>(dm, 'initiative.state');
+      dm.emit('initiative.add', { tokenId: DM_TOKEN_ID, mapId });
+      expect((await addedNpc).combatants).toHaveLength(2);
+
+      const removedActor = waitForEvent<any>(dm, 'initiative.state');
+      dm.emit('initiative.remove', { tokenId: PLAYER_TOKEN_ID });
+      const removeState = await removedActor;
+      expect(removeState.active).toBe(true);
+      expect(removeState.round).toBe(3);
+      expect(removeState.currentTokenId).toBe(DM_TOKEN_ID);
+      expect(removeState.turnId).not.toBe(nextState.turnId);
+      expect(removeState.movement).toMatchObject({
+        tokenId: DM_TOKEN_ID,
+        speedFeet: 30,
+        spentFeet: 0,
+        dashBonusFeet: 0,
+        dashUsed: false,
+        remainingMovementFeet: 30,
+      });
+
+      const databaseState = await prisma.campaign.findUniqueOrThrow({
+        where: { id: campaignId }, select: { combatState: true },
+      });
+      expect((databaseState.combatState as any).movement).not.toHaveProperty('remainingMovementFeet');
+
+      // A separately initialized Socket.IO server reads the complete persisted state.
+      restartedServer = await createWsTestServer();
+      const newCookie = await restartedServer.loginAs(dmId);
+      const restoredClient = await connectQuietly(restartedServer, newCookie, campaignId);
+      const restored = waitForEvent<any>(restoredClient, 'initiative.state');
+      restoredClient.emit('initiative.request_state');
+      expect(await restored).toEqual(removeState);
+
+      const ended = waitForEvent<any>(dm, 'initiative.state');
+      dm.emit('initiative.end');
+      expect(await ended).toMatchObject({
+        active: false,
+        round: 0,
+        currentTokenId: null,
+        combatants: [],
+        combatId: null,
+        turnId: null,
+        mapId: null,
+        movement: null,
+      });
+      const cleared = await prisma.campaign.findUniqueOrThrow({ where: { id: campaignId }, select: { combatState: true } });
+      expect(cleared.combatState).toBeNull();
+    } finally {
+      if (restartedServer) await restartedServer.close();
+      player.disconnect();
+      dm.disconnect();
+    }
+  });
 });
 
 // ── 7. Chat ──────────────────────────────────────────────────────────────────
@@ -829,9 +969,12 @@ describe('spirit layer filtering', () => {
     await prisma.campaign.update({ where: { id: campaignId }, data: { spiritLayerEnabled: true } });
 
     const player = await server.connectAndAuth(player1Cookie, campaignId);
-    const denial = waitForEvent<{ message: string }>(player, 'error');
+    const denial = waitForEvent<{ error: { code: string; message: string } }>(player, 'token.move.rejected');
     player.emit('token.move.end', { tokenId: SPIRIT_TOKEN_ID, mapId, x: 19, y: 19 });
-    expect((await denial).message).toBe('You do not have permission to move this token');
+    expect((await denial).error).toEqual({
+      code: 'PERMISSION_DENIED',
+      message: 'You do not have permission to move this token.',
+    });
     player.disconnect();
   });
 });

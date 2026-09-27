@@ -10,6 +10,101 @@ export interface Point {
 }
 
 /**
+ * Collects grid origins observed while dragging a token. The server accepts
+ * an explicit route only when every step is adjacent; a sparse mouse sample
+ * therefore switches the draft to shortest-path mode by returning undefined.
+ */
+export class MovementRouteCollector {
+  private last: Point;
+  private readonly steps: Point[] = [];
+  private valid = true;
+
+  constructor(start: Point, private readonly maxSteps = 128) {
+    this.last = { ...start };
+  }
+
+  record(position: Point): void {
+    if (position.x === this.last.x && position.y === this.last.y) return;
+
+    const dx = Math.abs(position.x - this.last.x);
+    const dy = Math.abs(position.y - this.last.y);
+    if (Math.max(dx, dy) !== 1 || this.steps.length >= this.maxSteps) {
+      this.valid = false;
+    } else if (this.valid) {
+      this.steps.push({ ...position });
+    }
+
+    this.last = { ...position };
+  }
+
+  getRoute(): Point[] | undefined {
+    return this.valid ? this.steps.map((step) => ({ ...step })) : undefined;
+  }
+}
+
+/** One picked-up token's drag state, kept in grid coordinates until commit. */
+export class TokenMovementDraft {
+  readonly pickupOffset: Point;
+  private readonly route: MovementRouteCollector;
+  private position: Point;
+
+  constructor(
+    readonly tokenId: string,
+    private readonly origin: Point,
+    pickupCell: Point,
+  ) {
+    this.origin = { ...origin };
+    this.position = { ...origin };
+    this.pickupOffset = {
+      x: pickupCell.x - origin.x,
+      y: pickupCell.y - origin.y,
+    };
+    this.route = new MovementRouteCollector(origin);
+  }
+
+  get destination(): Point {
+    return { ...this.position };
+  }
+
+  get hasMoved(): boolean {
+    return this.position.x !== this.origin.x || this.position.y !== this.origin.y;
+  }
+
+  preview(
+    pointerCell: Point,
+    bounds: { width: number; height: number },
+    size: { width: number; height: number } = { width: 1, height: 1 },
+  ): Point {
+    const next = {
+      x: Math.max(0, Math.min(Math.floor(pointerCell.x - this.pickupOffset.x), bounds.width - size.width)),
+      y: Math.max(0, Math.min(Math.floor(pointerCell.y - this.pickupOffset.y), bounds.height - size.height)),
+    };
+    this.route.record(next);
+    this.position = next;
+    return this.destination;
+  }
+
+  toMoveEndEvent(requestId: string, mapId: string): {
+    requestId: string;
+    tokenId: string;
+    mapId: string;
+    x: number;
+    y: number;
+    route?: Point[];
+  } {
+    const route = this.route.getRoute();
+    return {
+      requestId,
+      tokenId: this.tokenId,
+      mapId,
+      x: this.position.x,
+      y: this.position.y,
+      ...(route && route.length > 0 ? { route } : {}),
+    };
+  }
+}
+
+/**
  * Calculate grid distance in feet between two positions.
  * flat: Chebyshev — every diagonal costs the same as a straight move (D&D 5e)
  * alternating: every second diagonal costs 10 ft instead of 5 ft (PF2e)

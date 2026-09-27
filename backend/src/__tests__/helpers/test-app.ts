@@ -17,6 +17,7 @@ import userRoutes from '../../routes/users';
 export function createTestApp(): express.Express {
   const app = express();
 
+  app.put('/api/campaigns/:campaignId/maps/:id/difficult-terrain', express.json({ limit: '8mb' }));
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
 

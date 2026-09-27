@@ -25,6 +25,36 @@ jest.mock('../../config/database', () => ({
   },
 }));
 
+jest.mock('../../services/combatStatePersistence', () => {
+  const db = jest.requireMock('../../config/database').prisma;
+  return {
+    withCampaignMapRowLock: async (_prisma: unknown, campaignId: string, mapId: string, run: Function) => {
+      const map = await db.map.findUnique({ where: { id: mapId } });
+      if (!map || map.campaignId !== campaignId) return null;
+      const campaign = {
+        ...(await db.campaign.findUnique({ where: { id: campaignId } })),
+        id: campaignId,
+        gameSystem: 'DND_5E',
+        combatState: null,
+      };
+      const tx = {
+        campaignMembership: {
+          findUnique: async ({ where }: any) => {
+            const memberships = await db.campaignMembership.findMany();
+            return memberships.find((member: any) =>
+              member.userId === where.userId_campaignId.userId
+            ) ?? null;
+          },
+        },
+        map: { update: db.map.update },
+      };
+      return run(tx, campaign, map);
+    },
+    loadCampaignCombatState: jest.fn(),
+    saveCampaignCombatState: jest.fn(),
+  };
+});
+
 jest.mock('../../utils/logger', () => ({
   __esModule: true,
   default: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
@@ -147,7 +177,9 @@ function received(s: FakeSocket) {
 }
 
 function receivedTokenIds(s: FakeSocket): string[] {
-  return s.emit.mock.calls.map(([, payload]) => payload?.tokenId ?? payload?.token?.id);
+  return s.emit.mock.calls
+    .filter(([event]) => event === 'token.move.start' || event === 'token.moved' || event === 'token.move.preview' || event === 'token:appeared' || event === 'token:disappeared')
+    .map(([, payload]) => payload?.tokenId ?? payload?.token?.id);
 }
 
 async function flush() {
@@ -160,7 +192,11 @@ function useMap(lightingEnabled: boolean) {
 
 async function moveEnd(sender: FakeSocket, tokenId: string, x: number, y: number) {
   registerTokenHandlers(io as any, sender as any);
-  await sender.handlers['token.move.end']({ tokenId, mapId: MAP_ID, x, y });
+  await sender.handlers['token.move.end']({ requestId: 'test-request', tokenId, mapId: MAP_ID, x, y });
+}
+
+function committedMove(tokenId: string, x: number, y: number, movedBy: string) {
+  return ['token.moved', expect.objectContaining({ tokenId, mapId: MAP_ID, x, y, movedBy })];
 }
 
 async function moveStart(sender: FakeSocket, tokenId: string) {
@@ -194,17 +230,22 @@ describe('token.move.end without lighting', () => {
     useMap(false);
     await moveEnd(alice, 'pc-alice', 2, 6);
 
-    const moved = ['token.moved', { tokenId: 'pc-alice', mapId: MAP_ID, x: 2, y: 6, movedBy: 'alice' }];
-    expect(received(dm)).toEqual([moved]);
-    expect(received(alice)).toEqual([moved]);
-    expect(received(bob)).toEqual([moved]);
+    expect(received(dm)).toEqual([committedMove('pc-alice', 2, 6, 'alice')]);
+    expect(received(alice)).toEqual(expect.arrayContaining([
+      ['token.move.accepted', expect.objectContaining({ requestId: 'test-request', movement: null })],
+      committedMove('pc-alice', 2, 6, 'alice'),
+    ]));
+    expect(received(bob)).toEqual([committedMove('pc-alice', 2, 6, 'alice')]);
   });
 
   it('sends a hidden token\'s move only to DMs', async () => {
     useMap(false);
     await moveEnd(dm, 'lurker', 4, 4);
 
-    expect(received(dm)).toEqual([['token.moved', { tokenId: 'lurker', mapId: MAP_ID, x: 4, y: 4, movedBy: 'dm-user' }]]);
+    expect(received(dm)).toEqual(expect.arrayContaining([
+      ['token.move.accepted', expect.objectContaining({ requestId: 'test-request', movement: null })],
+      committedMove('lurker', 4, 4, 'dm-user'),
+    ]));
     expect(alice.emit).not.toHaveBeenCalled();
     expect(bob.emit).not.toHaveBeenCalled();
   });
@@ -233,12 +274,12 @@ describe('token.move.end on a lighting map', () => {
     // Alice's own token: position + full (filtered) data.
     expect(received(alice)).toEqual(
       expect.arrayContaining([
-        ['token.moved', { tokenId: 'pc-alice', mapId: MAP_ID, x: 2, y: 6, movedBy: 'alice' }],
+        committedMove('pc-alice', 2, 6, 'alice'),
         ['token:appeared', { mapId: MAP_ID, token: { ...aliceToken, position: { x: 2, y: 6 } } }],
       ])
     );
     // DM: just the move.
-    expect(received(dm)).toEqual([['token.moved', { tokenId: 'pc-alice', mapId: MAP_ID, x: 2, y: 6, movedBy: 'alice' }]]);
+    expect(received(dm)).toEqual([committedMove('pc-alice', 2, 6, 'alice')]);
   });
 
   it('re-syncs only in-sight, role-visible tokens when the player\'s own token crosses the wall', async () => {
@@ -248,7 +289,7 @@ describe('token.move.end on a lighting map', () => {
     const { notes: _notes, ...goblinView } = goblin;
     expect(received(alice)).toEqual(
       expect.arrayContaining([
-        ['token.moved', { tokenId: 'pc-alice', mapId: MAP_ID, x: 7, y: 4, movedBy: 'alice' }],
+        committedMove('pc-alice', 7, 4, 'alice'),
         ['token:appeared', { mapId: MAP_ID, token: goblinView }],
         ['token:disappeared', { tokenId: 'orc', mapId: MAP_ID }],
         ['token:disappeared', { tokenId: 'pc-bob', mapId: MAP_ID }],
@@ -287,7 +328,7 @@ describe('token.move.end on a lighting map', () => {
 
     const { notes: _notes, ...goblinView } = goblin;
     expect(received(alice)).toEqual([
-      ['token.moved', { tokenId: 'goblin', mapId: MAP_ID, x: 4, y: 5, movedBy: 'dm-user' }],
+      committedMove('goblin', 4, 5, 'dm-user'),
       ['token:appeared', { mapId: MAP_ID, token: { ...goblinView, position: { x: 4, y: 5 } } }],
     ]);
   });
@@ -319,7 +360,7 @@ describe('token.move.start / token.move', () => {
     for (const player of [alice, bob]) {
       expect(received(player)).toEqual([
         ['token.move.start', { tokenId: 'orc', mapId: MAP_ID, movedBy: 'dm-user' }],
-        ['token.moved', { tokenId: 'orc', mapId: MAP_ID, x: 4, y: 6, movedBy: 'dm-user' }],
+        ['token.move.preview', expect.objectContaining({ tokenId: 'orc', mapId: MAP_ID, x: 4, y: 6, movedBy: 'dm-user', preview: true })],
       ]);
     }
     expect(dm.emit).not.toHaveBeenCalled();
@@ -350,7 +391,9 @@ describe('drag frame cost and ordering', () => {
   }
 
   function movedXs(s: FakeSocket): number[] {
-    return s.emit.mock.calls.filter(([event]) => event === 'token.moved').map(([, p]) => p.x);
+    return s.emit.mock.calls
+      .filter(([event]) => event === 'token.move.preview' || event === 'token.moved')
+      .map(([, p]) => p.x);
   }
 
   it('reads the map once per drag: identical and further frames reuse it', async () => {

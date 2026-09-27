@@ -11,8 +11,17 @@
  */
 
 import { prisma } from '../config/database';
+import { lockCampaignMapRows, MapRowNotFoundError, withCampaignRowLock } from './combatStatePersistence';
+import { readCombatState } from '../websocket/initiativeState';
 import logger from '../utils/logger';
 import { bumpMapVersion } from '../websocket/mapVersion';
+
+export class ActiveCombatRestoreError extends Error {
+  constructor() {
+    super('Cannot restore a saved session during active combat');
+    this.name = 'ActiveCombatRestoreError';
+  }
+}
 
 /**
  * Game State Interface
@@ -90,49 +99,42 @@ export async function restoreGameState(
   state: GameState
 ): Promise<void> {
   try {
-    // Validate campaign exists
-    const campaign = await prisma.campaign.findUnique({
-      where: { id: campaignId },
-    });
+    let mapRestored = false;
+    await withCampaignRowLock(prisma, campaignId, async (tx, campaign) => {
+      if (readCombatState(campaign.combatState).active) {
+        throw new ActiveCombatRestoreError();
+      }
 
-    if (!campaign) {
-      throw new Error('Campaign not found');
-    }
-
-    // Update campaign settings
-    await prisma.campaign.update({
-      where: { id: campaignId },
-      data: {
-        currentMapId: state.mapId,
-        spiritLayerEnabled: state.spiritLayerVisible,
-        currentVibe: state.currentVibe,
-      },
-    });
-
-    // If there's a current map, restore tokens and annotations
-    if (state.mapId) {
-      // Verify map exists and belongs to campaign
-      const map = await prisma.map.findFirst({
-        where: {
-          id: state.mapId,
-          campaignId,
+      await tx.campaign.update({
+        where: { id: campaignId },
+        data: {
+          currentMapId: state.mapId,
+          spiritLayerEnabled: state.spiritLayerVisible,
+          currentVibe: state.currentVibe,
         },
       });
 
-      if (map) {
-        await prisma.map.update({
-          where: { id: state.mapId },
+      if (!state.mapId) return;
+      try {
+        const { map } = await lockCampaignMapRows(tx, campaignId, state.mapId);
+        await tx.map.update({
+          where: { id: map.id },
           data: {
             tokens: state.tokens as any,
             annotations: state.annotations as any,
           },
         });
-        bumpMapVersion(state.mapId); // cached drag snapshots of this map are stale now
-
-        logger.info(`✅ Restored game state for campaign ${campaignId} (map: ${state.mapId})`);
-      } else {
-        logger.warn(`⚠️ Map ${state.mapId} not found or doesn't belong to campaign ${campaignId}`);
+        mapRestored = true;
+      } catch (error) {
+        if (!(error instanceof MapRowNotFoundError)) throw error;
       }
+    });
+
+    if (state.mapId && mapRestored) {
+      bumpMapVersion(state.mapId); // cached drag snapshots of this map are stale now
+      logger.info(`✅ Restored game state for campaign ${campaignId} (map: ${state.mapId})`);
+    } else if (state.mapId) {
+      logger.warn(`⚠️ Map ${state.mapId} not found or doesn't belong to campaign ${campaignId}`);
     }
 
     logger.info(`✅ Restored game state for campaign ${campaignId}`);

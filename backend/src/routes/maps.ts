@@ -6,13 +6,17 @@ import multer from 'multer';
 import { AuthenticatedRequest } from '../middleware/rbac';
 import { campaignMember, campaignDM } from '../middleware/compose';
 import { prisma } from '../config/database';
-import { filterMapData, getOwnCharacterIdsBatch, getSpiritVisibility } from '../utils/spirit-layer';
-import { broadcastMapViewChange, broadcastToCampaign, broadcastTokenEvent } from '../websocket/utils';
+import { filterMapData, getOwnCharacterIdsBatch, getSpiritVisibility, getTokenViewersFor } from '../utils/spirit-layer';
+import { broadcastMapViewChange, broadcastToCampaign, broadcastTokenEvent, getSocketInstance } from '../websocket/utils';
 import { normalizeAssetUrl } from '../utils/asset-urls';
 import { WallSegmentSchema, WallSegmentsArraySchema, FogOperationSchema, LightSourceSchema, LightSourcesArraySchema, LightSourceUpdateSchema } from '../validators/walls';
 import type { WallSegment, FogState, LightSource } from '../types/walls';
 import { parseUVTT } from '../services/uvttParser';
 import { buildUVTT } from '../services/uvttExporter';
+import { CampaignRowNotFoundError, MapRowNotFoundError, withCampaignMapRowLock } from '../services/combatStatePersistence';
+import { readCombatState } from '../websocket/initiativeState';
+import type { AuthenticatedSocket } from '../websocket/auth';
+import { bumpMapVersion } from '../websocket/mapVersion';
 import { getFilePath, ensureDirectory } from '../utils/fileUtils';
 import sharp from 'sharp';
 import logger from '../utils/logger';
@@ -62,6 +66,47 @@ interface Token {
 const VALID_TOKEN_TYPES = ['player', 'npc', 'object'];
 const VALID_TOKEN_DISPOSITIONS = ['friendly', 'neutral', 'hostile'];
 const VALID_DISPLAY_MODES = ['pog', 'top-down', 'full-art'];
+
+function isGridPosition(value: unknown): value is { x: number; y: number } {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const position = value as Record<string, unknown>;
+  return typeof position.x === 'number' && Number.isSafeInteger(position.x) &&
+    typeof position.y === 'number' && Number.isSafeInteger(position.y);
+}
+
+function isTokenSize(value: unknown): value is { width: number; height: number } {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const size = value as Record<string, unknown>;
+  return typeof size.width === 'number' && Number.isSafeInteger(size.width) &&
+    typeof size.height === 'number' && Number.isSafeInteger(size.height) &&
+    (size.width as number) > 0 && (size.height as number) > 0;
+}
+
+function footprintFitsMap(position: { x: number; y: number }, size: { width: number; height: number }, map: { width: number; height: number }): boolean {
+  return position.x >= 0 && position.y >= 0 &&
+    position.x + size.width <= map.width && position.y + size.height <= map.height;
+}
+
+/** Broadcast an updated full map through the same per-viewer filtering as map.change. */
+async function broadcastMapSnapshot(campaignId: string, map: any): Promise<void> {
+  const io = getSocketInstance();
+  const sockets = await io.in(campaignId).fetchSockets();
+  const viewers = await getTokenViewersFor(
+    campaignId,
+    sockets.map((socket) => socket as unknown as AuthenticatedSocket)
+  );
+
+  for (const { socket, viewer } of viewers) {
+    const filteredMap = filterMapData(
+      { ...map, tokens: map.tokens as any, annotations: map.annotations as any },
+      viewer.role,
+      viewer.spiritVisible,
+      viewer.userId,
+      viewer.characterIds
+    );
+    socket.emit('map.changed', { mapId: map.id, mapData: filteredMap, spiritVisible: viewer.spiritVisible });
+  }
+}
 
 /**
  * Map CRUD Routes
@@ -456,6 +501,68 @@ router.get('/:id', campaignMember, async (req: AuthenticatedRequest, res: Respon
 });
 
 /**
+ * PUT /api/campaigns/:campaignId/maps/:id/difficult-terrain
+ * Replace the map's difficult terrain cells. Requires: DM role.
+ */
+router.put('/:id/difficult-terrain', campaignDM, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { campaignId, id: mapId } = req.params;
+    const input = req.body?.cells;
+    if (!Array.isArray(input)) {
+      return res.status(400).json({ error: 'Validation Error', message: 'cells must be an array of grid coordinates' });
+    }
+    if (input.length > 100_000) {
+      return res.status(400).json({ error: 'Validation Error', message: 'cells cannot contain more than 100000 entries' });
+    }
+
+    const result = await withCampaignMapRowLock(prisma, campaignId, mapId, async (tx, _campaign, map) => {
+      const uniqueCells: Array<{ x: number; y: number }> = [];
+      const seenCells = new Set<string>();
+      for (const cell of input) {
+        if (!isGridPosition(cell)) {
+          return {
+            status: 400 as const,
+            body: { error: 'Validation Error', message: 'Each cell must have integer x and y values' },
+          };
+        }
+        if (cell.x < 0 || cell.y < 0 || cell.x >= map.width || cell.y >= map.height) {
+          return {
+            status: 400 as const,
+            body: { error: 'Validation Error', message: 'Each cell must be within map bounds' },
+          };
+        }
+        const key = `${cell.x},${cell.y}`;
+        if (!seenCells.has(key)) {
+          seenCells.add(key);
+          uniqueCells.push({ x: cell.x, y: cell.y });
+        }
+      }
+
+      const updatedMap = await tx.map.update({
+        where: { id: mapId },
+        data: { difficultTerrain: uniqueCells as any },
+      });
+      return { status: 200 as const, body: { difficultTerrain: uniqueCells }, map: updatedMap };
+    });
+
+    if (result.status !== 200) return res.status(result.status).json(result.body);
+    bumpMapVersion(mapId);
+    try {
+      await broadcastMapSnapshot(campaignId, result.map);
+    } catch (error) {
+      logger.warn('Failed to broadcast difficult terrain map change', { err: error, campaignId, mapId });
+    }
+    return res.status(200).json(result.body);
+  } catch (error) {
+    if (error instanceof CampaignRowNotFoundError || error instanceof MapRowNotFoundError) {
+      return res.status(404).json({ error: 'Not Found', message: 'Map not found in this campaign' });
+    }
+    logger.error('Error updating difficult terrain', { err: error });
+    return res.status(500).json({ error: 'Internal Server Error', message: 'Failed to update difficult terrain' });
+  }
+});
+
+/**
  * PUT /api/campaigns/:campaignId/maps/:id
  * Update a map
  * Requires: DM role
@@ -629,48 +736,32 @@ router.put('/:id', campaignDM, async (req: AuthenticatedRequest, res: Response) 
 router.delete('/:id', campaignDM, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { campaignId, id } = req.params;
+    const result = await withCampaignMapRowLock(prisma, campaignId, id, async (tx, campaign, map) => {
+      const combatState = readCombatState(campaign.combatState);
+      if (combatState.active && combatState.mapId === id) {
+        return {
+          status: 409 as const,
+          body: { error: 'Conflict', message: 'Cannot delete the map used by active combat' },
+        };
+      }
+      if (campaign.currentMapId === id) {
+        return {
+          status: 400 as const,
+          body: {
+            error: 'Validation Error',
+            message: 'Cannot delete the current map. Set a different map as current first.',
+          },
+        };
+      }
 
-    // Fetch the map to verify it exists and belongs to campaign
-    const map = await prisma.map.findUnique({
-      where: { id },
+      await tx.map.delete({ where: { id: map.id } });
+      return { status: 200 as const, body: { message: 'Map deleted successfully' } };
     });
-
-    if (!map) {
-      return res.status(404).json({
-        error: 'Not Found',
-        message: 'Map not found',
-      });
-    }
-
-    if (map.campaignId !== campaignId) {
-      return res.status(404).json({
-        error: 'Not Found',
-        message: 'Map not found in this campaign',
-      });
-    }
-
-    // Check if this is the current map
-    const campaign = await prisma.campaign.findUnique({
-      where: { id: campaignId },
-      select: { currentMapId: true },
-    });
-
-    if (campaign?.currentMapId === id) {
-      return res.status(400).json({
-        error: 'Validation Error',
-        message: 'Cannot delete the current map. Set a different map as current first.',
-      });
-    }
-
-    // Delete the map
-    await prisma.map.delete({
-      where: { id },
-    });
-
-    return res.status(200).json({
-      message: 'Map deleted successfully',
-    });
+    return res.status(result.status).json(result.body);
   } catch (error) {
+    if (error instanceof CampaignRowNotFoundError || error instanceof MapRowNotFoundError) {
+      return res.status(404).json({ error: 'Not Found', message: 'Map not found in this campaign' });
+    }
     logger.error('Error deleting map', { err: error });
     return res.status(500).json({
       error: 'Internal Server Error',
@@ -687,46 +778,36 @@ router.delete('/:id', campaignDM, async (req: AuthenticatedRequest, res: Respons
 router.put('/:id/set-current', campaignDM, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { campaignId, id } = req.params;
+    const result = await withCampaignMapRowLock(prisma, campaignId, id, async (tx, campaign, map) => {
+      const combatState = readCombatState(campaign.combatState);
+      if (combatState.active && combatState.mapId !== map.id) {
+        return {
+          status: 409 as const,
+          body: { error: 'Conflict', message: 'Cannot switch maps away from the map used by active combat' },
+        };
+      }
 
-    // Verify the map exists and belongs to this campaign
-    const map = await prisma.map.findUnique({
-      where: { id },
-    });
-
-    if (!map) {
-      return res.status(404).json({
-        error: 'Not Found',
-        message: 'Map not found',
-      });
-    }
-
-    if (map.campaignId !== campaignId) {
-      return res.status(404).json({
-        error: 'Not Found',
-        message: 'Map not found in this campaign',
-      });
-    }
-
-    // Update the campaign's currentMapId
-    const updatedCampaign = await prisma.campaign.update({
-      where: { id: campaignId },
-      data: { currentMapId: id },
-      include: {
-        currentMap: {
-          select: {
-            id: true,
-            name: true,
-            imageUrl: true,
+      const updatedCampaign = await tx.campaign.update({
+        where: { id: campaignId },
+        data: { currentMapId: map.id },
+        include: {
+          currentMap: {
+            select: {
+              id: true,
+              name: true,
+              imageUrl: true,
+            },
           },
         },
-      },
+      });
+      return { status: 200 as const, body: { message: 'Current map updated successfully', campaign: updatedCampaign } };
     });
 
-    return res.status(200).json({
-      message: 'Current map updated successfully',
-      campaign: updatedCampaign,
-    });
+    return res.status(result.status).json(result.body);
   } catch (error) {
+    if (error instanceof CampaignRowNotFoundError || error instanceof MapRowNotFoundError) {
+      return res.status(404).json({ error: 'Not Found', message: 'Map not found in this campaign' });
+    }
     logger.error('Error setting current map', { err: error });
     return res.status(500).json({
       error: 'Internal Server Error',
@@ -764,137 +845,98 @@ router.post('/:id/tokens', campaignDM, async (req: AuthenticatedRequest, res: Re
   try {
     const { campaignId, id: mapId } = req.params;
     const tokenData = req.body;
+    const result = await withCampaignMapRowLock(prisma, campaignId, mapId, async (tx, _campaign, map) => {
+      if (!tokenData.name || typeof tokenData.name !== 'string') {
+        return { status: 400 as const, body: { error: 'Validation Error', message: 'Token name is required' } };
+      }
 
-    // Fetch the map
-    const map = await prisma.map.findUnique({
-      where: { id: mapId },
+      // imageUrl is optional — tokens without an image get colored-letter placeholders.
+      if (tokenData.imageUrl && typeof tokenData.imageUrl !== 'string') {
+        return { status: 400 as const, body: { error: 'Validation Error', message: 'Token imageUrl must be a string if provided' } };
+      }
+
+      if (!tokenData.position || typeof tokenData.position.x !== 'number' || typeof tokenData.position.y !== 'number') {
+        return { status: 400 as const, body: { error: 'Validation Error', message: 'Token position {x, y} is required' } };
+      }
+
+      if (tokenData.position.x < 0 || tokenData.position.x >= map.width ||
+          tokenData.position.y < 0 || tokenData.position.y >= map.height) {
+        return {
+          status: 400 as const,
+          body: {
+            error: 'Validation Error',
+            message: `Token position must be within map bounds (0-${map.width - 1}, 0-${map.height - 1})`,
+          },
+        };
+      }
+
+      const layer = tokenData.layer || 'token';
+      if (layer !== 'token' && layer !== 'spirit') {
+        return { status: 400 as const, body: { error: 'Validation Error', message: 'Token layer must be "token" or "spirit"' } };
+      }
+
+      const tokenType = tokenData.type || 'npc';
+      if (!VALID_TOKEN_TYPES.includes(tokenType)) {
+        return { status: 400 as const, body: { error: 'Validation Error', message: 'Invalid token type' } };
+      }
+      const disposition = tokenData.disposition !== undefined ? tokenData.disposition : null;
+      if (disposition !== null && !VALID_TOKEN_DISPOSITIONS.includes(disposition)) {
+        return { status: 400 as const, body: { error: 'Validation Error', message: 'Invalid token disposition' } };
+      }
+
+      const displayMode = tokenData.displayMode || 'pog';
+      if (!VALID_DISPLAY_MODES.includes(displayMode)) {
+        return { status: 400 as const, body: { error: 'Validation Error', message: 'Invalid display mode' } };
+      }
+
+      const normalizedTokenImageUrl = tokenData.imageUrl
+        ? normalizeAssetUrl(tokenData.imageUrl, 'tokens')
+        : null;
+      const newToken = {
+        id: randomUUID(),
+        characterId: tokenData.characterId || null,
+        name: tokenData.name,
+        imageUrl: normalizedTokenImageUrl || '',
+        position: { x: tokenData.position.x, y: tokenData.position.y },
+        size: tokenData.size || { width: 1, height: 1 },
+        layer,
+        visible: tokenData.visible !== undefined ? tokenData.visible : true,
+        controlledBy: tokenData.controlledBy || null,
+        rotation: tokenData.rotation || 0,
+        conditions: tokenData.conditions || [],
+        metadata: tokenData.metadata || {},
+        type: tokenType,
+        disposition,
+        hp: tokenData.hp || null,
+        showHpBar: tokenData.showHpBar !== undefined ? tokenData.showHpBar : false,
+        notes: typeof tokenData.notes === 'string' ? tokenData.notes : '',
+        initiative: tokenData.initiative !== undefined ? tokenData.initiative : null,
+        displayMode,
+        statBlock: tokenData.statBlock || null,
+        creatureTemplateId: tokenData.creatureTemplateId || null,
+      };
+
+      const tokensArray = (Array.isArray(map.tokens) ? map.tokens : []) as unknown as Token[];
+      const updatedMap = await tx.map.update({
+        where: { id: mapId },
+        data: { tokens: [...tokensArray, newToken] as any },
+      });
+      return {
+        status: 201 as const,
+        body: { message: 'Token added successfully', token: newToken, map: updatedMap },
+        token: newToken,
+      };
     });
 
-    if (!map) {
-      return res.status(404).json({
-        error: 'Not Found',
-        message: 'Map not found',
-      });
-    }
-
-    if (map.campaignId !== campaignId) {
-      return res.status(404).json({
-        error: 'Not Found',
-        message: 'Map not found in this campaign',
-      });
-    }
-
-    // Validate required token fields
-    if (!tokenData.name || typeof tokenData.name !== 'string') {
-      return res.status(400).json({
-        error: 'Validation Error',
-        message: 'Token name is required',
-      });
-    }
-
-    // imageUrl is optional — tokens without an image get colored-letter placeholders
-    if (tokenData.imageUrl && typeof tokenData.imageUrl !== 'string') {
-      return res.status(400).json({
-        error: 'Validation Error',
-        message: 'Token imageUrl must be a string if provided',
-      });
-    }
-
-    if (!tokenData.position || typeof tokenData.position.x !== 'number' || typeof tokenData.position.y !== 'number') {
-      return res.status(400).json({
-        error: 'Validation Error',
-        message: 'Token position {x, y} is required',
-      });
-    }
-
-    // Validate position is within map bounds
-    if (tokenData.position.x < 0 || tokenData.position.x >= map.width ||
-        tokenData.position.y < 0 || tokenData.position.y >= map.height) {
-      return res.status(400).json({
-        error: 'Validation Error',
-        message: `Token position must be within map bounds (0-${map.width-1}, 0-${map.height-1})`,
-      });
-    }
-
-    // Validate layer
-    const layer = tokenData.layer || 'token';
-    if (layer !== 'token' && layer !== 'spirit') {
-      return res.status(400).json({
-        error: 'Validation Error',
-        message: 'Token layer must be "token" or "spirit"',
-      });
-    }
-
-    // Validate type and disposition
-    const tokenType = tokenData.type || 'npc';
-    if (!VALID_TOKEN_TYPES.includes(tokenType)) {
-      return res.status(400).json({ error: 'Validation Error', message: 'Invalid token type' });
-    }
-    const disposition = tokenData.disposition !== undefined ? tokenData.disposition : null;
-    if (disposition !== null && !VALID_TOKEN_DISPOSITIONS.includes(disposition)) {
-      return res.status(400).json({ error: 'Validation Error', message: 'Invalid token disposition' });
-    }
-
-    // Validate display mode
-    const displayMode = tokenData.displayMode || 'pog';
-    if (!VALID_DISPLAY_MODES.includes(displayMode)) {
-      return res.status(400).json({ error: 'Validation Error', message: 'Invalid display mode' });
-    }
-
-    // Normalize token imageUrl to full path (optional for placeholder tokens)
-    const normalizedTokenImageUrl = tokenData.imageUrl
-      ? normalizeAssetUrl(tokenData.imageUrl, 'tokens')
-      : null;
-
-    // Build the new token with defaults
-    const newToken = {
-      id: randomUUID(),
-      characterId: tokenData.characterId || null,
-      name: tokenData.name,
-      imageUrl: normalizedTokenImageUrl || '',
-      position: {
-        x: tokenData.position.x,
-        y: tokenData.position.y,
-      },
-      size: tokenData.size || { width: 1, height: 1 },
-      layer,
-      visible: tokenData.visible !== undefined ? tokenData.visible : true,
-      controlledBy: tokenData.controlledBy || null,
-      rotation: tokenData.rotation || 0,
-      conditions: tokenData.conditions || [],
-      metadata: tokenData.metadata || {},
-      type: tokenType,
-      disposition: disposition,
-      hp: tokenData.hp || null,
-      showHpBar: tokenData.showHpBar !== undefined ? tokenData.showHpBar : false,
-      notes: typeof tokenData.notes === 'string' ? tokenData.notes : '',
-      initiative: tokenData.initiative !== undefined ? tokenData.initiative : null,
-      displayMode: displayMode,
-      statBlock: tokenData.statBlock || null,
-      creatureTemplateId: tokenData.creatureTemplateId || null,
-    };
-
-    // Get existing tokens array
-    const tokensArray = (Array.isArray(map.tokens) ? map.tokens : []) as unknown as Token[];
-
-    // Add new token to array
-    const updatedTokens = [...tokensArray, newToken];
-
-    // Update the map with new tokens array
-    const updatedMap = await prisma.map.update({
-      where: { id: mapId },
-      data: { tokens: updatedTokens as any },
-    });
+    if (result.status !== 201) return res.status(result.status).json(result.body);
 
     // Live update for every client viewing this map (hidden tokens: DM only)
-    await broadcastTokenEvent(campaignId, mapId, null, newToken);
-
-    return res.status(201).json({
-      message: 'Token added successfully',
-      token: newToken,
-      map: updatedMap,
-    });
+    await broadcastTokenEvent(campaignId, mapId, null, result.token);
+    return res.status(201).json(result.body);
   } catch (error) {
+    if (error instanceof CampaignRowNotFoundError || error instanceof MapRowNotFoundError) {
+      return res.status(404).json({ error: 'Not Found', message: 'Map not found in this campaign' });
+    }
     logger.error('Error adding token', { err: error });
     return res.status(500).json({
       error: 'Internal Server Error',
@@ -915,177 +957,148 @@ router.put('/:id/tokens/:tokenId', campaignMember, async (req: AuthenticatedRequ
   try {
     const { campaignId, id: mapId, tokenId } = req.params;
     const userId = req.session.userId!;
-    const updates = req.body;
-
-    // Fetch the map
-    const map = await prisma.map.findUnique({
-      where: { id: mapId },
-    });
-
-    if (!map) {
-      return res.status(404).json({
-        error: 'Not Found',
-        message: 'Map not found',
-      });
+    const updates = req.body ?? {};
+    if (typeof updates !== 'object' || Array.isArray(updates)) {
+      return res.status(400).json({ error: 'Validation Error', message: 'Token updates must be an object' });
     }
 
-    if (map.campaignId !== campaignId) {
-      return res.status(404).json({
-        error: 'Not Found',
-        message: 'Map not found in this campaign',
+    const result = await withCampaignMapRowLock(prisma, campaignId, mapId, async (tx, campaign, map) => {
+      const membership = await tx.campaignMembership.findUnique({
+        where: { userId_campaignId: { userId, campaignId } },
       });
-    }
-
-    // Check user's role in campaign
-    const membership = await prisma.campaignMembership.findUnique({
-      where: {
-        userId_campaignId: {
-          userId,
-          campaignId,
-        },
-      },
-    });
-
-    if (!membership) {
-      return res.status(403).json({
-        error: 'Forbidden',
-        message: 'You are not a member of this campaign',
-      });
-    }
-
-    // Get existing tokens array
-    const tokensArray = (Array.isArray(map.tokens) ? map.tokens : []) as unknown as Token[];
-
-    // Find the token
-    const tokenIndex = tokensArray.findIndex((t) => t.id === tokenId);
-
-    if (tokenIndex === -1) {
-      return res.status(404).json({
-        error: 'Not Found',
-        message: 'Token not found on this map',
-      });
-    }
-
-    const existingToken = tokensArray[tokenIndex];
-
-    // Permission check: DM can update any token, players can only update their own tokens
-    const isDM = membership.role === 'DM';
-    const controlsToken = existingToken.controlledBy === userId;
-
-    if (!isDM && !controlsToken) {
-      return res.status(403).json({
-        error: 'Forbidden',
-        message: 'You can only update tokens you control',
-      });
-    }
-
-    // Validate position if being updated
-    if (updates.position) {
-      if (typeof updates.position.x !== 'number' || typeof updates.position.y !== 'number') {
-        return res.status(400).json({
-          error: 'Validation Error',
-          message: 'Position must have numeric x and y values',
-        });
+      if (!membership) {
+        return { status: 403 as const, body: { error: 'Forbidden', message: 'You are not a member of this campaign' } };
       }
 
-      if (updates.position.x < 0 || updates.position.x >= map.width ||
-          updates.position.y < 0 || updates.position.y >= map.height) {
-        return res.status(400).json({
-          error: 'Validation Error',
-          message: `Position must be within map bounds (0-${map.width-1}, 0-${map.height-1})`,
-        });
-      }
-    }
-
-    // Validate layer if being updated (DM only)
-    if (updates.layer !== undefined) {
-      if (!isDM) {
-        return res.status(403).json({
-          error: 'Forbidden',
-          message: 'Only DM can change token layer',
-        });
+      const tokensArray = (Array.isArray(map.tokens) ? map.tokens : []) as unknown as Token[];
+      const tokenIndex = tokensArray.findIndex((token) => token.id === tokenId);
+      if (tokenIndex === -1) {
+        return { status: 404 as const, body: { error: 'Not Found', message: 'Token not found on this map' } };
       }
 
-      if (updates.layer !== 'token' && updates.layer !== 'spirit') {
-        return res.status(400).json({
-          error: 'Validation Error',
-          message: 'Layer must be "token" or "spirit"',
-        });
+      const existingToken = tokensArray[tokenIndex];
+      const isDM = membership.role === 'DM';
+      const controlsToken = existingToken.controlledBy === userId;
+      if (!isDM && !controlsToken) {
+        return { status: 403 as const, body: { error: 'Forbidden', message: 'You can only update tokens you control' } };
       }
-    }
 
-    // Validate type/disposition/displayMode updates
-    if (updates.type !== undefined && !VALID_TOKEN_TYPES.includes(updates.type)) {
-      return res.status(400).json({ error: 'Validation Error', message: 'Invalid token type' });
-    }
-    if (updates.disposition !== undefined && updates.disposition !== null && !VALID_TOKEN_DISPOSITIONS.includes(updates.disposition)) {
-      return res.status(400).json({ error: 'Validation Error', message: 'Invalid token disposition' });
-    }
-    if (updates.displayMode !== undefined && !VALID_DISPLAY_MODES.includes(updates.displayMode)) {
-      return res.status(400).json({ error: 'Validation Error', message: 'Invalid display mode' });
-    }
+      const combatActive = readCombatState(campaign.combatState).active;
+      if (updates.position !== undefined && combatActive) {
+        return {
+          status: 409 as const,
+          body: {
+            error: 'Conflict',
+            message: 'Token movement during combat must use the committed token.move.end socket event',
+          },
+        };
+      }
 
-    // Players may only update position, rotation, and conditions on tokens they control
-    // All stat fields (hp, notes, showHpBar, type, disposition, initiative) require DM role
-    if (!isDM) {
-      const restrictedFields = ['hp', 'notes', 'showHpBar', 'type', 'disposition', 'initiative', 'visible', 'name', 'imageUrl', 'layer', 'controlledBy', 'displayMode', 'statBlock', 'creatureTemplateId'];
-      for (const field of restrictedFields) {
-        if (updates[field] !== undefined) {
-          return res.status(403).json({ error: 'Forbidden', message: `Only DM can update token field: ${field}` });
+      if (combatActive && !isDM && (updates.size !== undefined || updates.conditions !== undefined)) {
+        return {
+          status: 403 as const,
+          body: { error: 'Forbidden', message: 'Only DM can change token size or conditions during combat' },
+        };
+      }
+
+      if (updates.size !== undefined && !isTokenSize(updates.size)) {
+        return { status: 400 as const, body: { error: 'Validation Error', message: 'Token size must have positive integer width and height' } };
+      }
+      if (updates.conditions !== undefined &&
+          (!Array.isArray(updates.conditions) || updates.conditions.some((condition: unknown) => typeof condition !== 'string'))) {
+        return { status: 400 as const, body: { error: 'Validation Error', message: 'Token conditions must be an array of strings' } };
+      }
+
+      const nextPosition = updates.position !== undefined ? updates.position : existingToken.position;
+      const nextSize = updates.size !== undefined ? updates.size : (existingToken.size ?? { width: 1, height: 1 });
+      if (updates.position !== undefined && !isGridPosition(updates.position)) {
+        return { status: 400 as const, body: { error: 'Validation Error', message: 'Position must have integer x and y values' } };
+      }
+      if (updates.position !== undefined || updates.size !== undefined) {
+        if (!isGridPosition(nextPosition) || !isTokenSize(nextSize)) {
+          return { status: 400 as const, body: { error: 'Validation Error', message: 'Token position and size must be valid grid values' } };
+        }
+        if (!footprintFitsMap(nextPosition, nextSize, map)) {
+          return {
+            status: 400 as const,
+            body: { error: 'Validation Error', message: 'Token footprint must fit within map bounds' },
+          };
         }
       }
-    }
 
-    // Build updated token (merge updates with existing)
-    const updatedToken: Token = {
-      ...existingToken,
-      ...(updates.name && { name: updates.name }),
-      ...(updates.imageUrl !== undefined && { imageUrl: updates.imageUrl ? (normalizeAssetUrl(updates.imageUrl, 'tokens') || existingToken.imageUrl) : '' }),
-      ...(updates.position && { position: updates.position }),
-      ...(updates.size && { size: updates.size }),
-      ...(updates.layer && { layer: updates.layer }),
-      ...(updates.visible !== undefined && { visible: updates.visible }),
-      ...(updates.controlledBy !== undefined && { controlledBy: updates.controlledBy }),
-      ...(updates.rotation !== undefined && { rotation: updates.rotation }),
-      ...(updates.conditions && { conditions: updates.conditions }),
-      ...(updates.metadata && { metadata: { ...existingToken.metadata, ...updates.metadata } }),
-      ...(updates.type !== undefined && { type: updates.type }),
-      ...(updates.disposition !== undefined && { disposition: updates.disposition }),
-      ...(updates.hp !== undefined && { hp: updates.hp }),
-      ...(updates.showHpBar !== undefined && { showHpBar: updates.showHpBar }),
-      ...(updates.notes !== undefined && { notes: updates.notes }),
-      ...(updates.initiative !== undefined && { initiative: updates.initiative }),
-      ...(updates.displayMode !== undefined && { displayMode: updates.displayMode }),
-      ...(updates.statBlock !== undefined && { statBlock: updates.statBlock }),
-      ...(updates.creatureTemplateId !== undefined && { creatureTemplateId: updates.creatureTemplateId }),
-    };
+      if (updates.layer !== undefined) {
+        if (!isDM) return { status: 403 as const, body: { error: 'Forbidden', message: 'Only DM can change token layer' } };
+        if (updates.layer !== 'token' && updates.layer !== 'spirit') {
+          return { status: 400 as const, body: { error: 'Validation Error', message: 'Layer must be "token" or "spirit"' } };
+        }
+      }
 
-    // Update the tokens array
-    const updatedTokens = [...tokensArray];
-    updatedTokens[tokenIndex] = updatedToken;
+      if (updates.type !== undefined && !VALID_TOKEN_TYPES.includes(updates.type)) {
+        return { status: 400 as const, body: { error: 'Validation Error', message: 'Invalid token type' } };
+      }
+      if (updates.disposition !== undefined && updates.disposition !== null && !VALID_TOKEN_DISPOSITIONS.includes(updates.disposition)) {
+        return { status: 400 as const, body: { error: 'Validation Error', message: 'Invalid token disposition' } };
+      }
+      if (updates.displayMode !== undefined && !VALID_DISPLAY_MODES.includes(updates.displayMode)) {
+        return { status: 400 as const, body: { error: 'Validation Error', message: 'Invalid display mode' } };
+      }
 
-    // Update the map
-    await prisma.map.update({
-      where: { id: mapId },
-      data: { tokens: updatedTokens as any },
+      if (!isDM) {
+        const restrictedFields = ['hp', 'notes', 'showHpBar', 'type', 'disposition', 'initiative', 'visible', 'name', 'imageUrl', 'layer', 'controlledBy', 'displayMode', 'statBlock', 'creatureTemplateId'];
+        for (const field of restrictedFields) {
+          if (updates[field] !== undefined) {
+            return { status: 403 as const, body: { error: 'Forbidden', message: `Only DM can update token field: ${field}` } };
+          }
+        }
+      }
+
+      const updatedToken: Token = {
+        ...existingToken,
+        ...(updates.name && { name: updates.name }),
+        ...(updates.imageUrl !== undefined && { imageUrl: updates.imageUrl ? (normalizeAssetUrl(updates.imageUrl, 'tokens') || existingToken.imageUrl) : '' }),
+        ...(updates.position !== undefined && { position: updates.position }),
+        ...(updates.size !== undefined && { size: updates.size }),
+        ...(updates.layer && { layer: updates.layer }),
+        ...(updates.visible !== undefined && { visible: updates.visible }),
+        ...(updates.controlledBy !== undefined && { controlledBy: updates.controlledBy }),
+        ...(updates.rotation !== undefined && { rotation: updates.rotation }),
+        ...(updates.conditions !== undefined && { conditions: updates.conditions }),
+        ...(updates.metadata && { metadata: { ...existingToken.metadata, ...updates.metadata } }),
+        ...(updates.type !== undefined && { type: updates.type }),
+        ...(updates.disposition !== undefined && { disposition: updates.disposition }),
+        ...(updates.hp !== undefined && { hp: updates.hp }),
+        ...(updates.showHpBar !== undefined && { showHpBar: updates.showHpBar }),
+        ...(updates.notes !== undefined && { notes: updates.notes }),
+        ...(updates.initiative !== undefined && { initiative: updates.initiative }),
+        ...(updates.displayMode !== undefined && { displayMode: updates.displayMode }),
+        ...(updates.statBlock !== undefined && { statBlock: updates.statBlock }),
+        ...(updates.creatureTemplateId !== undefined && { creatureTemplateId: updates.creatureTemplateId }),
+      };
+
+      const updatedTokens = [...tokensArray];
+      updatedTokens[tokenIndex] = updatedToken;
+      await tx.map.update({ where: { id: mapId }, data: { tokens: updatedTokens as any } });
+
+      let responseToken: Token = updatedToken;
+      if (membership.role !== 'DM') {
+        const { notes: _notes, ...playerToken } = updatedToken;
+        responseToken = playerToken as Token;
+      }
+      return {
+        status: 200 as const,
+        body: { message: 'Token updated successfully', token: responseToken },
+        existingToken,
+        updatedToken,
+      };
     });
 
-    // Live update; players get token.added / token.removed when visibility flips
-    await broadcastTokenEvent(campaignId, mapId, existingToken, updatedToken);
-
-    // Only the updated token — never the map (other tokens, fog, spirit layer).
-    // DM-only fields (notes) are stripped for non-DMs, as in the map GET.
-    let responseToken: Token = updatedToken;
-    if (membership.role !== 'DM') {
-      const { notes: _notes, ...playerToken } = updatedToken;
-      responseToken = playerToken as Token;
-    }
-
-    return res.status(200).json({
-      message: 'Token updated successfully',
-      token: responseToken,
-    });
+    if (result.status !== 200) return res.status(result.status).json(result.body);
+    await broadcastTokenEvent(campaignId, mapId, result.existingToken, result.updatedToken);
+    return res.status(200).json(result.body);
   } catch (error) {
+    if (error instanceof CampaignRowNotFoundError || error instanceof MapRowNotFoundError) {
+      return res.status(404).json({ error: 'Not Found', message: 'Map not found in this campaign' });
+    }
     logger.error('Error updating token', { err: error });
     return res.status(500).json({
       error: 'Internal Server Error',
@@ -1102,56 +1115,30 @@ router.put('/:id/tokens/:tokenId', campaignMember, async (req: AuthenticatedRequ
 router.delete('/:id/tokens/:tokenId', campaignDM, async (req: AuthenticatedRequest, res: Response) => {
   try {
     const { campaignId, id: mapId, tokenId } = req.params;
+    const result = await withCampaignMapRowLock(prisma, campaignId, mapId, async (tx, _campaign, map) => {
+      const tokensArray = (Array.isArray(map.tokens) ? map.tokens : []) as unknown as Token[];
+      const tokenIndex = tokensArray.findIndex((token) => token.id === tokenId);
+      if (tokenIndex === -1) {
+        return { status: 404 as const, body: { error: 'Not Found', message: 'Token not found on this map' } };
+      }
 
-    // Fetch the map
-    const map = await prisma.map.findUnique({
-      where: { id: mapId },
+      const removedToken = tokensArray[tokenIndex];
+      await tx.map.update({
+        where: { id: mapId },
+        data: { tokens: tokensArray.filter((token) => token.id !== tokenId) as any },
+      });
+      return { status: 200 as const, body: { message: 'Token removed successfully' }, removedToken };
     });
 
-    if (!map) {
-      return res.status(404).json({
-        error: 'Not Found',
-        message: 'Map not found',
-      });
-    }
-
-    if (map.campaignId !== campaignId) {
-      return res.status(404).json({
-        error: 'Not Found',
-        message: 'Map not found in this campaign',
-      });
-    }
-
-    // Get existing tokens array
-    const tokensArray = (Array.isArray(map.tokens) ? map.tokens : []) as unknown as Token[];
-
-    // Find the token
-    const tokenIndex = tokensArray.findIndex((t) => t.id === tokenId);
-
-    if (tokenIndex === -1) {
-      return res.status(404).json({
-        error: 'Not Found',
-        message: 'Token not found on this map',
-      });
-    }
-
-    // Remove the token
-    const removedToken = tokensArray[tokenIndex];
-    const updatedTokens = tokensArray.filter((t) => t.id !== tokenId);
-
-    // Update the map
-    await prisma.map.update({
-      where: { id: mapId },
-      data: { tokens: updatedTokens as any },
-    });
+    if (result.status !== 200) return res.status(result.status).json(result.body);
 
     // Live update (removal of a hidden token reaches DMs only)
-    await broadcastTokenEvent(campaignId, mapId, removedToken, null);
-
-    return res.status(200).json({
-      message: 'Token removed successfully',
-    });
+    await broadcastTokenEvent(campaignId, mapId, result.removedToken, null);
+    return res.status(200).json(result.body);
   } catch (error) {
+    if (error instanceof CampaignRowNotFoundError || error instanceof MapRowNotFoundError) {
+      return res.status(404).json({ error: 'Not Found', message: 'Map not found in this campaign' });
+    }
     logger.error('Error removing token', { err: error });
     return res.status(500).json({
       error: 'Internal Server Error',
@@ -1625,4 +1612,3 @@ router.put('/:id/lighting', campaignDM, async (req: AuthenticatedRequest, res: R
 });
 
 export default router;
-

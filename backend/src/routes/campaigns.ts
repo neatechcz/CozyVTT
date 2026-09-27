@@ -5,7 +5,8 @@ import { AuthenticatedRequest } from '../middleware/rbac';
 import { authenticated, campaignMember, campaignDM, adminOnly } from '../middleware/compose';
 import { prisma } from '../config/database';
 import { canDeleteCampaign } from '../services/permissions';
-import { captureGameState, restoreGameState, getNextSessionNumber, getLastSession } from '../services/sessionState';
+import { lockCampaignMapRows } from '../services/combatStatePersistence';
+import { ActiveCombatRestoreError, captureGameState, restoreGameState, getNextSessionNumber, getLastSession } from '../services/sessionState';
 import { sendSystemMessage, broadcastToUser, broadcastToCampaign, broadcastTokenEvent } from '../websocket/utils';
 import { bumpMapVersion } from '../websocket/mapVersion';
 import { isSmtpConfigured, sendCampaignInvitationEmail } from '../services/email';
@@ -368,8 +369,9 @@ router.put('/:campaignId/characters/:characterId/controller', campaignDM, async 
           await tx.campaignMembership.update({ where: { id: player.id }, data: { characterIds: nextIds } });
         }
       }
-      const maps = await tx.map.findMany({ where: { campaignId }, select: { id: true, tokens: true } });
-      for (const map of maps) {
+      const maps = await tx.map.findMany({ where: { campaignId }, select: { id: true } });
+      for (const mapRef of maps) {
+        const { map } = await lockCampaignMapRows(tx, campaignId, mapRef.id);
         if (!Array.isArray(map.tokens)) continue;
         let changed = false;
         const tokens = map.tokens.map((value) => {
@@ -1522,6 +1524,9 @@ router.put('/:campaignId/resume', campaignDM, async (req: AuthenticatedRequest, 
       },
     });
   } catch (error) {
+    if (error instanceof ActiveCombatRestoreError) {
+      return res.status(409).json({ error: 'Conflict', message: error.message });
+    }
     logger.error('Error resuming session', { err: error });
     return res.status(500).json({
       error: 'Internal Server Error',

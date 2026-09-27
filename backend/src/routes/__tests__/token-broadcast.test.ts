@@ -12,6 +12,7 @@ const mockAuth: { userId: string; role: 'DM' | 'PLAYER' | 'SPECTATOR' } = {
   userId: 'dm-user',
   role: 'DM',
 };
+const mockWithCampaignMapRowLock = jest.fn();
 
 jest.mock('../../middleware/compose', () => {
   const inject = (req: any, _res: unknown, next: () => void) => {
@@ -43,6 +44,12 @@ jest.mock('../../config/database', () => ({
   },
 }));
 
+jest.mock('../../services/combatStatePersistence', () => ({
+  withCampaignMapRowLock: (...args: unknown[]) => mockWithCampaignMapRowLock(...args),
+  CampaignRowNotFoundError: class CampaignRowNotFoundError extends Error {},
+  MapRowNotFoundError: class MapRowNotFoundError extends Error {},
+}));
+
 jest.mock('../../utils/logger', () => ({
   __esModule: true,
   default: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
@@ -52,6 +59,7 @@ import express from 'express';
 import request from 'supertest';
 import mapsRouter from '../maps';
 import { prisma } from '../../config/database';
+import { MapRowNotFoundError } from '../../services/combatStatePersistence';
 import { setSocketInstance } from '../../websocket/utils';
 
 const CAMPAIGN_ID = 'campaign-1';
@@ -66,8 +74,8 @@ function makeSocket(id: string, userId: string, role: string): FakeSocket {
 
 const mockedPrisma = prisma as unknown as {
   map: { findUnique: jest.Mock; update: jest.Mock };
-  campaignMembership: { findUnique: jest.Mock; findMany: jest.Mock };
-  campaign: { findUnique: jest.Mock };
+    campaignMembership: { findUnique: jest.Mock; findMany: jest.Mock };
+    campaign: { findUnique: jest.Mock };
 };
 
 function baseToken(overrides: Record<string, unknown> = {}) {
@@ -151,6 +159,27 @@ describe('token REST routes broadcast token events', () => {
       { userId: 'player-user', role: 'PLAYER' },
     ]);
     mockedPrisma.campaign.findUnique.mockResolvedValue({ spiritLayerEnabled: false, currentMapId: MAP_ID });
+    mockWithCampaignMapRowLock.mockImplementation(async (
+      _prisma: unknown,
+      campaignId: string,
+      mapId: string,
+      callback: Function,
+    ) => {
+      const map = await mockedPrisma.map.findUnique({ where: { id: mapId } });
+      if (!map || map.campaignId !== campaignId) throw new MapRowNotFoundError(mapId, campaignId);
+      const storedCampaign = await mockedPrisma.campaign.findUnique({ where: { id: campaignId } });
+      const campaign = storedCampaign && {
+        id: campaignId,
+        combatState: null,
+        ...storedCampaign,
+      };
+      const tx = {
+        map: { update: mockedPrisma.map.update },
+        campaignMembership: { findUnique: mockedPrisma.campaignMembership.findUnique },
+        campaign: { update: jest.fn() },
+      };
+      return callback(tx, campaign, map);
+    });
   });
 
   describe('POST /:id/tokens', () => {

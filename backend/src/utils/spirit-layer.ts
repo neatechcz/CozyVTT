@@ -56,6 +56,7 @@ interface MapData {
   fogData: unknown;
   lightingEnabled: boolean;
   lights: unknown;
+  difficultTerrain: unknown;
   createdAt: Date;
   updatedAt: Date;
 }

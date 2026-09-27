@@ -87,6 +87,10 @@ const generalApiLimiter = rateLimit({
 // BODY PARSING
 // ============================================
 
+// A 100000-cell terrain list can be several megabytes; parse this bounded
+// map-edit payload before the 100kb general JSON parser.
+app.put('/api/campaigns/:campaignId/maps/:id/difficult-terrain', express.json({ limit: '8mb' }));
+
 // Character field-level PATCH may carry a full change set: 1mb for this
 // route only. It must run before the global parser (default 100kb), which
 // then skips the already-parsed body.
