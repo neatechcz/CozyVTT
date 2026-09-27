@@ -33,6 +33,7 @@ import type {
   InitiativeSetEvent,
   InitiativeRollEvent,
   InitiativeReorderEvent,
+  InitiativeDashEvent,
 } from '@/types';
 import type { TokenAddedPayload, TokenUpdatedPayload, TokenRemovedPayload } from '@/utils/tokenEvents';
 
@@ -625,6 +626,10 @@ class SocketClient {
 
   emitInitiativeNext() {
     this.socket?.emit('initiative.next');
+  }
+
+  emitInitiativeDash(data: InitiativeDashEvent) {
+    this.socket?.emit('initiative.dash', data);
   }
 
   emitInitiativeEnd() {

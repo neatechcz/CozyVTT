@@ -13,8 +13,15 @@
 // underlying socket (server-forced reconnect, browser back online).
 // ============================================
 
-import { useEffect, useRef } from 'react';
-import type { Token, TokenMovedEvent } from '@/types';
+import { useEffect, useRef, useState } from 'react';
+import type {
+  Token,
+  TokenMoveAcceptedEvent,
+  TokenMovePreviewBroadcast,
+  TokenMoveRejectedEvent,
+  TokenMoveResponse,
+  TokenMovedEvent,
+} from '@/types';
 import { useGameStore } from '@/stores/gameStore';
 import type { TokenAnimation } from './layers/types';
 import {
@@ -31,45 +38,99 @@ export interface TokenEventSocket {
   off(event: string, callback?: (data: any) => void): void;
 }
 
+export interface TokenSocketEventState {
+  /** Other users' temporary positions. These never enter the canonical store. */
+  movementPreviews: Record<string, TokenMovePreviewBroadcast>;
+}
+
 export function useTokenSocketEvents(
   socket: TokenEventSocket | null | undefined,
   currentMapId: string | undefined,
   /** Seeds a movement tween (`useTokenAnimation`'s `setAnimatingTokens`) */
   startTokenAnimation: (tokenId: string, animation: TokenAnimation) => void,
-) {
+  onMoveResponse?: (response: TokenMoveResponse) => void,
+): TokenSocketEventState {
   const startAnimationRef = useRef(startTokenAnimation);
   startAnimationRef.current = startTokenAnimation;
+  const moveResponseRef = useRef(onMoveResponse);
+  moveResponseRef.current = onMoveResponse;
+  const [movementPreviews, setMovementPreviews] = useState<Record<string, TokenMovePreviewBroadcast>>({});
+
+  useEffect(() => {
+    setMovementPreviews({});
+  }, [currentMapId]);
 
   useEffect(() => {
     if (!socket) return;
 
     const handleTokenMoved = (event: TokenMovedEvent) => {
+      // Committed token events carry mapId. Keep compatibility with pre-ledger
+      // events that omit it while always rejecting an explicit other-map event.
+      if (!currentMapId || (event.mapId && event.mapId !== currentMapId)) return;
+
       // Read from the store (not a render closure) so rapid events that arrive
       // in the same macro-task all see the most recently mutated state.
       const store = useGameStore.getState();
       const token = store.tokens[event.tokenId];
       if (!token) return;
+      const position = event.position ?? { x: event.x, y: event.y };
 
       // Start animation from current position to new position
       startAnimationRef.current(event.tokenId, {
         fromX: token.position.x,
         fromY: token.position.y,
-        toX: event.x,
-        toY: event.y,
+        toX: position.x,
+        toY: position.y,
         startTime: Date.now(),
         duration: 200,
       });
 
       // Store writes are synchronous — subsequent handlers in the same
       // macro-task (e.g. token:appeared for NPCs) see the correct state.
-      store.applyTokenMove(event.tokenId, { x: event.x, y: event.y });
+      store.applyTokenMove(event.tokenId, position);
+      setMovementPreviews((previous) => {
+        if (!previous[event.tokenId]) return previous;
+        const next = { ...previous };
+        delete next[event.tokenId];
+        return next;
+      });
+    };
+
+    const handlePreview = (event: TokenMovePreviewBroadcast) => {
+      if (!currentMapId || event.mapId !== currentMapId) return;
+      setMovementPreviews((previous) => {
+        if (!event.preview) {
+          if (!previous[event.tokenId]) return previous;
+          const next = { ...previous };
+          delete next[event.tokenId];
+          return next;
+        }
+        return { ...previous, [event.tokenId]: event };
+      });
+    };
+
+    const handleAccepted = (event: TokenMoveAcceptedEvent) => {
+      // A local move can still be pending when the viewer switches maps. Its
+      // request id identifies the owner even after the map-scoped listeners
+      // have changed; the caller decides whether this response is still live.
+      moveResponseRef.current?.({ ...event, accepted: true });
+    };
+
+    const handleRejected = (event: TokenMoveRejectedEvent) => {
+      moveResponseRef.current?.({ ...event, accepted: false });
     };
 
     socket.on('token.moved', handleTokenMoved);
+    socket.on('token.move.preview', handlePreview);
+    socket.on('token.move.accepted', handleAccepted);
+    socket.on('token.move.rejected', handleRejected);
     return () => {
       socket.off('token.moved', handleTokenMoved);
+      socket.off('token.move.preview', handlePreview);
+      socket.off('token.move.accepted', handleAccepted);
+      socket.off('token.move.rejected', handleRejected);
     };
-  }, [socket]); // handler reads/writes via the store, no reactive deps needed
+  }, [socket, currentMapId]); // handler reads/writes via the store, no reactive deps needed
 
   useEffect(() => {
     if (!socket) return;
@@ -97,4 +158,6 @@ export function useTokenSocketEvents(
       socket.off('token.removed', handleTokenRemoved);
     };
   }, [socket, currentMapId]);
+
+  return { movementPreviews };
 }

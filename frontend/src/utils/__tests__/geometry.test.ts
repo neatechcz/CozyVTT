@@ -8,9 +8,59 @@ import {
   calcGridDistance,
   douglasPeucker,
   snapPointsToEdges,
+  MovementRouteCollector,
+  TokenMovementDraft,
   type Point,
   type EdgeSnapRegion,
 } from '../geometry';
+
+describe('MovementRouteCollector', () => {
+  it('keeps a bounded adjacent route from pickup through the committed destination', () => {
+    const route = new MovementRouteCollector({ x: 1, y: 1 });
+    expect(route.getRoute()).toEqual([]);
+    route.record({ x: 2, y: 1 });
+    route.record({ x: 3, y: 2 });
+    route.record({ x: 3, y: 2 });
+    expect(route.getRoute()).toEqual([{ x: 2, y: 1 }, { x: 3, y: 2 }]);
+  });
+
+  it('omits the explicit route when sparse drag samples skip a grid cell', () => {
+    const route = new MovementRouteCollector({ x: 0, y: 0 });
+    route.record({ x: 3, y: 0 });
+    expect(route.getRoute()).toBeUndefined();
+  });
+
+  it('omits routes longer than the configured step bound', () => {
+    const route = new MovementRouteCollector({ x: 0, y: 0 }, 2);
+    route.record({ x: 1, y: 0 });
+    route.record({ x: 2, y: 0 });
+    route.record({ x: 3, y: 0 });
+    expect(route.getRoute()).toBeUndefined();
+  });
+});
+
+describe('TokenMovementDraft', () => {
+  it('captures the pickup offset and commits the final adjacent preview route', () => {
+    const draft = new TokenMovementDraft('t1', { x: 2, y: 3 }, { x: 3, y: 3 });
+    expect(draft.pickupOffset).toEqual({ x: 1, y: 0 });
+    expect(draft.destination).toEqual({ x: 2, y: 3 });
+    draft.preview({ x: 4, y: 3 }, { width: 8, height: 8 });
+    draft.preview({ x: 5, y: 4 }, { width: 8, height: 8 });
+
+    expect(draft.toMoveEndEvent('request-1', 'map-1')).toEqual({
+      requestId: 'request-1', tokenId: 't1', mapId: 'map-1', x: 4, y: 4,
+      route: [{ x: 3, y: 3 }, { x: 4, y: 4 }],
+    });
+  });
+
+  it('clamps a token footprint to the map and omits sparse routes for server planning', () => {
+    const draft = new TokenMovementDraft('large', { x: 1, y: 1 }, { x: 1, y: 1 });
+    expect(draft.preview({ x: 20, y: 20 }, { width: 8, height: 8 }, { width: 2, height: 3 })).toEqual({ x: 6, y: 5 });
+    expect(draft.toMoveEndEvent('request-2', 'map-1')).toEqual({
+      requestId: 'request-2', tokenId: 'large', mapId: 'map-1', x: 6, y: 5,
+    });
+  });
+});
 
 describe('calcGridDistance', () => {
   it('flat rule: diagonals cost the same as straight moves (Chebyshev)', () => {

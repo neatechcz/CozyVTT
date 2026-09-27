@@ -28,6 +28,7 @@ import { AttacksList } from './components/AttacksList';
 import { InventoryList } from './components/InventoryList';
 import { SpellcastingBlock } from './components/SpellcastingBlock';
 import { effectiveMaximumHp, effectiveSpeed, exhaustionEffects, rollWithExhaustion, trackedExhaustionLevel, type RollMode } from '../../../utils/dnd5eSurvival';
+
 import { categorizeProficiencies } from './dnd5eFormData';
 
 interface DnD5eCharacterViewProps {
@@ -105,6 +106,7 @@ export const DnD5eCharacterView: React.FC<DnD5eCharacterViewProps> = ({ characte
 
   const handleRoll = (expression: string, purpose: string, mode: RollMode = 'normal') => {
     const rolled = rollWithExhaustion(expression, purpose, exhaustionLevel ?? 0, mode);
+
     const actualMode = rolled.startsWith('2d20kh1') ? 'Advantage'
       : rolled.startsWith('2d20kl1') ? 'Disadvantage' : '';
     if (onRoll) onRoll(rolled, actualMode ? `${purpose} (${actualMode})` : purpose);
@@ -321,14 +323,13 @@ export const DnD5eCharacterView: React.FC<DnD5eCharacterViewProps> = ({ characte
             {formatModifier(data.proficiencyBonus)}
           </div>
         </div>
-        {data.inspiration !== undefined && (
-          <div className="bg-yellow-50 border-2 border-yellow-200 rounded-lg p-4 text-center">
-            <div className="text-sm text-stone-600 mb-1">Inspiration</div>
-            <div className="text-2xl font-bold text-yellow-700">
-              {data.inspiration ? 'Yes' : 'No'}
-            </div>
+        <div className="bg-yellow-50 border-2 border-yellow-200 rounded-lg p-4 text-center">
+          <div className="text-sm text-stone-600 mb-1">Inspirace</div>
+          <div className="text-2xl font-bold text-yellow-700">
+            {data.inspiration ? 'K dispozici' : 'Vyčerpána'}
           </div>
-        )}
+          <p className="mt-2 text-xs text-stone-600">Před hodem utratíš Inspiraci a získáš výhodu na útok, záchranný hod nebo ověření vlastnosti.</p>
+        </div>
       </div>
     </div>
   );
@@ -358,6 +359,7 @@ export const DnD5eCharacterView: React.FC<DnD5eCharacterViewProps> = ({ characte
             <div className="text-xs text-stone-500 mb-1">Speed</div>
             <div className="text-2xl font-bold text-stone-800">{effectiveSpeed(data.speed, exhaustionLevel ?? 0)} ft</div>
             {(exhaustionLevel ?? 0) >= 2 && <div className="text-xs text-stone-500">Base {data.speed} ft</div>}
+
           </div>
         )}
         {data.hp && (
@@ -368,6 +370,7 @@ export const DnD5eCharacterView: React.FC<DnD5eCharacterViewProps> = ({ characte
               {Math.min(data.hp.current, effectiveMaximumHp(data.hp.maximum, exhaustionLevel ?? 0))}/{effectiveMaximumHp(data.hp.maximum, exhaustionLevel ?? 0)}
             </div>
             {(exhaustionLevel ?? 0) >= 4 && <div className="text-xs text-red-700 mt-1">Base maximum {data.hp.maximum}; reconcile current HP on the sheet</div>}
+
             {data.hp.temporary > 0 && (
               <div className="text-xs text-blue-600 mt-1">+{data.hp.temporary} temp</div>
             )}
@@ -383,12 +386,22 @@ export const DnD5eCharacterView: React.FC<DnD5eCharacterViewProps> = ({ characte
         </>}
         {data.survival && (
           <div className="text-sm text-stone-700 space-y-1">
-            <p>Last resolved day: {data.survival.lastResolvedDay || 'unknown'}</p>
-            <p>Food: {data.survival.foodTodayPounds ?? 'unknown'} lb · Water: {data.survival.waterTodayGallons ?? 'unknown'} / {data.survival.waterRequiredGallons ?? 'unknown'} gal</p>
-            {data.survival.lastResolvedDay && typeof data.survival.foodTodayPounds === 'number' && data.survival.foodTodayPounds < 1 && (
+            {data.survival.intakeDay ? (
+              <p>Tracked day: {data.survival.intakeDay} ({data.survival.lastResolvedDay === data.survival.intakeDay ? 'resolved' : 'open'})</p>
+            ) : (
+              <p>Last resolved day: {data.survival.lastResolvedDay || 'not recorded'}</p>
+            )}
+            {data.survival.intakeDay && data.survival.lastResolvedDay && data.survival.lastResolvedDay !== data.survival.intakeDay && (
+              <p>Last resolved day: {data.survival.lastResolvedDay}</p>
+            )}
+            <p>Food: {data.survival.foodTodayPounds ?? 'not recorded'} lb · Water: {data.survival.waterTodayGallons ?? 'not recorded'} / {data.survival.waterRequiredGallons ?? 'not recorded'} gal</p>
+            {data.survival.lastResolvedDay && (!data.survival.intakeDay || data.survival.intakeDay === data.survival.lastResolvedDay)
+              && typeof data.survival.foodTodayPounds === 'number' && data.survival.foodTodayPounds < 1 && (
               <p className="font-semibold text-amber-900">Food short by {1 - data.survival.foodTodayPounds} lb on the resolved day.</p>
             )}
-            {data.survival.lastResolvedDay && typeof data.survival.waterTodayGallons === 'number'
+            {data.survival.lastResolvedDay && (!data.survival.intakeDay || data.survival.intakeDay === data.survival.lastResolvedDay)
+              && typeof data.survival.waterTodayGallons === 'number'
+
               && typeof data.survival.waterRequiredGallons === 'number'
               && data.survival.waterTodayGallons < data.survival.waterRequiredGallons && (
                 <p className="font-semibold text-amber-900">Water short by {data.survival.waterRequiredGallons - data.survival.waterTodayGallons} gal on the resolved day.</p>
@@ -399,6 +412,7 @@ export const DnD5eCharacterView: React.FC<DnD5eCharacterViewProps> = ({ characte
           </div>
         )}
         {data.conditions?.includes('exhausted') && exhaustionLevel === undefined && (
+
           <p className="text-sm text-amber-900 mt-2">Exhausted is marked, but its level is unknown.</p>
         )}
       </div>
@@ -514,7 +528,7 @@ export const DnD5eCharacterView: React.FC<DnD5eCharacterViewProps> = ({ characte
   const renderSpellsTab = () => (
     <div>
       {data.spellcasting ? (
-        <SpellcastingBlock spellcasting={data.spellcasting} />
+        <SpellcastingBlock spellcasting={data.spellcasting} character={data} campaignId={character.campaignId} />
       ) : (
         <div className="text-center py-12 text-stone-500">
           <Sparkles className="w-12 h-12 mx-auto mb-3 text-stone-400" />

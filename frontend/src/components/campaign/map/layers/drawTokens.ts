@@ -6,7 +6,7 @@
 // predicate; animation progress uses the caller-provided `now`.
 // ============================================
 
-import type { Token } from '@/types';
+import type { Token, TokenMovePreviewBroadcast } from '@/types';
 import { TokenLayer, TokenType, TokenDisposition } from '@/types';
 import type { CharacterHpInfo } from '@/utils/characterHp';
 import type { TokenAnimation, Viewport } from './types';
@@ -26,6 +26,7 @@ export interface TokenDrawState {
   draggedToken: Token | null;
   dragOffset: { x: number; y: number } | null;
   hoverCoords: { x: number; y: number } | null;
+  movementPreviews?: readonly TokenMovePreviewBroadcast[];
   hoverTokenId: string | null;
   /** Player fog cells — tokens centered in unrevealed cells are hidden. */
   revealedCells: Set<number> | null;
@@ -478,6 +479,39 @@ export function drawTokens(
         ctx.fillText(label, bx + badgeW / 2, badgeY + badgeH / 2 + fontSize * 0.04);
       });
     }
+  }
+
+  // Remote drag previews are translucent overlays. Their canonical token
+  // stays at its stored position until the server broadcasts token.moved.
+  for (const preview of state.movementPreviews ?? []) {
+    if (state.draggedToken?.id === preview.tokenId) continue;
+    const token = state.tokens.find((candidate) => candidate.id === preview.tokenId);
+    if (!token || (!token.visible && !isDM)) continue;
+    if (isDM && !state.dmShowSpiritTokens && token.layer === TokenLayer.SPIRIT) continue;
+    if (!isDM && state.revealedCells && !state.isOwnToken(token)) {
+      const fogRow = mapHeight - 1 - Math.floor(preview.position.y + (token.size.height - 1) / 2);
+      const fogCol = Math.floor(preview.position.x + (token.size.width - 1) / 2);
+      if (!state.revealedCells.has(fogRow * mapWidth + fogCol)) continue;
+    }
+
+    const x = preview.position.x * gridSize;
+    const y = (mapHeight - preview.position.y - token.size.height) * gridSize;
+    const width = token.size.width * gridSize;
+    const height = token.size.height * gridSize;
+    const image = state.tokenImages.get(token.id);
+
+    ctx.save();
+    ctx.globalAlpha = 0.5;
+    if (image) ctx.drawImage(image, x, y, width, height);
+    else {
+      ctx.fillStyle = 'rgba(245, 158, 11, 0.4)';
+      ctx.fillRect(x, y, width, height);
+    }
+    ctx.strokeStyle = '#f59e0b';
+    ctx.lineWidth = Math.max(1.5, 2 / zoom);
+    ctx.setLineDash([6 / zoom, 4 / zoom]);
+    ctx.strokeRect(x + 1, y + 1, Math.max(0, width - 2), Math.max(0, height - 2));
+    ctx.restore();
   }
 
   // Dragged token as ghost — ghost position = cursor cell minus the pickup

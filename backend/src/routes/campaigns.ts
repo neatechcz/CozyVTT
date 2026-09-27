@@ -5,8 +5,10 @@ import { AuthenticatedRequest } from '../middleware/rbac';
 import { authenticated, campaignMember, campaignDM, adminOnly } from '../middleware/compose';
 import { prisma } from '../config/database';
 import { canDeleteCampaign, canTransferDM, canReadAsset } from '../services/permissions';
-import { captureGameState, restoreGameState, getNextSessionNumber, getLastSession, type GameState } from '../services/sessionState';
+import { ActiveCombatRestoreError, captureGameState, restoreGameState, getNextSessionNumber, getLastSession, type GameState } from '../services/sessionState';
 import { sendSystemMessage, broadcastToUser, broadcastToCampaign, broadcastTokenEvent, applyRoleToLiveSockets, clearCampaignFromLiveSockets } from '../websocket/utils';
+import { lockCampaignMapRows } from '../services/combatStatePersistence';
+
 import { bumpMapVersion } from '../websocket/mapVersion';
 import { isSmtpConfigured, sendCampaignInvitationEmail } from '../services/email';
 import { DEFAULT_VIBE_SETTINGS, validateVibeSettings, findVibePeriod, preserveAtmosphereAudio, VibeSettings } from '../utils/vibe-presets';
@@ -31,6 +33,8 @@ import { errorMessage } from '../utils/errors';
 import { toJson, readJsonObject } from '../utils/prisma-json';
 import logger from '../utils/logger';
 import { encodeMessageCursor, decodeMessageCursor } from '../utils/messageCursor';
+import { z } from 'zod';
+import { normalizeSpellName } from '../utils/spell-names';
 
 const router = Router();
 const PROTECTED_DM_EMAILS = new Set(['codex-mcp@neatech.cz', 'vaclav.soukup@neatech.cz']);
@@ -53,7 +57,6 @@ const importUpload = multer({
     }
   },
 });
-
 
 /**
  * Campaign Routes
@@ -391,8 +394,9 @@ router.put('/:campaignId/characters/:characterId/controller', campaignDM, async 
           await tx.campaignMembership.update({ where: { id: player.id }, data: { characterIds: nextIds } });
         }
       }
-      const maps = await tx.map.findMany({ where: { campaignId }, select: { id: true, tokens: true } });
-      for (const map of maps) {
+      const maps = await tx.map.findMany({ where: { campaignId }, select: { id: true } });
+      for (const mapRef of maps) {
+        const { map } = await lockCampaignMapRows(tx, campaignId, mapRef.id);
         if (!Array.isArray(map.tokens)) continue;
         let changed = false;
         const tokens = map.tokens.map((value) => {
@@ -2571,6 +2575,9 @@ router.put('/:campaignId/resume', campaignDM, async (req: AuthenticatedRequest, 
       },
     });
   } catch (error) {
+    if (error instanceof ActiveCombatRestoreError) {
+      return res.status(409).json({ error: 'Conflict', message: error.message });
+    }
     logger.error('Error resuming session', { err: error });
     return res.status(500).json({
       error: 'Internal Server Error',
@@ -2716,6 +2723,57 @@ router.post('/import', authenticated, (req: Request, res: Response, next: NextFu
       error: 'Import Failed',
       message: errorMessage(error) || 'Failed to import campaign.',
     });
+  }
+});
+
+// Campaign spell descriptions are shared reference text, separate from character sheets.
+const spellNameSchema = z.string().trim().min(1).max(120);
+const spellDescriptionSchema = z.object({ description: z.string().trim().min(1).max(20000) });
+
+router.get('/:campaignId/spells/:name', campaignMember, async (req: AuthenticatedRequest, res: Response) => {
+  const parsedName = spellNameSchema.safeParse(req.params.name);
+  if (!parsedName.success || !normalizeSpellName(parsedName.data)) {
+    return res.status(400).json({ error: 'Invalid spell name' });
+  }
+  try {
+    const spell = await prisma.campaignSpellDescription.findUnique({
+      where: { campaignId_normalizedName: {
+        campaignId: req.params.campaignId,
+        normalizedName: normalizeSpellName(parsedName.data),
+      } },
+    });
+    if (!spell) return res.status(404).json({ error: 'Spell description not found' });
+    return res.status(200).json({ spell: { name: spell.name, description: spell.description, updatedAt: spell.updatedAt } });
+  } catch (error) {
+    logger.error('Failed to get spell description', { err: error });
+    return res.status(500).json({ error: 'Failed to get spell description' });
+  }
+});
+
+router.put('/:campaignId/spells/:name', campaignDM, async (req: AuthenticatedRequest, res: Response) => {
+  const parsedName = spellNameSchema.safeParse(req.params.name);
+  const parsedBody = spellDescriptionSchema.safeParse(req.body);
+  if (!parsedName.success || !normalizeSpellName(parsedName.data) || !parsedBody.success) {
+    return res.status(400).json({ error: 'Invalid spell name or description' });
+  }
+  try {
+    const spell = await prisma.campaignSpellDescription.upsert({
+      where: { campaignId_normalizedName: {
+        campaignId: req.params.campaignId,
+        normalizedName: normalizeSpellName(parsedName.data),
+      } },
+      create: {
+        campaignId: req.params.campaignId,
+        normalizedName: normalizeSpellName(parsedName.data),
+        name: parsedName.data,
+        description: parsedBody.data.description,
+      },
+      update: { description: parsedBody.data.description },
+    });
+    return res.status(200).json({ spell: { name: spell.name, description: spell.description, updatedAt: spell.updatedAt } });
+  } catch (error) {
+    logger.error('Failed to save spell description', { err: error });
+    return res.status(500).json({ error: 'Failed to save spell description' });
   }
 });
 

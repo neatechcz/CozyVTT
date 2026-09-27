@@ -208,3 +208,11 @@ export const IMPORT_STAT_BLOCK_LIMITS: StatBlockSchemaOptions = {
 export const NpcStatBlockSchema = createNpcStatBlockSchema(AUTHORING_STAT_BLOCK_LIMITS);
 
 export type NpcStatBlockInput = z.infer<typeof NpcStatBlockSchema>;
+
+/** Tokens authored by MCP may carry only movement speed, without invented AC/abilities. */
+export const MovementOnlyStatBlockSchema = z.object({
+  speed: z.string().trim().min(1).max(AUTHORING_STAT_BLOCK_LIMITS.maxSpeedLength),
+}).strict();
+
+/** Full NPC validation remains mandatory whenever any other statistic is supplied. */
+export const TokenStatBlockSchema = z.union([NpcStatBlockSchema, MovementOnlyStatBlockSchema]);

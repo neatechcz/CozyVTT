@@ -17,7 +17,8 @@ import type {
   TokenMoveStartEvent,
   TokenMoveEvent,
   TokenMoveEndEvent,
-  TokenMovedEvent,
+  TokenMoveResponse,
+
   Map as CampaignMap,
   SpiritLayerToggledBroadcast,
   SpiritLayerTokenToggledBroadcast,
@@ -27,7 +28,7 @@ import type {
 } from '@/types';
 import { TokenLayer, TokenType } from '@/types';
 import type { WallSegment, FogState, WallType, LightSource } from '@/types/walls';
-import { douglasPeucker, edgeSnapPoints } from '@/utils/geometry';
+import { douglasPeucker, edgeSnapPoints, TokenMovementDraft } from '@/utils/geometry';
 import {
   drawMapImage,
   drawSpiritLayer,
@@ -53,11 +54,13 @@ import {
   type Viewport,
 } from './map/layers';
 import { createVisionCache, type VisionSource } from './map/vision';
-import { pickTokenAt, pickMovableTokenAt, blockingTokensAt, visibleTokenHp } from './map/tokenHitTest';
+import { pickTokenAt, pickMovableTokenAt, visibleTokenHp } from './map/tokenHitTest';
 import { placeholderColor } from './map/layers/drawTokens';
 import { fogRectFromDrag, fogCellsInRect } from './map/fogSelection';
 import { rectFromDrag, segmentsInRect, type SelectionRect } from './map/mapSelection';
 import { translateWallSegments, gridSquaresToPx } from './map/mapGeometry';
+import type { TokenAnimation } from './map/layers/types';
+import { useTokenSocketEvents } from './map/useTokenSocketEvents';
 import { useTokenAnimation, useFogRevealAnimation, useCanvasTicker, pulsePhaseAt } from './map/useMapAnimations';
 import { playerColor } from '@/utils/playerColor';
 import { characterTokenRequest, readCharacterTokenDrag } from '@/utils/characterTokenDrag';
@@ -154,6 +157,14 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
   const [hoverToken, setHoverToken] = useState<Token | null>(null);
   /** Initiative of the token being pointed at — for the details panel. */
   const hoverInitiative = useTokenInitiative(hoverToken?.id ?? null);
+  const movementDraftRef = useRef<TokenMovementDraft | null>(null);
+  const pendingMovementRef = useRef<{
+    requestId: string;
+    tokenId: string;
+    mapId: string;
+    destination: { x: number; y: number };
+    timeoutId: ReturnType<typeof setTimeout>;
+  } | null>(null);
 
   // Context menu state
   const [contextMenu, setContextMenu] = useState<{
@@ -905,50 +916,64 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
   /**
    * Listen for token.moved events from other clients
    */
+  const currentMapId = currentMap?.id;
+  const startTokenAnimation = useCallback(
+    (tokenId: string, animation: TokenAnimation) => {
+      setAnimatingTokens((prev) => new Map(prev).set(tokenId, animation));
+    },
+    [setAnimatingTokens],
+  );
+  const clearDragGhost = useCallback(() => {
+    setDraggedToken(null);
+    setDragOffset(null);
+    movementDraftRef.current = null;
+    markDirty('tokens');
+  }, [markDirty]);
+
+  const handleMoveResponse = useCallback((response: TokenMoveResponse) => {
+    const pending = pendingMovementRef.current;
+    if (!pending || pending.requestId !== response.requestId || pending.mapId !== response.mapId) return;
+
+    clearTimeout(pending.timeoutId);
+    pendingMovementRef.current = null;
+    if (response.accepted) {
+      // This position came from the server's acceptance, so it is safe to
+      // reconcile locally before the all-viewer token.moved broadcast lands.
+      useGameStore.getState().applyTokenMove(response.tokenId, response.position);
+    } else {
+      showToast(response.error.message || 'The move was rejected.', 'error');
+    }
+    clearDragGhost();
+  }, [clearDragGhost, showToast]);
+
+  const { movementPreviews } = useTokenSocketEvents(socket, currentMapId, startTokenAnimation, handleMoveResponse);
+
+  // A disconnected client can miss the one-shot accepted/rejected response.
+  // Reload the current map after reauthentication to reconcile any pending move.
   useEffect(() => {
-    if (!socket) return;
-
-    const handleTokenMoved = (event: TokenMovedEvent) => {
-      // Read from the store (not a render closure) so rapid events that arrive
-      // in the same macro-task all see the most recently mutated state.
-      const store = useGameStore.getState();
-      const token = store.tokens[event.tokenId];
-      if (!token) return;
-
-      // Start animation from current position to new position
-      setAnimatingTokens((prev) => {
-        const newMap = new Map(prev);
-        newMap.set(event.tokenId, {
-          fromX: token.position.x,
-          fromY: token.position.y,
-          toX: event.x,
-          toY: event.y,
-          startTime: Date.now(),
-          duration: 200,
-        });
-        return newMap;
+    if (!socket || !campaign?.id || !currentMapId) return;
+    return socket.onLifecycle((event) => {
+      const pending = pendingMovementRef.current;
+      if (event !== 'authenticated' || !pending) return;
+      const requestId = pending.requestId;
+      api.getMap(campaign.id, pending.mapId).then(({ map }) => {
+        if (pendingMovementRef.current?.requestId !== requestId) return;
+        const canonical = map.tokens?.find((token) => token.id === pending.tokenId);
+        if (canonical) useGameStore.getState().applyTokenMove(canonical.id, canonical.position);
+        clearTimeout(pending.timeoutId);
+        pendingMovementRef.current = null;
+        clearDragGhost();
+        const accepted = canonical?.position.x === pending.destination.x && canonical?.position.y === pending.destination.y;
+        if (!accepted) showToast('The map was refreshed after reconnect; the move did not complete.', 'info');
+      }).catch((error) => {
+        console.warn('[MapCanvas] Could not reconcile pending move after reconnect:', error);
       });
+    });
+  }, [socket, campaign?.id, currentMapId, clearDragGhost, showToast]);
 
-      // Store writes are synchronous — subsequent handlers in the same
-      // macro-task (e.g. token:appeared for NPCs) see the correct state.
-      store.applyTokenMove(event.tokenId, { x: event.x, y: event.y });
-    };
-
-    // Listen for token moved events.
-    //
-    // Subscribe through the client rather than the raw io instance: the client
-    // keeps a registry and re-attaches on reconnect. Binding to `getSocket()`
-    // directly meant this listener died with the socket it was attached to,
-    // and since `socket` here is the stable singleton the effect never re-ran
-    // to rebind — so remote token movement silently stopped arriving after any
-    // reconnect until the page was reloaded.
-    socket.onTokenMoved(handleTokenMoved);
-
-    // Cleanup listener on unmount
-    return () => {
-      socket.off('token.moved', handleTokenMoved);
-    };
-  }, [socket]); // handler reads/writes via the store, no reactive deps needed
+  useEffect(() => () => {
+    if (pendingMovementRef.current) clearTimeout(pendingMovementRef.current.timeoutId);
+  }, []);
 
   // ============================================
   // Map Change
@@ -1563,6 +1588,7 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
       draggedToken,
       dragOffset,
       hoverCoords,
+      movementPreviews: Object.values(movementPreviews),
       hoverTokenId: hoverToken?.id ?? null,
       revealedCells,
       isDM: renderIsDM,
@@ -1578,7 +1604,7 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
     }, viewport);
 
     ctx.restore();
-  }, [currentMap, imageLoaded, mapImage, mapControls.panOffset, mapControls.zoom, userRole, user?.id, campaign?.characters, campaign?.spiritLayerStyle, tokens, tokenImages, animatingTokens, draggedToken, dragOffset, hoverCoords, hoverToken, revealedCells, dmShowSpiritTokens, dmViewBothPlanes, characterHpCache, currentTurnTokenId, prefersReducedMotion, peekTokenId]);
+  }, [currentMap, imageLoaded, mapImage, mapControls.panOffset, mapControls.zoom, userRole, user?.id, campaign?.characters, campaign?.spiritLayerStyle, tokens, tokenImages, animatingTokens, movementPreviews, draggedToken, dragOffset, hoverCoords, hoverToken, revealedCells, dmShowSpiritTokens, dmViewBothPlanes, characterHpCache, currentTurnTokenId, prefersReducedMotion, peekTokenId]);
 
   /**
    * Draw the OVERLAY layer (top canvas): dynamic-lighting darkness, DM light
@@ -1794,7 +1820,7 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
   useEffect(() => {
     markDirty('tokens');
     if (currentMap?.lightingEnabled) markDirty('overlay');
-  }, [markDirty, tokens, tokenImages, animatingTokens, hoverToken, characterHpCache, dmShowSpiritTokens, currentMap?.lightingEnabled, currentTurnTokenId, peekTokenId]);
+  }, [markDirty, tokens, tokenImages, animatingTokens, movementPreviews, hoverToken, characterHpCache, dmShowSpiritTokens, currentMap?.lightingEnabled, currentTurnTokenId, peekTokenId]);
 
   // Publish this map's own token hover so the initiative tracker can tint the
   // matching row — the other half of the cross-highlight.
@@ -1934,8 +1960,48 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
     y: my * mapControls.zoom + mapControls.panOffset.y,
   });
 
+  const commitTokenMove = (token: Token) => {
+    const draft = movementDraftRef.current;
+    if (!currentMap || !draft) return;
+    if (!draft.hasMoved) {
+      clearDragGhost();
+      return;
+    }
+    if (!canEmit()) {
+      showToast('The map connection is unavailable. The token was not moved.', 'error');
+      clearDragGhost();
+      return;
+    }
+
+    const requestId = crypto.randomUUID();
+    const event: TokenMoveEndEvent = draft.toMoveEndEvent(requestId, currentMap.id);
+    const destination = draft.destination;
+    const timeoutId = setTimeout(() => {
+      const pending = pendingMovementRef.current;
+      if (!pending || pending.requestId !== requestId) return;
+      clearDragGhost();
+      showToast('Move confirmation timed out. The map is being refreshed.', 'error');
+      if (campaign?.id) {
+        api.getMap(campaign.id, pending.mapId).then(({ map }) => {
+          if (pendingMovementRef.current?.requestId !== requestId) return;
+          const canonical = map.tokens?.find((candidate) => candidate.id === token.id);
+          if (canonical) useGameStore.getState().applyTokenMove(canonical.id, canonical.position);
+        }).catch((error) => {
+          console.warn('[MapCanvas] Could not refresh map after a pending move timed out:', error);
+        }).finally(() => {
+          if (pendingMovementRef.current?.requestId === requestId) pendingMovementRef.current = null;
+        });
+      } else {
+        pendingMovementRef.current = null;
+      }
+    }, 10000);
+    pendingMovementRef.current = { requestId, tokenId: token.id, mapId: currentMap.id, destination, timeoutId };
+    socket!.emitTokenMoveEnd(event);
+  };
+
   const handleMouseDown = (e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!canvasRef.current || !currentMap) return;
+    if (pendingMovementRef.current) return;
 
     // Right-button while a tool is active: start panning (left-click is reserved for tools).
     // In normal pan mode, right-click is the context menu — handled by handleContextMenu.
@@ -2273,63 +2339,18 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
 
     // If we're already holding a token, place it on this click
     if (draggedToken && dragOffset) {
-      // Finalize token position (snap to grid)
-      const finalX = Math.max(0, Math.min(gridCoords.x - dragOffset.x, currentMap.width - draggedToken.size.width));
-      const finalY = Math.max(0, Math.min(gridCoords.y - dragOffset.y, currentMap.height - draggedToken.size.height));
+      const draft = movementDraftRef.current;
+      const destination = draft?.preview(
+        gridCoords,
+        { width: currentMap.width, height: currentMap.height },
+        draggedToken.size,
+      );
+      if (destination) setHoverCoords({
+        x: destination.x + (draft?.pickupOffset.x ?? dragOffset.x),
+        y: destination.y + (draft?.pickupOffset.y ?? dragOffset.y),
 
-      // Two creatures do not share a square. The Basic Rules are blunt about it
-      // (p. 74, "Moving Around Other Creatures"): "whether a creature is a
-      // friend or an enemy, you can't willingly end your move in its space."
-      // A token at zero hit points is treated as no longer holding its space,
-      // so a body can be stood on — that part is a house rule, not something
-      // the rulebook spells out.
-      //
-      // The DM is exempt. Stacking tokens on purpose — a rider on a mount, a
-      // swarm, scenery being arranged — is ordinary DM work, and refusing it
-      // would be an obstacle rather than a rule.
-      //
-      // Checked here on the client and nowhere else, deliberately: see
-      // `blockingTokensAt`, which explains why enforcing this server-side would
-      // turn a refused move into a way to find hidden creatures.
-      if (userRole !== 'DM') {
-        const blockedBy = blockingTokensAt(
-          tokens,
-          draggedToken,
-          { x: Math.floor(finalX), y: Math.floor(finalY) },
-          characterHpCache
-        );
-        if (blockedBy.length > 0) {
-          showToast(`${blockedBy[0].name} is already standing there.`, 'info');
-          setDraggedToken(null);
-          setDragOffset(null);
-          markDirty('tokens');
-          return;
-        }
-      }
-
-      // Emit token.move.end event
-      if (canEmit() && currentMap.id) {
-        const event: TokenMoveEndEvent = {
-          tokenId: draggedToken.id,
-          mapId: currentMap.id,
-          x: Math.floor(finalX),
-          y: Math.floor(finalY),
-        };
-        socket!.emitTokenMoveEnd(event);
-      } else {
-        console.warn('⚠️ Cannot emit token.move.end - socket not connected');
-      }
-
-      // Update local token position
-      useGameStore.getState().applyTokenMove(draggedToken.id, {
-        x: Math.floor(finalX),
-        y: Math.floor(finalY),
       });
-
-      // Clear drag state
-      setDraggedToken(null);
-      setDragOffset(null);
-      console.log('✅ Token placed, state cleared');
+      commitTokenMove(draggedToken);
       return;
     }
 
@@ -2349,10 +2370,9 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
       }
       console.log('👆 Picking up token:', token.name);
       setDraggedToken(token);
-      setDragOffset({
-        x: gridCoords.x - token.position.x,
-        y: gridCoords.y - token.position.y,
-      });
+      const draft = new TokenMovementDraft(token.id, token.position, gridCoords);
+      movementDraftRef.current = draft;
+      setDragOffset(draft.pickupOffset);
 
       // Emit token.move.start event
       if (canEmit() && currentMap.id) {
@@ -2584,18 +2604,29 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
 
     // Handle token dragging
     if (draggedToken && dragOffset) {
-      // Calculate new token position (snapped to grid)
-      const newX = Math.max(0, Math.min(gridCoords.x - dragOffset.x, currentMap.width - draggedToken.size.width));
-      const newY = Math.max(0, Math.min(gridCoords.y - dragOffset.y, currentMap.height - draggedToken.size.height));
+      // Keep the visual preview and collected route in grid space. Sparse
+      // pointer samples invalidate the explicit route; the server will plan
+      // the shortest legal one when the final request omits it.
+      const destination = movementDraftRef.current?.preview(
+        gridCoords,
+        { width: currentMap.width, height: currentMap.height },
+        draggedToken.size,
+      ) ?? {
+        x: Math.max(0, Math.min(gridCoords.x - dragOffset.x, currentMap.width - draggedToken.size.width)),
+        y: Math.max(0, Math.min(gridCoords.y - dragOffset.y, currentMap.height - draggedToken.size.height)),
+      };
 
       // Throttle move events to 60fps
       const now = Date.now();
-      if (canEmit() && currentMap.id && now - lastMoveEmitRef.current >= MOVE_THROTTLE_MS) {
+      if (
+        (destination.x !== draggedToken.position.x || destination.y !== draggedToken.position.y) &&
+        canEmit() && currentMap.id && now - lastMoveEmitRef.current >= MOVE_THROTTLE_MS
+      ) {
         const event: TokenMoveEvent = {
           tokenId: draggedToken.id,
           mapId: currentMap.id,
-          x: Math.floor(newX),
-          y: Math.floor(newY),
+          x: destination.x,
+          y: destination.y,
         };
         socket!.emitTokenMove(event);
         lastMoveEmitRef.current = now;
@@ -2626,10 +2657,14 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
   };
 
   /**
-   * Handle mouse up (stop map panning)
-   * Note: Token placement is handled in handleMouseDown on second click
+   * Finish a token drag on release. A plain click still leaves the token
+   * picked up so users can keep the existing click-pick / click-place flow.
    */
   const handleMouseUp = (e?: React.MouseEvent<HTMLCanvasElement>) => {
+    if (pendingMovementRef.current) {
+      mapControls.stopDrag();
+      return;
+    }
     // Release right-button pan
     if (e?.button === 2) {
       rightPanActiveRef.current = false;
@@ -2660,6 +2695,29 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
         setSelectedWallIds((prev) => (additive ? new Set([...prev, ...caught]) : caught));
       }
       markDirty('overlay');
+    }
+
+    if (e?.button === 0 && draggedToken && dragOffset && currentMap && canvasRef.current) {
+      const rect = canvasRef.current.getBoundingClientRect();
+      const gridCoords = mapControls.screenToGrid({
+        x: e.clientX - rect.left,
+        y: e.clientY - rect.top,
+      });
+      const draft = movementDraftRef.current;
+      const destination = draft?.preview(
+        gridCoords,
+        { width: currentMap.width, height: currentMap.height },
+        draggedToken.size,
+      );
+      if (destination) {
+        setHoverCoords({
+          x: destination.x + draft!.pickupOffset.x,
+          y: destination.y + draft!.pickupOffset.y,
+        });
+      }
+      if (draft?.hasMoved) commitTokenMove(draggedToken);
+      mapControls.stopDrag();
+      return;
     }
 
     // Commit wall endpoint drag or select endpoint for merge
@@ -2760,16 +2818,15 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
    */
   const handleMouseLeave = () => {
     // Cancel token drag if in progress
-    if (draggedToken) {
-      setDraggedToken(null);
-      setDragOffset(null);
+    if (draggedToken && !pendingMovementRef.current) {
+      clearDragGhost();
     }
 
     // Stop map panning
     mapControls.stopDrag();
 
     // Clear hover state
-    setHoverCoords(null);
+    if (!pendingMovementRef.current) setHoverCoords(null);
     setHoverToken(null);
     setHoveredDoorId(null);
     hoverMapPxRef.current = null;
@@ -2895,9 +2952,8 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
     setDoorContextMenu(null);
 
     // Cancel any picked-up token (right-click cancels movement)
-    if (draggedToken) {
-      setDraggedToken(null);
-      setDragOffset(null);
+    if (draggedToken && !pendingMovementRef.current) {
+      clearDragGhost();
     }
 
     // Get grid + screen coordinates of click

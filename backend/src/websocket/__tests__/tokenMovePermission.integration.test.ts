@@ -138,7 +138,7 @@ describe('token.move, the per-frame event', () => {
     const other = await server.connectAndAuth(otherCookie, campaignId);
     const watcher = await server.connectAndAuth(dmCookie, campaignId);
 
-    const silence = expectNoEvent(watcher, 'token.moved', 500);
+    const silence = expectNoEvent(watcher, 'token.move.preview', 500);
     other.emit('token.move', { tokenId: OWNED_TOKEN, mapId, x: 9, y: 9 });
     await expect(silence).resolves.toBeUndefined();
 
@@ -150,7 +150,7 @@ describe('token.move, the per-frame event', () => {
     const spectator = await server.connectAndAuth(spectatorCookie, campaignId);
     const watcher = await server.connectAndAuth(dmCookie, campaignId);
 
-    const silence = expectNoEvent(watcher, 'token.moved', 500);
+    const silence = expectNoEvent(watcher, 'token.move.preview', 500);
     spectator.emit('token.move', { tokenId: DM_TOKEN, mapId, x: 8, y: 8 });
     await expect(silence).resolves.toBeUndefined();
 
@@ -162,7 +162,7 @@ describe('token.move, the per-frame event', () => {
     const owner = await server.connectAndAuth(ownerCookie, campaignId);
     const watcher = await server.connectAndAuth(dmCookie, campaignId);
 
-    const moved = waitForEvent(watcher, 'token.moved');
+    const moved = waitForEvent(watcher, 'token.move.preview');
     owner.emit('token.move', { tokenId: OWNED_TOKEN, mapId, x: 5, y: 5 });
     await expect(moved).resolves.toMatchObject({ tokenId: OWNED_TOKEN, x: 5, y: 5 });
 
@@ -174,7 +174,7 @@ describe('token.move, the per-frame event', () => {
     const dm = await server.connectAndAuth(dmCookie, campaignId);
     const watcher = await server.connectAndAuth(ownerCookie, campaignId);
 
-    const moved = waitForEvent(watcher, 'token.moved');
+    const moved = waitForEvent(watcher, 'token.move.preview');
     dm.emit('token.move', { tokenId: OWNED_TOKEN, mapId, x: 6, y: 6 });
     await expect(moved).resolves.toMatchObject({ tokenId: OWNED_TOKEN, x: 6, y: 6 });
 
@@ -193,9 +193,9 @@ describe('token.move.end, the event that saves', () => {
     });
 
     const spectator = await server.connectAndAuth(spectatorCookie, campaignId);
-    const refused = waitForEvent(spectator, 'error');
+    const refused = waitForEvent(spectator, 'token.move.rejected');
     spectator.emit('token.move.end', { tokenId: OWNED_TOKEN, mapId, x: 12, y: 12 });
-    await expect(refused).resolves.toBeDefined();
+    await expect(refused).resolves.toMatchObject({ error: { code: 'PERMISSION_DENIED' } });
 
     const saved = await prisma.map.findUnique({ where: { id: mapId }, select: { tokens: true } });
     const stored = (saved!.tokens as unknown as { id: string; position: { x: number } }[])

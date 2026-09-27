@@ -22,6 +22,12 @@ jest.mock('../../middleware/compose', () => {
   };
 });
 
+const mockLockCampaignMapRows = jest.fn();
+
+jest.mock('../../services/combatStatePersistence', () => ({
+  lockCampaignMapRows: (...args: unknown[]) => mockLockCampaignMapRows(...args),
+}));
+
 jest.mock('../../config/database', () => {
   const prisma: any = {
     character: { findUnique: jest.fn() },
@@ -56,6 +62,8 @@ import { broadcastTokenEvent } from '../../websocket/utils';
 
 const db = prisma as any;
 const tokenBroadcast = broadcastTokenEvent as jest.Mock;
+let mapRows: Array<{ id: string; tokens: any[] }>;
+let movementDuringMapList: { x: number; y: number } | null;
 
 const app = express();
 app.use(express.json());
@@ -68,7 +76,7 @@ beforeEach(() => {
   db.campaignMembership.findMany.mockResolvedValue([
     { id: 'm-player', userId: 'player-1', role: 'PLAYER', characterIds: [] },
   ]);
-  db.map.findMany.mockResolvedValue([
+  mapRows = [
     {
       id: 'map-1',
       tokens: [
@@ -77,7 +85,22 @@ beforeEach(() => {
       ],
     },
     { id: 'map-2', tokens: [{ id: 'tok-mich-2', characterId: 'char-1', controlledBy: 'player-1', name: 'Mich' }] },
-  ]);
+  ];
+  movementDuringMapList = null;
+  db.map.findMany.mockImplementation(async () => {
+    const snapshot = JSON.parse(JSON.stringify(mapRows));
+    if (movementDuringMapList) mapRows[0].tokens[0].position = movementDuringMapList;
+    return snapshot;
+  });
+  db.map.update.mockImplementation(async ({ where, data }: any) => {
+    const row = mapRows.find((candidate) => candidate.id === where.id)!;
+    Object.assign(row, JSON.parse(JSON.stringify(data)));
+    return JSON.parse(JSON.stringify(row));
+  });
+  mockLockCampaignMapRows.mockImplementation(async (_tx: unknown, _campaignId: string, mapId: string) => ({
+    campaign: { id: 'camp-1', combatState: null },
+    map: JSON.parse(JSON.stringify(mapRows.find((candidate) => candidate.id === mapId))),
+  }));
   tokenBroadcast.mockImplementation(async () => {
     expect(db.__committed).toBe(true);
   });
@@ -107,4 +130,23 @@ test('an invalid controller changes and broadcasts nothing', async () => {
   expect(res.status).toBe(400);
   expect(db.map.update).not.toHaveBeenCalled();
   expect(tokenBroadcast).not.toHaveBeenCalled();
+});
+
+test('reads token control data after the map lock so it preserves a concurrent movement', async () => {
+  movementDuringMapList = { x: 4, y: 2 };
+
+  const res = await request(app)
+    .put('/api/campaigns/camp-1/characters/char-1/controller')
+    .send({ userId: 'player-1' });
+
+  expect(res.status).toBe(200);
+  expect(mockLockCampaignMapRows).toHaveBeenCalledWith(expect.anything(), 'camp-1', 'map-1');
+  expect(db.map.update).toHaveBeenCalledWith(expect.objectContaining({
+    where: { id: 'map-1' },
+    data: { tokens: expect.arrayContaining([expect.objectContaining({
+      id: 'tok-mich',
+      controlledBy: 'player-1',
+      position: { x: 4, y: 2 },
+    })]) },
+  }));
 });

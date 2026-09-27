@@ -24,6 +24,7 @@ import {
   Plus,
   Trash2,
   Dices,
+  Zap,
   Shield,
   Skull,
   User,
@@ -395,6 +396,12 @@ export default function InitiativeTracker() {
     socket.emitInitiativeNext();
   }, [socket]);
 
+  const handleDash = useCallback(() => {
+    const movement = combatState.movement;
+    if (!socket || !movement || movement.tokenId !== combatState.currentTokenId) return;
+    socket.emitInitiativeDash({ tokenId: movement.tokenId });
+  }, [socket, combatState.movement, combatState.currentTokenId]);
+
   const handleEnd = useCallback(() => {
     if (!socket) return;
     setShowEndConfirm(true);
@@ -444,6 +451,9 @@ export default function InitiativeTracker() {
 
   const combatantIds = new Set(combatState.combatants.map((c) => c.tokenId));
   const currentCombatant = combatState.combatants.find((c) => c.tokenId === combatState.currentTokenId);
+  const currentMovement = combatState.movement?.tokenId === combatState.currentTokenId
+    ? combatState.movement
+    : null;
 
   // ── Render ───────────────────────────────────────────────────────────────
 
@@ -482,11 +492,21 @@ export default function InitiativeTracker() {
           <div className="p-3 space-y-3">
             {/* Active turn banner */}
             {combatState.active && currentCombatant && (
-              <div className="flex items-center gap-2 px-3 py-2 bg-warm-amber/10 border border-warm-amber/30 rounded-lg">
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 px-3 py-2 bg-warm-amber/10 border border-warm-amber/30 rounded-lg">
                 <div className="w-2 h-2 rounded-full bg-warm-amber animate-pulse flex-shrink-0" />
                 <span className="text-xs font-semibold text-warm-amber truncate">
                   {currentCombatant.name}'s turn
                 </span>
+                {currentMovement && (
+                  <div className="ml-auto flex flex-wrap items-center justify-end gap-x-3 gap-y-1 text-[11px] text-stone-gray" aria-label="Active actor movement">
+                    <span>{currentMovement.speedFeet === null ? 'Speed unknown' : `Speed ${currentMovement.speedFeet} ft`}</span>
+                    <span>{currentMovement.spentFeet} ft spent</span>
+                    <span>{currentMovement.remainingMovementFeet === null
+                      ? 'Movement remaining unknown'
+                      : `${currentMovement.remainingMovementFeet} ft remaining`}</span>
+                    {currentMovement.dashBonusFeet > 0 && <span>Dash +{currentMovement.dashBonusFeet} ft</span>}
+                  </div>
+                )}
               </div>
             )}
 
@@ -550,6 +570,17 @@ export default function InitiativeTracker() {
                       </button>
                     ) : (
                       <>
+                        {currentMovement && !currentMovement.dashUsed && currentMovement.speedFeet !== null && (
+                          <button
+                            onClick={handleDash}
+                            aria-label={`Dash for ${currentCombatant?.name ?? 'active actor'}`}
+                            title="Take the Dash action"
+                            className="flex items-center justify-center gap-1.5 py-1.5 px-3 text-xs font-semibold border border-moss-green/30 text-moss-green rounded-lg hover:bg-moss-green/5 transition-colors"
+                          >
+                            <Zap className="w-3.5 h-3.5" />
+                            Dash
+                          </button>
+                        )}
                         <button
                           onClick={handleNext}
                           className="flex-1 flex items-center justify-center gap-1.5 py-1.5 px-3 text-xs font-semibold bg-warm-amber text-white rounded-lg hover:bg-warm-amber/90 transition-colors"

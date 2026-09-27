@@ -98,6 +98,23 @@ describe('map token validation', () => {
       ...body,
     });
 
+  describe('movement-only NPCs supplied by MCP', () => {
+    it('creates and updates a speed-only block without inventing creature statistics', async () => {
+      const created = await place({ statBlock: { speed: '30 ft.' } });
+      expect(created.status).toBe(201);
+      expect(created.body.token.statBlock).toEqual({ speed: '30 ft.' });
+      const updated = await dm.put(`/api/campaigns/${campaignId}/maps/${mapId}/tokens/${created.body.token.id}`)
+        .send({ statBlock: { speed: '40 ft.' } });
+      expect(updated.status).toBe(200);
+      expect(updated.body.token.statBlock).toEqual({ speed: '40 ft.' });
+    });
+
+    it('does not admit a malformed full block through the speed-only compatibility shape', async () => {
+      expect((await place({ statBlock: { speed: '30 ft.', ac: 'invalid', abilities: {} } })).status).toBe(400);
+      expect((await place({ statBlock: { speed: '30 ft.', savingThrows: { wis: 300 } } })).status).toBe(400);
+    });
+  });
+
   describe('hit points', () => {
     it('accepts the token HP shape', async () => {
       const res = await place({ hp: { current: 7, max: 7, temp: 0 } });

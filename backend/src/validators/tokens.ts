@@ -13,7 +13,7 @@
  */
 
 import { z } from 'zod';
-import { NpcStatBlockSchema } from './statBlock';
+import { TokenStatBlockSchema } from './statBlock';
 
 /** How many squares a token occupies. */
 export const TokenSizeSchema = z.object({
@@ -111,7 +111,7 @@ export function validateTokenShapes(
   if ('failed' in metadata) return { ok: false, message: metadata.failed };
   if (metadata.parsed) value.metadata = metadata.parsed;
 
-  const statBlock = check('statBlock', NpcStatBlockSchema, true);
+  const statBlock = check('statBlock', TokenStatBlockSchema, true);
   if ('failed' in statBlock) return { ok: false, message: statBlock.failed };
   value.statBlock = statBlock.parsed;
 

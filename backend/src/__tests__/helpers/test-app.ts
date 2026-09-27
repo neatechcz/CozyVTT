@@ -38,7 +38,9 @@ import adminRoutes from '../../routes/admin';
 export function createTestApp(): express.Express {
   const app = express();
 
+  app.put('/api/campaigns/:campaignId/maps/:id/difficult-terrain', express.json({ limit: '8mb' }));
   app.use(bodyParsers());
+
 
   // Memory store — no PostgreSQL needed for tests
   app.use(

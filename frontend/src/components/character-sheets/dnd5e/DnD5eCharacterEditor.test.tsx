@@ -65,6 +65,18 @@ function makeNonSpellcaster(): Character {
 }
 
 describe('DnD5eCharacterEditor', () => {
+  it('explains and saves the Inspiration checkbox', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<DnD5eCharacterEditor character={makeNonSpellcaster()} onSave={onSave} onCancel={vi.fn()} />);
+    expect(screen.getByLabelText('Inspirace (2014)')).not.toBeChecked();
+    expect(screen.getByText(/Před hodem.*výhodu/i)).toBeInTheDocument();
+    fireEvent.click(screen.getByLabelText('Inspirace (2014)'));
+    fireEvent.click(screen.getByRole('button', { name: /save/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0]?.[0].inspiration).toBe(true);
+  });
+
+
   it('shows Czech proficiencies in editable categories and preserves other training on save', async () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
     const character = makeNonSpellcaster();
@@ -104,8 +116,9 @@ describe('DnD5eCharacterEditor', () => {
     render(<DnD5eCharacterEditor character={makeNonSpellcaster()} onSave={onSave} onCancel={vi.fn()} />);
     fireEvent.click(screen.getByRole('button', { name: 'Combat' }));
     fireEvent.change(screen.getByLabelText('Last resolved day'), { target: { value: '8. Mlžníku' } });
-    fireEvent.change(screen.getByLabelText('Food on resolved day (lb)'), { target: { value: '0.5' } });
-    fireEvent.change(screen.getByLabelText('Water on resolved day (gallons)'), { target: { value: '0.5' } });
+    fireEvent.change(screen.getByLabelText('Food on tracked day (lb)'), { target: { value: '0.5' } });
+    fireEvent.change(screen.getByLabelText('Water on tracked day (gallons)'), { target: { value: '0.5' } });
+
     fireEvent.change(screen.getByLabelText('Exhaustion level'), { target: { value: '2' } });
     fireEvent.click(screen.getByRole('button', { name: /save/i }));
     await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
@@ -115,6 +128,21 @@ describe('DnD5eCharacterEditor', () => {
       conditions: expect.arrayContaining(['exhausted']),
     });
   });
+
+  it('saves an open intake day separately from the last resolved day', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<DnD5eCharacterEditor character={makeNonSpellcaster()} onSave={onSave} onCancel={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Combat' }));
+    fireEvent.change(screen.getByLabelText('Tracked day (in-game)'), { target: { value: '8. Mlžníku L. K. 351' } });
+    fireEvent.change(screen.getByLabelText('Food on tracked day (lb)'), { target: { value: '1' } });
+    fireEvent.click(screen.getByRole('button', { name: /save/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0][0].survival).toMatchObject({
+      intakeDay: '8. Mlžníku L. K. 351', foodTodayPounds: 1,
+    });
+    expect(onSave.mock.calls[0][0].survival).not.toHaveProperty('lastResolvedDay');
+  });
+
   it('preserves uncategorized legacy proficiencies when one category is edited', async () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
     render(

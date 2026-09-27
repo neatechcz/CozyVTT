@@ -7,6 +7,7 @@ export function trackedExhaustionLevel(data: { survival?: { exhaustionLevel?: nu
   return data.survival?.exhaustionLevel ?? data.exhaustionLevel;
 }
 
+
 const EFFECTS = [
   'Disadvantage on ability checks',
   'Speed halved',

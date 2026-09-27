@@ -197,6 +197,32 @@ test('emits character.updated with changedPaths ["hp.current"] after character.h
   });
 });
 
+test('D&D 5e healing stops at the effective maximum under level-four exhaustion', async () => {
+  const { roomEmit, handler, stored } = setup('DND_5E', {
+    hp: { current: 4, maximum: 21, temporary: 0 },
+    survival: { exhaustionLevel: 4, deprivationLockedLevels: 0 },
+  });
+
+  await handler({ characterId: 'char-1', delta: 20 });
+
+  expect(stored().data.hp).toEqual({ current: 10, maximum: 21, temporary: 0 });
+  expect((roomEmit.mock.calls[0] as unknown[])[1]).toMatchObject({
+    hp: { current: 10, max: 10, temp: 0 },
+  });
+});
+
+test('Pathfinder HP keeps its own maximum even if legacy data has a survival field', async () => {
+  const { roomEmit, handler, stored } = setup('PATHFINDER_2E', {
+    hp: { current: 8, maximum: 10, temporary: 0 },
+    survival: { exhaustionLevel: 4 },
+  });
+
+  await handler({ characterId: 'char-1', delta: 5 });
+
+  expect(stored().data.hp.current).toBe(10);
+  expect((roomEmit.mock.calls[0] as unknown[])[1]).toMatchObject({ hp: { current: 10, max: 10 } });
+});
+
 test('broadcast character includes campaign { id, name } like PUT/PATCH', async () => {
   const { roomEmit, handler } = setup('DND_5E', { hp: { current: 8, maximum: 10 } });
 

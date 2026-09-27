@@ -100,8 +100,11 @@ const generalApiLimiter = rateLimit({
 // BODY PARSING
 // ============================================
 
+// Parse the bounded terrain-edit payload before the release's shared parser.
+app.put('/api/campaigns/:campaignId/maps/:id/difficult-terrain', express.json({ limit: '8mb' }));
 // Preserve the field-level PATCH parser while using the release's shared
 // 1 MB parser for all other JSON and form requests.
+
 app.patch('/api/characters/:id/data', characterDataPatchBodyParser);
 app.use(bodyParsers());
 

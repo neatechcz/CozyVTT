@@ -7,6 +7,7 @@ describe('2014 D&D 5e exhaustion on a character sheet', () => {
     expect(trackedExhaustionLevel({ exhaustionLevel: 3 })).toBe(3);
     expect(trackedExhaustionLevel({})).toBeUndefined();
   });
+
   it('applies cumulative speed, hit point and fatal effects without changing base values', () => {
     expect(exhaustionEffects(4)).toContain('Hit point maximum halved');
     expect(effectiveSpeed(30, 2)).toBe(15);

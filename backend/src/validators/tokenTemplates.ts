@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { NpcStatBlockSchema } from './statBlock';
+import { TokenStatBlockSchema } from './statBlock';
 import { TokenSizeSchema, TokenHpSchema } from './tokens';
 
 // ── Shared sub-schemas ──────────────────────────────────────────────────────
@@ -19,7 +19,7 @@ export const CreateTokenTemplateSchema = z.object({
   notes: z.string().max(5000).nullable().optional(),
   hp: TokenHpSchema.nullable().optional(),
   showHpBar: z.boolean().default(false),
-  statBlock: NpcStatBlockSchema.nullable().optional(),
+  statBlock: TokenStatBlockSchema.nullable().optional(),
   sightRadius: z.number().min(0).max(200).nullable().optional(),
 });
 
@@ -33,7 +33,7 @@ export const UpdateTokenTemplateSchema = z.object({
   notes: z.string().max(5000).nullable().optional(),
   hp: TokenHpSchema.nullable().optional(),
   showHpBar: z.boolean().optional(),
-  statBlock: NpcStatBlockSchema.nullable().optional(),
+  statBlock: TokenStatBlockSchema.nullable().optional(),
   sightRadius: z.number().min(0).max(200).nullable().optional(),
 }).refine(
   (obj) => Object.keys(obj).length > 0,
@@ -51,7 +51,7 @@ export const SaveTokenAsTemplateSchema = z.object({
   notes: z.string().max(5000).nullable().optional(),
   hp: TokenHpSchema.nullable().optional(),
   showHpBar: z.boolean().default(false),
-  statBlock: NpcStatBlockSchema.nullable().optional(),
+  statBlock: TokenStatBlockSchema.nullable().optional(),
   sightRadius: z.number().min(0).max(200).nullable().optional(),
 });
 

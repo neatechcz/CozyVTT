@@ -119,6 +119,8 @@ const hitPointsSchema = z.object({
 
 /** D&D 5e 2014 daily needs and six-level exhaustion tracker. */
 const survivalSchema = z.object({
+  intakeDay: z.string().trim().min(1).max(120).optional(),
+
   lastResolvedDay: z.string().trim().min(1).max(120).optional(),
   daysWithoutFood: z.number().min(0).refine((value) => Number.isInteger(value * 2), 'Use half-day increments').optional(),
   foodTodayPounds: z.number().min(0).optional(),

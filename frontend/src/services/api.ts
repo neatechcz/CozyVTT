@@ -468,6 +468,13 @@ class ApiClient {
     return response.data;
   }
 
+  async getSpellDescription(campaignId: string, name: string): Promise<{ name: string; description: string }> {
+    const response = await this.client.get<{ spell: { name: string; description: string } }>(
+      `/api/campaigns/${encodeURIComponent(campaignId)}/spells/${encodeURIComponent(name)}`,
+    );
+    return response.data.spell;
+  }
+
   async updateCampaign(id: string, data: UpdateCampaignRequest): Promise<{ message: string; campaign: Campaign }> {
     const response = await this.client.put(`/api/campaigns/${id}`, data);
     return response.data;

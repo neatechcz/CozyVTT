@@ -5,7 +5,9 @@
  */
 
 import { z } from 'zod';
-import { createNpcStatBlockSchema, IMPORT_STAT_BLOCK_LIMITS } from './statBlock';
+import { createNpcStatBlockSchema, IMPORT_STAT_BLOCK_LIMITS, MovementOnlyStatBlockSchema } from './statBlock';
+import { normalizeSpellName } from '../utils/spell-names';
+
 
 // ── Limits ──────────────────────────────────────────────────────────────────
 
@@ -80,6 +82,10 @@ export const CampaignSettingsSchema = z.object({
   currentVibe: z.string().max(100).nullable().optional(),
   spiritLayerEnabled: z.boolean().optional(),
   spiritLayerStyle: z.string().max(100).optional(),
+  spellDescriptions: z.array(z.object({
+    name: z.string().trim().min(1).max(120).refine((name) => !!normalizeSpellName(name)),
+    description: z.string().trim().min(1).max(20000),
+  }).strip()).max(1000).optional(),
 }).strip();
 
 // ── Wall segment ────────────────────────────────────────────────────────────
@@ -126,7 +132,7 @@ const TokenSchema = z.object({
   initiative: z.number().nullable().optional(),
   sightRadius: z.number().min(0).max(200).optional(),
   displayMode: z.string().max(20).optional(),
-  statBlock: StatBlockSchema.nullable().optional(),
+  statBlock: z.union([StatBlockSchema, MovementOnlyStatBlockSchema]).nullable().optional(),
   creatureTemplateId: z.string().max(100).nullable().optional(),
 }).strip();
 
@@ -176,7 +182,7 @@ export const TokenTemplateImportSchema = z.object({
   notes: z.string().max(5000).nullable().optional(),
   hp: HpSchema.nullable().optional(),
   showHpBar: z.boolean().optional(),
-  statBlock: StatBlockSchema.nullable().optional(),
+  statBlock: z.union([StatBlockSchema, MovementOnlyStatBlockSchema]).nullable().optional(),
   sightRadius: z.number().min(0).max(200).nullable().optional(),
 }).strip();
 

@@ -5,6 +5,7 @@
 
 import { Server } from 'socket.io';
 import { throttle } from 'lodash';
+import { randomUUID } from 'crypto';
 import { AuthenticatedSocket } from '../auth';
 import { prisma } from '../../config/database';
 import {
@@ -20,7 +21,19 @@ import {
 import logger from '../../utils/logger';
 import { Token, tokenMoveLimiter } from '../shared';
 import { bumpMapVersion, getMapVersion } from '../mapVersion';
-import { toJson } from '../../utils/prisma-json';
+import { readCombatState, type MovementLedger } from '../initiativeState';
+import {
+  planCombatMovement,
+  type GridPoint,
+  type MovementToken,
+  type MovementSpeedActor,
+} from '../../services/combatMovement';
+import {
+  loadCampaignCombatState,
+  saveCampaignCombatState,
+  withCampaignMapRowLock,
+} from '../../services/combatStatePersistence';
+
 
 /** A socket in the campaign room with the inputs of its token view. */
 interface RoomViewer {
@@ -99,7 +112,7 @@ async function emitToTokenViewers(
   event: string,
   payload: unknown,
   { excludeSender, viewers }: { excludeSender: boolean; viewers: () => Promise<RoomViewer[]> }
-): Promise<void> {
+): Promise<string[]> {
   const roomViewers = await viewers();
   const everyPlayerSeesMaterialPlane = roomViewers.every(
     ({ viewer }) => viewer.role === 'DM' || (!!viewer.userId && !viewer.spiritVisible)
@@ -110,19 +123,110 @@ async function emitToTokenViewers(
       .filter((id) => !(excludeSender && id === sender.id));
     // io.to([]) would broadcast to the whole namespace.
     if (socketIds.length > 0) io.to(socketIds).emit(event, payload);
-    return;
+    return socketIds;
   }
 
   const view = tokenViewCache(map);
+  const recipientIds: string[] = [];
   for (const { socket, viewer } of roomViewers) {
     if (excludeSender && socket.id === sender.id) continue;
     if (viewer.role === 'DM' || view(tokens, viewer).some((t) => t.id === tokenId)) {
       socket.emit(event, payload);
+      recipientIds.push(socket.id);
     }
   }
+  return recipientIds;
 }
 
 type FrameData = { tokenId: string; mapId: string; x: number; y: number };
+type MoveRequest = FrameData & {
+  requestId?: unknown;
+  route?: unknown;
+  override?: unknown;
+};
+
+interface MovementWire {
+  tokenId: string;
+  turnId: string;
+  speedFeet: number | null;
+  movementCostFeet: number;
+  spentFeet: number;
+  remainingMovementFeet: number | null;
+  dashBonusFeet: number;
+  dashUsed: boolean;
+  diagonalStepsTaken: number;
+  route: GridPoint[];
+  override: boolean;
+}
+
+interface MoveWireBase {
+  requestId: string;
+  tokenId: string;
+  mapId: string;
+  position: GridPoint | null;
+  movement: MovementWire | null;
+}
+
+type MoveTransactionResult =
+  | {
+    ok: true;
+    activeCombat: boolean;
+    map: TokenViewMap;
+    previousTokens: Token[];
+    updatedTokens: Token[];
+    token: Token;
+    movement: MovementWire | null;
+    position: GridPoint;
+  }
+  | { ok: false; message: string; code?: string }
+  | { ok: false; rejected: MoveWireBase & { error: { code: string; message: string } } };
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function movementWireFromLedger(ledger: MovementLedger | null): MovementWire | null {
+  if (!ledger) return null;
+  return {
+    tokenId: ledger.tokenId,
+    turnId: ledger.turnId,
+    speedFeet: ledger.speedFeet,
+    movementCostFeet: 0,
+    spentFeet: ledger.spentFeet,
+    remainingMovementFeet: ledger.remainingMovementFeet,
+    dashBonusFeet: ledger.dashBonusFeet,
+    dashUsed: ledger.dashUsed,
+    diagonalStepsTaken: ledger.diagonalStepsTaken,
+    route: [],
+    override: false,
+  };
+}
+
+function validGridPoint(value: unknown): value is GridPoint {
+  return isRecord(value) && typeof value.x === 'number' && Number.isInteger(value.x) &&
+    typeof value.y === 'number' && Number.isInteger(value.y);
+}
+
+function emitMoveRejection(
+  io: Server,
+  socket: AuthenticatedSocket,
+  previewedSocketIds: Set<string>,
+  payload: MoveWireBase & { error: { code: string; message: string } }
+): void {
+  socket.emit('token.move.rejected', payload);
+  const recipientIds = [...new Set([socket.id, ...previewedSocketIds])];
+  if (recipientIds.length > 0) {
+    io.to(recipientIds).emit('token.move.preview', {
+      requestId: payload.requestId,
+      tokenId: payload.tokenId,
+      mapId: payload.mapId,
+      ...(payload.position ? { x: payload.position.x, y: payload.position.y, position: payload.position } : {}),
+      preview: false,
+      movedBy: socket.userId,
+    });
+  }
+  previewedSocketIds.clear();
+}
 
 /** What one drag reuses between frames: the map snapshot and the room's viewers. */
 interface DragContext {
@@ -147,6 +251,7 @@ export function registerTokenHandlers(io: Server, socket: AuthenticatedSocket): 
   let frameInFlight: Promise<void> | null = null;
   let pendingFrame: FrameData | null = null;
   let lastFrame: FrameData | null = null;
+  const previewedSocketIds = new Set<string>();
 
   async function loadDragContext(mapId: string): Promise<DragContext | null> {
     if (drag && drag.mapId === mapId && drag.version === getMapVersion(mapId) && Date.now() < drag.expiresAt) {
@@ -192,6 +297,7 @@ export function registerTokenHandlers(io: Server, socket: AuthenticatedSocket): 
       // A new drag starts from a fresh map snapshot.
       drag = null;
       lastFrame = null;
+      previewedSocketIds.clear();
       const ctx = await loadDragContext(mapId);
 
       if (!ctx) {
@@ -205,6 +311,20 @@ export function registerTokenHandlers(io: Server, socket: AuthenticatedSocket): 
 
       if (!token) {
         socket.emit('error', { message: 'Token not found' });
+        return;
+      }
+
+      const campaign = await prisma.campaign.findUnique({
+        where: { id: socket.campaignId },
+        select: { gameSystem: true, combatState: true },
+      });
+      const combatState = readCombatState(campaign?.combatState);
+      if (combatState.active && (
+        campaign?.gameSystem !== 'DND_5E' ||
+        combatState.mapId !== mapId ||
+        combatState.currentTokenId !== tokenId
+      )) {
+        // Drag previews are not a way to move inactive combatants.
         return;
       }
 
@@ -260,7 +380,8 @@ export function registerTokenHandlers(io: Server, socket: AuthenticatedSocket): 
 
       const { tokenId, mapId, x, y } = data;
 
-      if (!tokenId || !mapId || typeof x !== 'number' || typeof y !== 'number') {
+      if (!tokenId || !mapId || typeof x !== 'number' || !Number.isInteger(x) ||
+          typeof y !== 'number' || !Number.isInteger(y)) {
         return; // Silently ignore invalid data during rapid updates
       }
 
@@ -288,33 +409,50 @@ export function registerTokenHandlers(io: Server, socket: AuthenticatedSocket): 
       }
 
       // Validate coordinates are within map bounds
-      if (x < 0 || x >= ctx.map.width || y < 0 || y >= ctx.map.height) {
-        socket.emit('error', { message: 'Token position out of bounds' });
+      // The frame's position decides who sees it (line of sight on lighting maps).
+      const storedTokens = (Array.isArray(ctx.map.tokens) ? ctx.map.tokens : []) as unknown as Token[];
+      const movingToken = storedTokens.find((t) => t.id === tokenId);
+      if (!movingToken || socket.role === 'SPECTATOR' ||
+          (socket.role !== 'DM' && movingToken.controlledBy !== socket.userId)) {
+        return;
+      }
+      if (!isRecord(movingToken.size) || !Number.isInteger(movingToken.size.width) ||
+          Number(movingToken.size.width) < 1 || !Number.isInteger(movingToken.size.height) ||
+          Number(movingToken.size.height) < 1 || x < 0 || y < 0 ||
+          x + Number(movingToken.size.width) > ctx.map.width ||
+          y + Number(movingToken.size.height) > ctx.map.height) {
         return;
       }
 
-      // The frame's position decides who sees it (line of sight on lighting maps).
-      const storedTokens = (Array.isArray(ctx.map.tokens) ? ctx.map.tokens : []) as unknown as Token[];
-      const token = storedTokens.find((candidate) => candidate.id === tokenId);
-      if (!token || socket.role === 'SPECTATOR' ||
-          (socket.role !== 'DM' && token.controlledBy !== socket.userId)) {
+      const campaign = await prisma.campaign.findUnique({
+        where: { id: socket.campaignId },
+        select: { gameSystem: true, combatState: true },
+      });
+      const combatState = readCombatState(campaign?.combatState);
+      if (combatState.active && (
+        campaign?.gameSystem !== 'DND_5E' ||
+        combatState.mapId !== mapId ||
+        combatState.currentTokenId !== tokenId
+      )) {
         return;
       }
-      if (token.layer === 'spirit' && socket.role !== 'DM' &&
-          !(await getSpiritVisibility(socket.campaignId, socket.userId!))) {
+      if (movingToken.layer === 'spirit' && socket.role !== 'DM' && socket.userId &&
+          !(await getSpiritVisibility(socket.campaignId, socket.userId))) {
         return;
       }
+
       const frameTokens = storedTokens.map((t) => (t.id === tokenId ? { ...t, position: { x, y } } : t));
-      await emitToTokenViewers(
+      const recipients = await emitToTokenViewers(
         io,
         socket,
         ctx.map,
         frameTokens,
         tokenId,
-        'token.moved',
-        { tokenId, mapId, x, y, movedBy: socket.userId },
+        'token.move.preview',
+        { tokenId, mapId, x, y, position: { x, y }, movedBy: socket.userId, preview: true },
         { excludeSender: true, viewers: ctx.viewers }
       );
+      for (const recipientId of recipients) previewedSocketIds.add(recipientId);
       lastFrame = data;
     } catch (error) {
       logger.error('token.move failed', { err: error });
@@ -353,10 +491,24 @@ export function registerTokenHandlers(io: Server, socket: AuthenticatedSocket): 
    * TOKEN.MOVE.END - User finishes dragging (final position)
    * Updates database and broadcasts to campaign
    */
-  socket.on('token.move.end', async (data: FrameData) => {
+  socket.on('token.move.end', async (rawData: MoveRequest) => {
+    const suppliedRequestId = rawData?.requestId;
+    let requestId = typeof suppliedRequestId === 'string' && suppliedRequestId.trim()
+      ? suppliedRequestId.trim()
+      : randomUUID(); // Temporary compatibility for clients predating request IDs.
+    let tokenId = typeof rawData?.tokenId === 'string' ? rawData.tokenId : '';
+    let mapId = typeof rawData?.mapId === 'string' ? rawData.mapId : '';
+    const rejectEarly = (code: string, message: string) => emitMoveRejection(io, socket, previewedSocketIds, {
+      requestId,
+      tokenId,
+      mapId,
+      position: null,
+      movement: null,
+      error: { code, message },
+    });
     try {
       if (!socket.campaignId) {
-        socket.emit('error', { message: 'Not authenticated to a campaign' });
+        rejectEarly('NOT_AUTHENTICATED', 'Not authenticated to a campaign.');
         return;
       }
 
@@ -368,122 +520,337 @@ export function registerTokenHandlers(io: Server, socket: AuthenticatedSocket): 
       drag = null;
       lastFrame = null;
 
-      // Flood ceiling: drop excess finalize writes silently. Shares the
-      // per-socket budget with token.move; a normal drag stays far under it.
+      if (!isRecord(rawData)) {
+        rejectEarly('INVALID_REQUEST', 'Invalid token move data.');
+        return;
+      }
+      const data = rawData as MoveRequest;
+      tokenId = typeof data?.tokenId === 'string' ? data.tokenId : '';
+      mapId = typeof data?.mapId === 'string' ? data.mapId : '';
+      const { x, y } = data ?? {};
+      if (!tokenId || !mapId || typeof x !== 'number' || !Number.isInteger(x) ||
+          typeof y !== 'number' || !Number.isInteger(y)) {
+        rejectEarly('INVALID_DESTINATION', 'Token destination must use integer grid coordinates.');
+        return;
+      }
+      if (data.requestId !== undefined && (typeof data.requestId !== 'string' || !data.requestId.trim() || requestId.length > 200)) {
+        rejectEarly('INVALID_REQUEST_ID', 'requestId must be a non-empty string of at most 200 characters.');
+        return;
+      }
+      if (data.route !== undefined && (!Array.isArray(data.route) || !data.route.every(validGridPoint))) {
+        rejectEarly('INVALID_ROUTE', 'route must be an array of integer grid positions.');
+        return;
+      }
+
+      // Finalize events are low-volume; refusing one silently would leave the
+      // sender's locally dragged token out of sync with the persisted map.
       if (!tokenMoveLimiter.check(socket.id, 150, 1000)) {
+        rejectEarly('RATE_LIMITED', 'Too many token movement requests.');
         return;
       }
 
-      const { tokenId, mapId, x, y } = data;
+      const route = data.route as GridPoint[] | undefined;
+      const hasOverride = data.override !== undefined;
+      const overrideReason = hasOverride && isRecord(data.override) && typeof data.override.reason === 'string'
+        ? data.override.reason.trim()
+        : '';
 
-      if (!tokenId || !mapId || typeof x !== 'number' || typeof y !== 'number') {
-        socket.emit('error', { message: 'Invalid token move data' });
-        return;
-      }
+      const result = await withCampaignMapRowLock(prisma, socket.campaignId, mapId, async (tx, campaign, map) => {
+        const tokensArray = (Array.isArray(map.tokens) ? map.tokens : []) as unknown as Token[];
+        const tokenIndex = tokensArray.findIndex((token) => token.id === tokenId);
+        if (tokenIndex < 0) return { ok: false, message: 'Token not found', code: 'TOKEN_NOT_FOUND' } as const;
+        const token = tokensArray[tokenIndex]!;
+        const position = validGridPoint(token.position) ? { x: token.position.x, y: token.position.y } : null;
+        const state = readCombatState(campaign.combatState);
+        const movementNow = state.movement?.tokenId === tokenId ? movementWireFromLedger(state.movement) : null;
+        const reject = (code: string, message: string): MoveTransactionResult => ({
+          ok: false,
+          rejected: {
+            requestId,
+            tokenId,
+            mapId,
+            position,
+            movement: code === 'UNRESOLVED_SPEED' && movementNow
+              ? { ...movementNow, speedFeet: null, remainingMovementFeet: null }
+              : movementNow,
+            error: { code, message },
+          },
+        });
 
-      // Fetch the map
-      const map = await prisma.map.findUnique({
-        where: { id: mapId },
-      });
+        if (!socket.userId) return reject('NOT_AUTHENTICATED', 'Not authenticated to a campaign.');
+        const membership = await tx.campaignMembership.findUnique({
+          where: { userId_campaignId: { userId: socket.userId, campaignId: campaign.id } },
+          select: { role: true },
+        });
+        if (!membership) return reject('PERMISSION_DENIED', 'You are not a member of this campaign.');
+        const role = membership.role;
+        if (role === 'SPECTATOR') return reject('PERMISSION_DENIED', 'Spectators cannot move tokens.');
+        if (role !== 'DM' && token.controlledBy !== socket.userId) {
+          return reject('PERMISSION_DENIED', 'You do not have permission to move this token.');
 
-      if (!map || map.campaignId !== socket.campaignId) {
-        socket.emit('error', { message: 'Map not found' });
-        return;
-      }
-
-      // Validate coordinates are within map bounds
-      if (x < 0 || x >= map.width || y < 0 || y >= map.height) {
-        socket.emit('error', { message: 'Token position out of bounds' });
-        return;
-      }
-
-      // Get tokens array
-      const tokensArray = (Array.isArray(map.tokens) ? map.tokens : []) as unknown as Token[];
-      const tokenIndex = tokensArray.findIndex((t) => t.id === tokenId);
-
-      if (tokenIndex === -1) {
-        socket.emit('error', { message: 'Token not found' });
-        return;
-      }
-
-      const token = tokensArray[tokenIndex];
-
-      // Permission check: DM can move any token, players can only move their own
-      if (socket.role !== 'DM' && token.controlledBy !== socket.userId) {
-        socket.emit('error', { message: 'You do not have permission to move this token' });
-        return;
-      }
-
-      // Spectators cannot move tokens. controlledBy is set once and is not
-      // cleared when someone is demoted, so the check above can still pass for
-      // a spectator holding a token from before.
-      if (socket.role === 'SPECTATOR') {
-        socket.emit('error', { message: 'Spectators cannot move tokens' });
-        return;
-      }
-
-      // Spirit layer check: non-DMs cannot interact with spirit tokens when spirit layer is disabled
-      if (token.layer === 'spirit' && socket.role !== 'DM') {
-        const spiritVisible = await getSpiritVisibility(socket.campaignId, socket.userId!);
-        if (!spiritVisible) {
-          socket.emit('error', { message: 'You cannot interact with spirit layer tokens' });
-          return;
         }
+        if (token.layer === 'spirit' && role !== 'DM' && !(await getSpiritVisibility(campaign.id, socket.userId))) {
+          return reject('PERMISSION_DENIED', 'You cannot interact with spirit layer tokens.');
+        }
+
+        if (!state.active) {
+          if (hasOverride) return reject('OVERRIDE_NOT_SUPPORTED', 'Movement overrides are only available during D&D 5e combat.');
+          const size = token.size;
+          if (!validGridPoint(token.position) || !isRecord(size) ||
+              !Number.isInteger(size.width) || Number(size.width) < 1 ||
+              !Number.isInteger(size.height) || Number(size.height) < 1) {
+            return reject('INVALID_TOKEN_GEOMETRY', 'Token position or footprint is invalid.');
+          }
+          if (x < 0 || y < 0 || x + Number(size.width) > map.width || y + Number(size.height) > map.height) {
+            return reject('OUT_OF_BOUNDS', `Token footprint must remain within map bounds (0-${map.width - 1}, 0-${map.height - 1}).`);
+          }
+          const movedToken = { ...token, position: { x, y } };
+          const updatedTokens = [...tokensArray];
+          updatedTokens[tokenIndex] = movedToken;
+          await tx.map.update({ where: { id: map.id }, data: { tokens: updatedTokens as any } });
+          return {
+            ok: true,
+            activeCombat: false,
+            map: withLightPolygons(map),
+            previousTokens: tokensArray,
+            updatedTokens,
+            token: movedToken,
+            movement: null,
+            position: { x, y },
+          } as const;
+        }
+
+        if (campaign.gameSystem !== 'DND_5E') {
+          return reject('UNSUPPORTED_COMBAT_SYSTEM', 'Server-authoritative movement is only available for D&D 5e combat.');
+        }
+        if (state.mapId !== mapId) {
+          return reject('TURN_MISMATCH', 'Active combat is on a different map.');
+        }
+        if (state.currentTokenId !== tokenId || !state.turnId || !state.combatId) {
+          return reject('TURN_MISMATCH', 'Only the active combatant can move during its turn.');
+        }
+        if (hasOverride && (role !== 'DM' || !overrideReason || overrideReason.length > 500)) {
+          return reject('OVERRIDE_REASON_REQUIRED', 'An explicit DM override requires a non-empty reason of at most 500 characters.');
+        }
+        if (!validGridPoint(token.position)) {
+          return reject('INVALID_TOKEN_GEOMETRY', 'The token has an invalid current grid position.');
+        }
+        const ledger = state.movement;
+        if (!ledger || ledger.turnId !== state.turnId || ledger.tokenId !== tokenId) {
+          return reject('INVALID_MOVEMENT_LEDGER', 'The active turn has no valid movement ledger.');
+        }
+
+        let actor: MovementSpeedActor;
+        if (token.characterId) {
+          const lockedCharacter = await tx.$queryRaw<Array<{ id: string }>>`
+            SELECT "id" FROM "Character"
+            WHERE "id" = ${token.characterId} AND "campaignId" = ${campaign.id}
+            FOR UPDATE
+          `;
+          const character = lockedCharacter.length > 0
+            ? await tx.character.findFirst({
+              where: { id: token.characterId, campaignId: campaign.id },
+              select: { gameSystem: true, data: true },
+            })
+            : null;
+          if (!character) return reject('UNRESOLVED_SPEED', 'The token’s linked character could not be found in this campaign.');
+          if (character.gameSystem !== 'DND_5E') {
+            return reject('UNRESOLVED_SPEED', 'The token’s linked character is not using D&D 5e rules.');
+          }
+          actor = { kind: 'pc', characterData: character.data };
+        } else {
+          let templateStatBlock: unknown;
+          if ((token as any).creatureTemplateId) {
+            const template = await tx.creatureTemplate.findUnique({
+              where: { id: (token as any).creatureTemplateId },
+              select: { statBlock: true },
+            });
+            templateStatBlock = template?.statBlock;
+          }
+          actor = {
+            kind: 'npc',
+            statBlock: token.statBlock ?? templateStatBlock,
+            conditions: token.conditions,
+            metadata: token.metadata,
+          };
+        }
+
+        const movementTokens = tokensArray as unknown as MovementToken[];
+        const movementMap = {
+          width: map.width,
+          height: map.height,
+          gridSize: map.gridSize,
+          feetPerSquare: map.feetPerSquare,
+          diagonalRule: map.diagonalRule,
+          wallSegments: map.wallSegments,
+          difficultTerrain: map.difficultTerrain,
+          tokens: movementTokens,
+        };
+        const plannerInput = {
+          tokenId,
+          actor,
+          destination: { x, y },
+          route,
+          map: movementMap as any,
+          ledger: {
+            tokenId: ledger.tokenId,
+            turnId: ledger.turnId,
+            spentFeet: ledger.spentFeet,
+            dashBonusFeet: ledger.dashBonusFeet,
+            diagonalStepsTaken: ledger.diagonalStepsTaken,
+          },
+          activeTurn: { tokenId: state.currentTokenId, turnId: state.turnId },
+        };
+        let plan = planCombatMovement(plannerInput);
+        if (!plan.ok && plan.error.code === 'INSUFFICIENT_MOVEMENT' && hasOverride) {
+          const overridden = planCombatMovement({
+            ...plannerInput,
+            ledger: { ...plannerInput.ledger, dashBonusFeet: Number.MAX_SAFE_INTEGER },
+          });
+          if (overridden.ok) {
+            plan = {
+              ...overridden,
+              dashBonusFeet: ledger.dashBonusFeet,
+              remainingMovementFeet: Math.max(0, overridden.speedFeet + ledger.dashBonusFeet - overridden.movementSpentFeet),
+            };
+          } else {
+            plan = overridden;
+          }
+        }
+        if (!plan.ok) return reject(plan.error.code, plan.error.message);
+
+        const movedToken = { ...token, position: plan.destination };
+        const updatedTokens = [...tokensArray];
+        updatedTokens[tokenIndex] = movedToken;
+        state.movement = {
+          ...ledger,
+          speedFeet: plan.speedFeet,
+          spentFeet: plan.movementSpentFeet,
+          dashBonusFeet: ledger.dashBonusFeet,
+          dashUsed: ledger.dashUsed,
+          diagonalStepsTaken: plan.diagonalStepsTaken,
+          remainingMovementFeet: plan.remainingMovementFeet,
+        };
+
+        await tx.map.update({ where: { id: map.id }, data: { tokens: updatedTokens as any } });
+        await saveCampaignCombatState(tx, campaign.id, state);
+        if (hasOverride) {
+          const ordinaryRemainingBeforeFeet = plan.speedFeet + ledger.dashBonusFeet - ledger.spentFeet;
+          const ordinaryRemainingAfterFeet = plan.speedFeet + ledger.dashBonusFeet - plan.movementSpentFeet;
+          await tx.message.create({
+            data: {
+              campaignId: campaign.id,
+              userId: socket.userId,
+              type: 'SYSTEM',
+              content: `DM movement override: ${token.name} moved (${requestId})`,
+              metadata: {
+                kind: 'combat_movement_override',
+                reason: overrideReason,
+                combatId: state.combatId,
+                turnId: state.turnId,
+                tokenId,
+                from: plan.start,
+                to: plan.destination,
+                ordinaryCostFeet: plan.movementCostFeet,
+                ordinaryRemainingFeet: Math.max(0, ordinaryRemainingAfterFeet),
+                ordinaryRemainingBeforeFeet,
+                ordinaryRemainingAfterFeet,
+                requestId,
+              } as any,
+            },
+          });
+        }
+
+        const movement: MovementWire = {
+          tokenId,
+          turnId: state.turnId,
+          speedFeet: plan.speedFeet,
+          movementCostFeet: plan.movementCostFeet,
+          spentFeet: plan.movementSpentFeet,
+          remainingMovementFeet: plan.remainingMovementFeet,
+          dashBonusFeet: ledger.dashBonusFeet,
+          dashUsed: ledger.dashUsed,
+          diagonalStepsTaken: plan.diagonalStepsTaken,
+          route: plan.route,
+          override: hasOverride,
+        };
+        return {
+          ok: true,
+          activeCombat: true,
+          map: withLightPolygons(map),
+          previousTokens: tokensArray,
+          updatedTokens,
+          token: movedToken,
+          movement,
+          position: plan.destination,
+        } as const;
+      });
+
+      if (!result.ok) {
+        if ('rejected' in result) {
+          emitMoveRejection(io, socket, previewedSocketIds, result.rejected);
+        } else {
+          rejectEarly(result.code ?? 'MOVE_REJECTED', result.message);
+        }
+        return;
       }
 
-      // Update token position
-      const movedToken: Token = { ...token, position: { x, y } };
+      bumpMapVersion(mapId); // invalidate cached drag snapshots after commit
+      const movementBase: MoveWireBase = {
+        requestId,
+        tokenId,
+        mapId,
+        position: result.position,
+        movement: result.movement,
+      };
+      socket.emit('token.move.accepted', movementBase);
 
-      // Update the tokens array in database
-      const updatedTokens = [...tokensArray];
-      updatedTokens[tokenIndex] = movedToken;
+      const movedPayload = {
+        tokenId,
+        mapId,
+        x: result.position.x,
+        y: result.position.y,
+        position: result.position,
+        movedBy: socket.userId,
+        requestId,
+        movement: result.movement,
+      };
 
-      await prisma.map.update({
-        where: { id: mapId },
-        data: { tokens: toJson(updatedTokens) },
-      });
-      bumpMapVersion(mapId); // other sockets' drag snapshots of this map are stale now
-
-      const movedPayload = { tokenId, mapId, x, y, movedBy: socket.userId };
-      const viewMap = withLightPolygons(map);
       let viewers: Promise<RoomViewer[]> | null = null;
       const roomViewers = () => (viewers ??= getRoomViewers(io, socket.campaignId!));
-
-      if (!map.lightingEnabled) {
-        // Role-filtered: hidden tokens and spirit tokens only reach those who see them.
-        await emitToTokenViewers(io, socket, viewMap, updatedTokens, tokenId, 'token.moved', movedPayload, {
+      if (!result.map.lightingEnabled) {
+        await emitToTokenViewers(io, socket, result.map, result.updatedTokens, tokenId, 'token.moved', movedPayload, {
           excludeSender: false,
           viewers: roomViewers,
         });
       } else {
-        // Dynamic lighting: each player's view before and after the move
-        // (role filter, then line of sight). The moved token entering or
-        // leaving sight is token:appeared / token:disappeared; if the move
-        // shifted the player's own sight, every other token that entered or
-        // left it is re-synced the same way. Only filtered tokens are sent.
-        const view = tokenViewCache(viewMap);
-        for (const { socket: s, viewer } of await roomViewers()) {
+        const view = tokenViewCache(result.map);
+        for (const { socket: recipient, viewer } of await roomViewers()) {
           if (viewer.role === 'DM') {
-            s.emit('token.moved', movedPayload);
+            recipient.emit('token.moved', movedPayload);
             continue;
           }
-          const diff = diffTokenViews(view(tokensArray, viewer), view(updatedTokens, viewer), tokenId);
+          const diff = diffTokenViews(view(result.previousTokens, viewer), view(result.updatedTokens, viewer), tokenId);
           if (diff.eventToken?.kind === 'removed') {
-            s.emit('token:disappeared', { tokenId, mapId });
+            recipient.emit('token:disappeared', { tokenId, mapId });
           } else if (diff.eventToken) {
-            s.emit('token.moved', movedPayload);
-            // Full token data in case this player didn't have it yet (frontend deduplicates).
-            s.emit('token:appeared', { token: diff.eventToken.token, mapId });
+            recipient.emit('token.moved', movedPayload);
+            recipient.emit('token:appeared', { token: diff.eventToken.token, mapId });
           }
-          for (const t of diff.added) s.emit('token:appeared', { token: t, mapId });
-          for (const id of diff.removedIds) s.emit('token:disappeared', { tokenId: id, mapId });
+          for (const visibleToken of diff.added) recipient.emit('token:appeared', { token: visibleToken, mapId });
+          for (const removedId of diff.removedIds) recipient.emit('token:disappeared', { tokenId: removedId, mapId });
         }
       }
 
-      logger.debug('token.move.end', { tokenId, x, y, userId: socket.userId });
+      if (result.activeCombat) {
+        const persistedState = await loadCampaignCombatState(prisma, socket.campaignId);
+        io.to(socket.campaignId).emit('initiative.state', persistedState);
+      }
+      previewedSocketIds.clear();
+      logger.debug('token.move.end', { tokenId, x: result.position.x, y: result.position.y, userId: socket.userId });
     } catch (error) {
       logger.error('token.move.end failed', { err: error });
-      socket.emit('error', { message: 'Failed to finalize token movement' });
+      rejectEarly('MOVE_FAILED', 'Failed to finalize token movement.');
     }
   });
 }

@@ -13,6 +13,7 @@
  */
 
 const mockAuth: { userId: string; role: 'DM' | 'PLAYER' } = { userId: 'dm-user', role: 'DM' };
+const mockWithCampaignMapRowLock = jest.fn();
 
 jest.mock('../../middleware/compose', () => {
   const inject = (req: any, _res: unknown, next: () => void) => {
@@ -20,11 +21,17 @@ jest.mock('../../middleware/compose', () => {
     req.campaignMembership = { role: mockAuth.role, characterIds: [], campaignId: req.params.campaignId };
     next();
   };
+  const requireDm = (req: any, res: any, next: () => void) => {
+    inject(req, res, () => {
+      if (req.campaignMembership.role !== 'DM') return res.status(403).json({ error: 'Forbidden' });
+      next();
+    });
+  };
   return {
     authenticated: [inject],
     adminOnly: [inject],
     campaignMember: [inject],
-    campaignDM: [inject],
+    campaignDM: [requireDm],
     campaignDMOrPlayer: [inject],
     compose: (...m: unknown[][]) => m.flat(),
   };
@@ -32,11 +39,17 @@ jest.mock('../../middleware/compose', () => {
 
 jest.mock('../../config/database', () => ({
   prisma: {
-    map: { findUnique: jest.fn(), update: jest.fn() },
+    map: { findUnique: jest.fn(), update: jest.fn(), delete: jest.fn() },
     campaignMembership: { findUnique: jest.fn(), findMany: jest.fn() },
-    campaign: { findUnique: jest.fn() },
+    campaign: { findUnique: jest.fn(), update: jest.fn() },
     character: { findMany: jest.fn() },
   },
+}));
+
+jest.mock('../../services/combatStatePersistence', () => ({
+  withCampaignMapRowLock: (...args: unknown[]) => mockWithCampaignMapRowLock(...args),
+  CampaignRowNotFoundError: class CampaignRowNotFoundError extends Error {},
+  MapRowNotFoundError: class MapRowNotFoundError extends Error {},
 }));
 
 jest.mock('../../utils/logger', () => ({
@@ -57,9 +70,9 @@ const DOOR_ID = '11111111-1111-4111-8111-111111111111';
 const LIGHT_ID = '22222222-2222-4222-8222-222222222222';
 
 const db = prisma as unknown as {
-  map: { findUnique: jest.Mock; update: jest.Mock };
+  map: { findUnique: jest.Mock; update: jest.Mock; delete: jest.Mock };
   campaignMembership: { findUnique: jest.Mock; findMany: jest.Mock };
-  campaign: { findUnique: jest.Mock };
+  campaign: { findUnique: jest.Mock; update: jest.Mock };
   character: { findMany: jest.Mock };
 };
 
@@ -84,6 +97,7 @@ const DOOR = { id: DOOR_ID, x1: 500, y1: 0, x2: 500, y2: 1000, type: 'door-close
 const TORCH = { id: LIGHT_ID, x: 750, y: 450, brightRadius: 2, dimRadius: 3, color: '#ffcc66', enabled: true };
 
 let stored: Record<string, any>;
+let movementDuringLockWait: { x: number; y: number } | null;
 type FakeSocket = { id: string; userId: string; role: string; emit: jest.Mock };
 let dm: FakeSocket;
 let alice: FakeSocket;
@@ -95,6 +109,7 @@ function tokenEvents(s: FakeSocket) {
 }
 
 const app = express();
+app.put('/api/campaigns/:campaignId/maps/:id/difficult-terrain', express.json({ limit: '8mb' }));
 app.use(express.json());
 app.use('/api/campaigns/:campaignId/maps', mapsRouter);
 
@@ -112,6 +127,7 @@ beforeEach(() => {
     gridSize: 100,
     feetPerSquare: 5,
     diagonalRule: 'standard',
+    difficultTerrain: [{ x: 4, y: 4 }],
     baseLayerUrl: '',
     spiritLayerUrl: '/api/assets/maps/secret-spirit.png',
     tokens: [
@@ -133,13 +149,26 @@ beforeEach(() => {
     stored = { ...stored, ...JSON.parse(JSON.stringify(data)) };
     return JSON.parse(JSON.stringify(stored));
   });
+  db.map.delete.mockResolvedValue({ id: MAP_ID });
   db.campaignMembership.findUnique.mockImplementation(async () => ({ role: mockAuth.role }));
   db.campaignMembership.findMany.mockResolvedValue([
     { userId: 'dm-user', role: 'DM', characterIds: [] },
     { userId: 'alice', role: 'PLAYER', characterIds: [] },
   ]);
-  db.campaign.findUnique.mockResolvedValue({ spiritLayerEnabled: false, currentMapId: MAP_ID });
+  db.campaign.findUnique.mockResolvedValue({ spiritLayerEnabled: false, currentMapId: MAP_ID, combatState: null });
+  db.campaign.update.mockResolvedValue({ id: CAMPAIGN_ID, currentMapId: MAP_ID, currentMap: { id: MAP_ID } });
   db.character.findMany.mockResolvedValue([]);
+  movementDuringLockWait = null;
+  mockWithCampaignMapRowLock.mockImplementation(async (_prisma: unknown, _campaignId: string, mapId: string, fn: Function) => {
+    if (movementDuringLockWait) stored.tokens[0].position = movementDuringLockWait;
+    const campaign = await db.campaign.findUnique({ where: { id: CAMPAIGN_ID } });
+    const tx = {
+      map: { update: db.map.update, delete: db.map.delete },
+      campaignMembership: { findUnique: db.campaignMembership.findUnique },
+      campaign: { update: db.campaign.update },
+    };
+    return fn(tx, campaign, { ...JSON.parse(JSON.stringify(stored)), id: mapId });
+  });
 
   dm = { id: 's-dm', userId: 'dm-user', role: 'DM', emit: jest.fn() };
   alice = { id: 's-alice', userId: 'alice', role: 'PLAYER', emit: jest.fn() };
@@ -239,5 +268,213 @@ describe('PUT /tokens/:tokenId response', () => {
     expect(res.status).toBe(200);
     expect(res.body.map).toBeUndefined();
     expect(res.body.token).toEqual(expect.objectContaining({ id: 'goblin', name: 'Goblin chief', notes: 'DM secret' }));
+  });
+
+  it('rejects REST position updates while campaign combat is active', async () => {
+    db.campaign.findUnique.mockResolvedValue({
+      spiritLayerEnabled: false,
+      currentMapId: MAP_ID,
+      combatState: {
+        active: true,
+        round: 1,
+        currentTokenId: 'pc-alice',
+        combatants: [],
+      },
+    });
+
+    const res = await request(app).put(`${BASE}/tokens/pc-alice`).send({ position: { x: 2, y: 6 } });
+
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual(expect.objectContaining({
+      error: 'Conflict',
+      message: expect.stringContaining('token.move.end'),
+    }));
+    expect(stored.tokens[0].position).toEqual({ x: 2, y: 5 });
+    expect(db.map.update).not.toHaveBeenCalled();
+  });
+
+  it('preserves a movement committed while the REST token update waits', async () => {
+    // Simulate movement completing before this request obtains the campaign/map locks.
+    movementDuringLockWait = { x: 3, y: 5 };
+
+    const res = await request(app).put(`${BASE}/tokens/pc-alice`).send({ name: 'Alice' });
+
+    expect(res.status).toBe(200);
+    expect(mockWithCampaignMapRowLock).toHaveBeenCalled();
+    expect(res.body.token).toEqual(expect.objectContaining({
+      id: 'pc-alice',
+      name: 'Alice',
+      position: { x: 3, y: 5 },
+    }));
+    expect(stored.tokens[0].position).toEqual({ x: 3, y: 5 });
+  });
+
+  it.each([
+    ['size', { size: { width: 2, height: 1 } }],
+    ['conditions', { conditions: ['prone'] }],
+  ])('rejects player %s updates during active combat', async (_field, update) => {
+    mockAuth.userId = 'alice';
+    mockAuth.role = 'PLAYER';
+    db.campaign.findUnique.mockResolvedValue({
+      spiritLayerEnabled: false,
+      currentMapId: MAP_ID,
+      combatState: { active: true, mapId: MAP_ID, combatants: [] },
+    });
+
+    const res = await request(app).put(`${BASE}/tokens/pc-alice`).send(update);
+
+    expect(res.status).toBe(403);
+    expect(res.body.message).toMatch(/Only DM/i);
+    expect(db.map.update).not.toHaveBeenCalled();
+  });
+
+  it('allows the DM to change size and conditions during combat when the footprint is valid', async () => {
+    db.campaign.findUnique.mockResolvedValue({
+      spiritLayerEnabled: false,
+      currentMapId: MAP_ID,
+      combatState: { active: true, mapId: MAP_ID, combatants: [] },
+    });
+
+    const res = await request(app).put(`${BASE}/tokens/orc`).send({
+      size: { width: 2, height: 2 },
+      conditions: ['prone', 'poisoned'],
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body.token).toEqual(expect.objectContaining({
+      size: { width: 2, height: 2 },
+      conditions: ['prone', 'poisoned'],
+    }));
+  });
+
+  it.each([
+    ['fractional coordinate', { x: 1.5, y: 2 }],
+    ['missing coordinate', { x: 1 }],
+  ])('rejects a %s even outside combat', async (_label, position) => {
+    const res = await request(app).put(`${BASE}/tokens/orc`).send({ position });
+
+    expect(res.status).toBe(400);
+    expect(db.map.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects a token position whose footprint extends beyond the map', async () => {
+    stored.tokens[1].size = { width: 2, height: 1 };
+
+    const res = await request(app).put(`${BASE}/tokens/orc`).send({ position: { x: 9, y: 3 } });
+
+    expect(res.status).toBe(400);
+    expect(db.map.update).not.toHaveBeenCalled();
+  });
+
+  it('rejects invalid DM size and conditions values', async () => {
+    const badSize = await request(app).put(`${BASE}/tokens/orc`).send({ size: { width: 1.5, height: 1 } });
+    expect(badSize.status).toBe(400);
+
+    const badConditions = await request(app).put(`${BASE}/tokens/orc`).send({ conditions: ['prone', 42] });
+    expect(badConditions.status).toBe(400);
+    expect(db.map.update).not.toHaveBeenCalled();
+  });
+});
+
+describe('difficult terrain', () => {
+  it('returns difficultTerrain from GET map data', async () => {
+    const res = await request(app).get(BASE);
+
+    expect(res.status).toBe(200);
+    expect(res.body.map.difficultTerrain).toEqual([{ x: 4, y: 4 }]);
+  });
+
+  it('lets a DM write unique in-bounds cells under the map lock and broadcasts filtered map.changed', async () => {
+    const res = await request(app)
+      .put(`${BASE}/difficult-terrain`)
+      .send({ cells: [{ x: 2, y: 3 }, { x: 2, y: 3 }, { x: 9, y: 9 }] });
+
+    expect(res.status).toBe(200);
+    expect(stored.difficultTerrain).toEqual([{ x: 2, y: 3 }, { x: 9, y: 9 }]);
+    expect(mockWithCampaignMapRowLock).toHaveBeenCalled();
+    expect(db.map.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: MAP_ID },
+      data: { difficultTerrain: [{ x: 2, y: 3 }, { x: 9, y: 9 }] },
+    }));
+    expect(dm.emit).toHaveBeenCalledWith('map.changed', expect.objectContaining({
+      mapId: MAP_ID,
+      mapData: expect.objectContaining({ difficultTerrain: [{ x: 2, y: 3 }, { x: 9, y: 9 }] }),
+    }));
+    expect(alice.emit).toHaveBeenCalledWith('map.changed', expect.objectContaining({
+      mapId: MAP_ID,
+      mapData: expect.objectContaining({ difficultTerrain: [{ x: 2, y: 3 }, { x: 9, y: 9 }] }),
+    }));
+  });
+
+  it('requires DM and rejects invalid, out-of-map, or oversized cell lists', async () => {
+    mockAuth.role = 'PLAYER';
+    const forbidden = await request(app).put(`${BASE}/difficult-terrain`).send({ cells: [] });
+    expect(forbidden.status).toBe(403);
+
+    mockAuth.role = 'DM';
+    const fractional = await request(app).put(`${BASE}/difficult-terrain`).send({ cells: [{ x: 1.5, y: 1 }] });
+    expect(fractional.status).toBe(400);
+    const outside = await request(app).put(`${BASE}/difficult-terrain`).send({ cells: [{ x: 10, y: 0 }] });
+    expect(outside.status).toBe(400);
+    const oversized = await request(app).put(`${BASE}/difficult-terrain`).send({ cells: Array(100001).fill({ x: 0, y: 0 }) });
+    expect(oversized.status).toBe(400);
+    expect(db.map.update).not.toHaveBeenCalled();
+  });
+
+  it('accepts the 100000-cell input limit and stores its deduplicated cells', async () => {
+    const cells = Array(100_000).fill({ x: 1, y: 1 });
+
+    const res = await request(app).put(`${BASE}/difficult-terrain`).send({ cells });
+
+    expect(res.status).toBe(200);
+    expect(res.body.difficultTerrain).toEqual([{ x: 1, y: 1 }]);
+  });
+});
+
+describe('map deletion during combat', () => {
+  it('rejects deleting the map used by active combat', async () => {
+    db.campaign.findUnique.mockResolvedValue({
+      spiritLayerEnabled: false,
+      currentMapId: 'another-map',
+      combatState: { active: true, mapId: MAP_ID, combatants: [] },
+    });
+
+    const res = await request(app).delete(BASE);
+
+    expect(res.status).toBe(409);
+    expect(res.body.message).toMatch(/active combat/i);
+    expect(db.map.delete).not.toHaveBeenCalled();
+  });
+});
+
+describe('set current map during combat', () => {
+  it('rejects switching away from the map recorded by active combat', async () => {
+    db.campaign.findUnique.mockResolvedValue({
+      spiritLayerEnabled: false,
+      currentMapId: 'another-map',
+      combatState: { active: true, mapId: MAP_ID, combatants: [] },
+    });
+
+    const res = await request(app).put(`/api/campaigns/${CAMPAIGN_ID}/maps/another-map/set-current`);
+
+    expect(res.status).toBe(409);
+    expect(res.body.message).toMatch(/active combat/i);
+    expect(mockWithCampaignMapRowLock).toHaveBeenCalled();
+    expect(db.campaign.update).not.toHaveBeenCalled();
+  });
+
+  it('allows selecting the active combat map to repair a drifted currentMapId', async () => {
+    db.campaign.findUnique.mockResolvedValue({
+      spiritLayerEnabled: false,
+      currentMapId: 'another-map',
+      combatState: { active: true, mapId: MAP_ID, combatants: [] },
+    });
+
+    const res = await request(app).put(`${BASE}/set-current`);
+
+    expect(res.status).toBe(200);
+    expect(db.campaign.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: { currentMapId: MAP_ID },
+    }));
   });
 });

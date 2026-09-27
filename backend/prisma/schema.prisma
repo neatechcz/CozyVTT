@@ -177,6 +177,9 @@ model Campaign {
   currentMapId String?
   currentMap   Map?    @relation("CurrentMap", fields: [currentMapId], references: [id])
 
+  // Current persisted initiative and combat movement state
+  combatState Json?
+
   // Vibe Tracker Settings
   vibeSettings Json    // {periods: ["dawn", "day", "dusk", "night"], hues: {...}}
   currentVibe  String? // Current time period
@@ -217,9 +220,24 @@ model Campaign {
   personalNotes      PersonalNote[]
   diceMacros         DiceMacro[]
   documentLinks      CampaignDocument[]
+  spellDescriptions  CampaignSpellDescription[]
+
 
   @@index([ownerId])
   @@index([status])
+}
+
+model CampaignSpellDescription {
+  id             String   @id @default(uuid())
+  campaignId     String
+  campaign       Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  normalizedName String
+  name           String
+  description    String   @db.Text
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([campaignId, normalizedName])
 }
 
 model CampaignMembership {
@@ -473,6 +491,7 @@ model Map {
 
   // Walls & Fog of War (Phase 1/2 feature)
   wallSegments    Json    @default("[]") // Array of WallSegment objects
+  difficultTerrain Json   @default("[]") // Difficult terrain cells in map-grid coordinates ({x,y})
   fogData         Json?                  // FogState object (null = not initialized)
   lightingEnabled Boolean @default(false) // Enable dynamic lighting/raycasting
   lights          Json    @default("[]") // Array of LightSource objects

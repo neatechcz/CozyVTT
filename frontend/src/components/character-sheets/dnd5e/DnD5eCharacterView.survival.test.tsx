@@ -4,6 +4,25 @@ import type { Character } from '../../../types';
 import { DnD5eCharacterView } from './DnD5eCharacterView';
 
 describe('DnD5eCharacterView survival', () => {
+  it('shows a tracked day as open and leaves unrecorded water unresolved', () => {
+    const character = {
+      id: 'hero', name: 'Hero', data: {
+        characterName: 'Hero', level: 2, race: 'Human', class: 'Fighter',
+        survival: { intakeDay: '8. Mlžníku L. K. 351', foodTodayPounds: 1,
+          waterRequiredGallons: 1, daysWithoutFood: 0, exhaustionLevel: 0,
+          deprivationLockedLevels: 0 },
+      },
+    } as unknown as Character;
+    render(<DnD5eCharacterView character={character} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Combat' }));
+    expect(screen.getByText(/Tracked day: 8\. Mlžníku L\. K\. 351.*open/i)).toBeInTheDocument();
+    expect(screen.getByText(/Water: not recorded.*1 gal/i)).toBeInTheDocument();
+    expect(screen.getByText(/Days without food: 0/i)).toBeInTheDocument();
+    expect(screen.queryByText(/Last resolved day: unknown/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Water short/i)).not.toBeInTheDocument();
+  });
+
+
   it('shows hunger, thirst and the cumulative level-four exhaustion effects', () => {
     const character = {
       id: 'hero', name: 'Hero', data: {
@@ -36,4 +55,5 @@ describe('DnD5eCharacterView survival', () => {
     expect(screen.getByText('10/10')).toBeInTheDocument();
     expect(screen.queryByText(/level is unknown/i)).not.toBeInTheDocument();
   });
+
 });

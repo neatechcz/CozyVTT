@@ -1072,17 +1072,75 @@ export interface TokenMoveEvent {
 }
 
 export interface TokenMoveEndEvent {
+  requestId: string;
   tokenId: string;
   mapId: string; // Required - server validates map belongs to authenticated campaign
   x: number;
   y: number;
+  route?: Position[];
+  override?: { reason: string };
 }
+
+export interface TokenMovePreviewBroadcast {
+  tokenId: string;
+  mapId: string;
+  x: number;
+  y: number;
+  position: Position;
+  movedBy: string;
+  preview: boolean;
+  requestId?: string;
+}
+
+export interface CombatMovementLedger {
+  tokenId: string;
+  turnId: string;
+  speedFeet: number | null;
+  spentFeet: number;
+  dashBonusFeet: number;
+  dashUsed: boolean;
+  diagonalStepsTaken: number;
+  remainingMovementFeet: number | null;
+}
+
+export interface TokenMoveAcceptedEvent {
+  requestId: string;
+  tokenId: string;
+  mapId: string;
+  position: Position;
+  movement: (CombatMovementLedger & {
+    movementCostFeet: number;
+    route: Position[];
+    override: boolean;
+  }) | null;
+}
+
+export interface TokenMoveRejectedEvent {
+  requestId: string;
+  tokenId: string;
+  mapId: string;
+  position: Position | null;
+  movement: CombatMovementLedger | null;
+  error: { code: string; message: string };
+}
+
+export type TokenMoveResponse =
+  | ({ accepted: true } & TokenMoveAcceptedEvent)
+  | ({ accepted: false } & TokenMoveRejectedEvent);
 
 export interface TokenMovedEvent {
   tokenId: string;
+  mapId?: string;
   x: number;
   y: number;
   movedBy: string;
+  requestId?: string;
+  position?: Position;
+  movement?: CombatMovementLedger & {
+    movementCostFeet: number;
+    route: Position[];
+    override: boolean;
+  };
 }
 
 // Dice Roll Events
@@ -1293,6 +1351,7 @@ export interface CombatState {
   round: number;
   currentTokenId: string | null;
   combatants: CombatantEntry[];
+  movement?: CombatMovementLedger | null;
 }
 
 export interface InitiativeAddEvent    { tokenId: string; mapId: string; }
@@ -1306,6 +1365,7 @@ export interface InitiativeSetEvent    { tokenId: string; mapId: string; value: 
  */
 export interface InitiativeRollEvent   { tokenId: string; mapId: string; expression?: string; characterName?: string; }
 export interface InitiativeReorderEvent { orderedTokenIds: string[]; }
+export interface InitiativeDashEvent { tokenId?: string; }
 
 // ============================================
 // Map Pings — transient "look here" marks
