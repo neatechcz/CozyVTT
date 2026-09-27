@@ -184,6 +184,7 @@ function createBlankDnD5eCharacter(): DnD5eCharacterData {
     initiative: 0,
     speed: 30,
     hp: { maximum: 10, current: 10, temporary: 0 },
+    survival: { daysWithoutFood: 0, exhaustionLevel: 0, deprivationLockedLevels: 0 },
     conditions: [],
     hitDice: [{ class: 'fighter', total: '1d10', remaining: 1 }],
     deathSaves: { successes: 0, failures: 0 },

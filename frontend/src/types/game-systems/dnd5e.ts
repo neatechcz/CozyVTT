@@ -85,6 +85,17 @@ export interface DnD5eHitPoints {
   temporary: number;
 }
 
+/** Daily survival ledger and numeric 2014 exhaustion. Missing fields are not assumed to be zero. */
+export interface DnD5eSurvival {
+  lastResolvedDay?: string;
+  daysWithoutFood?: number;
+  foodTodayPounds?: number;
+  waterTodayGallons?: number;
+  waterRequiredGallons?: number;
+  exhaustionLevel?: number;
+  deprivationLockedLevels?: number;
+}
+
 /**
  * Hit dice for a specific class
  */
@@ -249,6 +260,7 @@ export interface DnD5eCharacterData {
   initiative?: number;
   speed?: number;
   hp?: DnD5eHitPoints;
+  survival?: DnD5eSurvival;
   conditions?: string[];
   hitDice?: DnD5eHitDice[];
   deathSaves?: DnD5eDeathSaves;

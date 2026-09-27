@@ -21,7 +21,17 @@ type HpChange =
  */
 function applyHpDelta(gameSystem: string | null, charData: Record<string, any>, delta: number): HpChange {
   switch (gameSystem) {
-    case 'DND_5E':
+    case 'DND_5E': {
+      if (!charData.hp || typeof charData.hp.maximum !== 'number') {
+        return { error: 'Character does not have HP tracking' };
+      }
+      const max = (charData.survival?.exhaustionLevel ?? 0) >= 4
+        ? Math.floor(charData.hp.maximum / 2) : charData.hp.maximum;
+      const temp = typeof charData.hp.temporary === 'number' ? charData.hp.temporary : 0;
+      const current = Math.max(0, Math.min(max, (typeof charData.hp.current === 'number' ? charData.hp.current : max) + delta));
+      charData.hp.current = current;
+      return { current, max, temp, hpPath: 'hp.current' };
+    }
     case 'PATHFINDER_2E': {
       if (!charData.hp || typeof charData.hp.maximum !== 'number') {
         return { error: 'Character does not have HP tracking' };

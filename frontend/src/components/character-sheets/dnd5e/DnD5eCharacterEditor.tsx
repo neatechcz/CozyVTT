@@ -31,6 +31,7 @@ import {
   prepareDnd5eFormForSave,
   saveFormInputsOf,
 } from './dnd5eFormData';
+import { exhaustionEffects } from '../../../utils/dnd5eSurvival';
 
 interface DnD5eCharacterEditorProps {
   character: Character;
@@ -494,6 +495,18 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
     store.editIn(formData, path, value);
   };
 
+  const updateExhaustionLevel = (level: number) => {
+    store.editIn(formData, 'survival.exhaustionLevel', level);
+    if ((formData.survival?.deprivationLockedLevels ?? 0) > level) {
+      store.editIn(formData, 'survival.deprivationLockedLevels', level);
+    }
+    store.editWith('conditions', (current: any) => {
+      const other = (Array.isArray(current) ? current : [])
+        .filter((condition: string) => condition !== 'exhausted' && condition !== 'exhaustion');
+      return level > 0 ? [...other, 'exhausted'] : other;
+    });
+  };
+
   // Append to an array field (keeps items someone else added meanwhile)
   const appendToArray = (path: string, item: any) => {
     store.editWith(path, (current: any) => [...(Array.isArray(current) ? current : []), item]);
@@ -804,9 +817,12 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
             onChange={(e) => updateField('inspiration', e.target.checked)}
             className="w-5 h-5 text-red-700 border-stone-300 rounded focus:ring-2 focus:ring-red-500"
           />
-          <label htmlFor="inspiration" className="text-sm font-semibold text-stone-700">
-            Inspiration
-          </label>
+          <div>
+            <label htmlFor="inspiration" className="text-sm font-semibold text-stone-700">
+              Inspirace (2014)
+            </label>
+            <p className="text-xs text-stone-600">Před hodem utratíš Inspiraci a získáš výhodu na útok, záchranný hod nebo ověření vlastnosti.</p>
+          </div>
         </div>
       </div>
 
@@ -972,7 +988,7 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
 
   // D&D 5e conditions list
   const conditions = [
-    'Blinded', 'Charmed', 'Deafened', 'Exhausted', 'Frightened', 'Grappled',
+    'Blinded', 'Charmed', 'Deafened', 'Frightened', 'Grappled',
     'Incapacitated', 'Invisible', 'Paralyzed', 'Petrified', 'Poisoned',
     'Prone', 'Restrained', 'Stunned', 'Unconscious'
   ];
@@ -1152,6 +1168,56 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
       </div>
 
       {/* Conditions */}
+      <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+        <h3 className="text-lg font-semibold text-stone-800 mb-1">Food, Water & Exhaustion</h3>
+        <p className="text-xs text-stone-600 mb-3">D&D 5e 2014: one pound of food and one gallon of water per day; two gallons of water in heat. Record actual intake before closing the day.</p>
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <label className="text-xs font-semibold text-stone-700">Last resolved day
+            <input type="text" value={formData.survival?.lastResolvedDay ?? ''}
+              onChange={(e) => { if (e.target.value.trim()) updateField('survival.lastResolvedDay', e.target.value); }}
+              placeholder="In-game date" className="mt-1 w-full px-2 py-1 border border-stone-300 rounded" />
+          </label>
+          <label className="text-xs font-semibold text-stone-700">Food on resolved day (lb)
+            <input type="number" min="0" step="0.5" value={formData.survival?.foodTodayPounds ?? ''}
+              onChange={(e) => updateField('survival.foodTodayPounds', Math.max(0, Number(e.target.value)))}
+              className="mt-1 w-full px-2 py-1 border border-stone-300 rounded" />
+          </label>
+          <label className="text-xs font-semibold text-stone-700">Water on resolved day (gallons)
+            <input type="number" min="0" step="0.5" value={formData.survival?.waterTodayGallons ?? ''}
+              onChange={(e) => updateField('survival.waterTodayGallons', Math.max(0, Number(e.target.value)))}
+              className="mt-1 w-full px-2 py-1 border border-stone-300 rounded" />
+          </label>
+          <label className="text-xs font-semibold text-stone-700">Water needed on resolved day (gallons)
+            <input type="number" min="0.5" step="0.5" value={formData.survival?.waterRequiredGallons ?? ''}
+              onChange={(e) => updateField('survival.waterRequiredGallons', Math.max(0.5, Number(e.target.value)))}
+              className="mt-1 w-full px-2 py-1 border border-stone-300 rounded" />
+          </label>
+          <label className="text-xs font-semibold text-stone-700">Days without food
+            <input type="number" min="0" step="0.5" value={formData.survival?.daysWithoutFood ?? ''}
+              onChange={(e) => updateField('survival.daysWithoutFood', Math.max(0, Number(e.target.value)))}
+              className="mt-1 w-full px-2 py-1 border border-stone-300 rounded" />
+          </label>
+          <label className="text-xs font-semibold text-stone-700">Exhaustion level
+            <input type="number" min="0" max="6" step="1" value={formData.survival?.exhaustionLevel ?? ''}
+              onChange={(e) => updateExhaustionLevel(Math.max(0, Math.min(6, Number(e.target.value))))}
+              className="mt-1 w-full px-2 py-1 border border-stone-300 rounded" />
+          </label>
+          <label className="text-xs font-semibold text-stone-700">Deprivation-locked levels
+            <input type="number" min="0" max={formData.survival?.exhaustionLevel ?? 0} step="1"
+              disabled={formData.survival?.exhaustionLevel === undefined}
+              value={formData.survival?.deprivationLockedLevels ?? ''}
+              onChange={(e) => updateField('survival.deprivationLockedLevels', Math.max(0, Math.min(formData.survival?.exhaustionLevel ?? 0, Number(e.target.value))))}
+              className="mt-1 w-full px-2 py-1 border border-stone-300 rounded" />
+          </label>
+        </div>
+        {formData.survival?.exhaustionLevel === undefined && (formData.conditions || []).includes('exhausted') && (
+          <p className="text-xs text-amber-800 mt-3">Exhausted is marked, but its level is unknown. Set the level to apply its effects.</p>
+        )}
+        {(formData.survival?.exhaustionLevel ?? 0) > 0 && (
+          <p className="text-xs text-amber-900 mt-3">Current effects: {exhaustionEffects(formData.survival.exhaustionLevel).join('; ')}.</p>
+        )}
+      </div>
+
       <div className="bg-stone-50 border border-stone-200 rounded-lg p-4">
         <h3 className="text-lg font-semibold text-stone-800 mb-3">Conditions</h3>
         <div className="grid grid-cols-3 gap-2">
@@ -1594,6 +1660,7 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
 
   // Helper to get proficiencies by category from flat array (backwards compatibility)
   const getProficienciesByCategory = () => {
+    const categories = categorizeProficiencies(formData.proficienciesAndLanguages || []);
     // If using new structured format with strings (not arrays)
     if (formData.proficiencies && typeof formData.proficiencies === 'object' && !Array.isArray(formData.proficiencies)) {
       return {
@@ -1601,17 +1668,17 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
         weapons: formData.proficiencies.weapons || '',
         tools: formData.proficiencies.tools || '',
         languages: formData.proficiencies.languages || '',
+        other: formData.proficiencies.other ?? categories.other.join(', '),
       };
     }
 
     // Backwards compatibility: parse from flat array
-    const categories = categorizeProficiencies(formData.proficienciesAndLanguages || []);
-
     return {
       armor: categories.armor.join(', '),
       weapons: categories.weapons.join(', '),
       tools: categories.tools.join(', '),
       languages: categories.languages.join(', '),
+      other: categories.other.join(', '),
     };
   };
 
@@ -1669,6 +1736,16 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
                 value={profs.languages}
                 onChange={(e) => updateField('proficiencies.languages', e.target.value)}
                 placeholder="Common, Elvish, Dwarvish, Draconic"
+                rows={2}
+                className="w-full px-3 py-2 border border-stone-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 text-sm"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-bold text-stone-700 mb-2 uppercase tracking-wide">Other Training</label>
+              <textarea
+                value={profs.other}
+                onChange={(e) => updateField('proficiencies.other', e.target.value)}
+                placeholder="Saving throws, skills, and other training"
                 rows={2}
                 className="w-full px-3 py-2 border border-stone-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 text-sm"
               />

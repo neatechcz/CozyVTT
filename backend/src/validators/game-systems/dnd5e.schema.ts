@@ -87,6 +87,20 @@ const hitPointsSchema = z.object({
   temporary: z.number().int().min(0),
 });
 
+/** D&D 5e 2014 daily needs and six-level exhaustion tracker. */
+const survivalSchema = z.object({
+  lastResolvedDay: z.string().trim().min(1).max(120).optional(),
+  daysWithoutFood: z.number().min(0).refine((value) => Number.isInteger(value * 2), 'Use half-day increments').optional(),
+  foodTodayPounds: z.number().min(0).optional(),
+  waterTodayGallons: z.number().min(0).optional(),
+  waterRequiredGallons: z.number().positive().optional(),
+  exhaustionLevel: z.number().int().min(0).max(6).optional(),
+  deprivationLockedLevels: z.number().int().min(0).max(6).optional(),
+}).refine((value) => (value.deprivationLockedLevels ?? 0) <= (value.exhaustionLevel ?? 0), {
+  message: 'Deprivation-locked exhaustion cannot exceed the total level',
+  path: ['deprivationLockedLevels'],
+});
+
 /**
  * Hit dice
  */
@@ -251,6 +265,7 @@ export const dnd5eCharacterDataSchema = z.object({
   initiative: z.number().int().optional(),
   speed: z.number().int().min(0).optional(),
   hp: hitPointsSchema.optional(),
+  survival: survivalSchema.optional(),
   conditions: z.array(z.string()).optional(),
   hitDice: z.array(hitDiceSchema).optional(),
   deathSaves: deathSavesSchema.optional(),

@@ -19,6 +19,7 @@ import {
   type RollOption,
   type CharacterRolls,
 } from '@/utils/characterRolls';
+import { rollWithExhaustion } from '@/utils/dnd5eSurvival';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -163,10 +164,14 @@ export default function CharacterRollPicker({
     let expr = opt.expression;
     let purpose = opt.purpose;
 
-    if (opt.supportsAdvantage && mode !== 'normal') {
+    if (character?.gameSystem === 'DND_5E' && opt.supportsAdvantage) {
+      expr = rollWithExhaustion(expr, purpose, (character.data as any)?.survival?.exhaustionLevel ?? 0, mode);
+      const actualMode = expr.startsWith('2d20kh1') ? 'Advantage'
+        : expr.startsWith('2d20kl1') ? 'Disadvantage' : '';
+      if (actualMode) purpose = `${purpose} (${actualMode})`;
+    } else if (opt.supportsAdvantage && mode !== 'normal') {
       expr = mode === 'advantage' ? withAdvantage(expr) : withDisadvantage(expr);
-      const modeLabel = getModeLabels(character?.gameSystem ?? null)[mode];
-      purpose = `${purpose} (${modeLabel})`;
+      purpose = `${purpose} (${getModeLabels(character?.gameSystem ?? null)[mode]})`;
     }
 
     onRoll(expr, purpose);

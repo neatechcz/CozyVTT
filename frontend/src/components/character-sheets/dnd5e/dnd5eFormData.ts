@@ -8,25 +8,34 @@
  */
 
 /**
- * Sort a flat proficiency list into the editor's categories. Entries that fit
- * no category (e.g. "Saving Throws: Strength") are in none of the lists.
+ * Sort a flat proficiency list into the sheet's categories. Older sheets may
+ * contain English or Czech entries; keep unknown entries editable as other.
  */
 export const categorizeProficiencies = (all: string[]) => {
-  const languages = ['Common', 'Elvish', 'Dwarvish', 'Draconic', 'Giant', 'Gnomish', 'Goblin', 'Halfling', 'Orc', 'Abyssal', 'Celestial', 'Deep Speech', 'Infernal', 'Primordial', 'Sylvan', 'Undercommon'];
-  const armorKeywords = ['Armor', 'Shield'];
-  const toolKeywords = ['Tools', 'Supplies', 'Kit', 'Instruments', 'Vehicles', 'Vehicle'];
+  const englishLanguages = new Set([
+    'common', 'elvish', 'dwarvish', 'draconic', 'giant', 'gnomish', 'goblin',
+    'halfling', 'orc', 'abyssal', 'celestial', 'deep speech', 'infernal',
+    'primordial', 'sylvan', 'undercommon', 'aquan', 'auran', 'ignan', 'terran',
+    "thieves' cant",
+  ]);
+  const categories = { armor: [] as string[], weapons: [] as string[], tools: [] as string[], languages: [] as string[], other: [] as string[] };
 
-  const armor = all.filter((proficiency) => armorKeywords.some((keyword) => proficiency.includes(keyword)));
-  const weapons = all.filter((proficiency) =>
-    !armorKeywords.some((keyword) => proficiency.includes(keyword))
-    && !toolKeywords.some((keyword) => proficiency.includes(keyword))
-    && !languages.includes(proficiency)
-    && (proficiency.includes('Weapon') || ['Dagger', 'Sword', 'Bow', 'Axe', 'Mace', 'Staff', 'Crossbow', 'Spear', 'Hammer'].some((weapon) => proficiency.includes(weapon))),
-  );
-  const tools = all.filter((proficiency) => toolKeywords.some((keyword) => proficiency.includes(keyword)));
-  const languageProficiencies = all.filter((proficiency) => languages.includes(proficiency));
+  for (const proficiency of all) {
+    const name = proficiency.toLocaleLowerCase();
+    if (englishLanguages.has(name) || /(?:ština|řeč|hantýrka)$/.test(name)) {
+      categories.languages.push(proficiency);
+    } else if (/armor|shield|zbroj|štít/.test(name)) {
+      categories.armor.push(proficiency);
+    } else if (/tools?|supplies|kit|instruments?|vehicles?|nářad|náčin|sada|sady/.test(name)) {
+      categories.tools.push(proficiency);
+    } else if (/weapon|zbran|dagger|sword|bow|axe|mace|staff|crossbow|spear|hammer|dýk|meč|rapír|kuš|luk|šipk|prak|hole|hůl/.test(name)) {
+      categories.weapons.push(proficiency);
+    } else {
+      categories.other.push(proficiency);
+    }
+  }
 
-  return { armor, weapons, tools, languages: languageProficiencies };
+  return categories;
 };
 
 /**
@@ -108,14 +117,14 @@ export const prepareDnd5eFormForSave = (form: any, defaultThemeColor: string): a
     const weaponsArray = parseCommaSeparated(updatedData.proficiencies.weapons);
     const toolsArray = parseCommaSeparated(updatedData.proficiencies.tools);
     const languagesArray = parseCommaSeparated(updatedData.proficiencies.languages);
-    // Entries that fit no category (e.g. "Saving Throws: Strength") have no
-    // field of their own: keep them from the current list
+    // A legacy structured object may have no other field; recover those
+    // entries from the flat list until the player edits that field.
     const originalProficiencies: string[] = Array.isArray(updatedData.proficienciesAndLanguages)
       ? updatedData.proficienciesAndLanguages
       : [];
-    const categorizedOriginals = new Set(Object.values(categorizeProficiencies(originalProficiencies)).flat());
-    const uncategorizedOriginals = originalProficiencies
-      .filter((proficiency) => !categorizedOriginals.has(proficiency));
+    const otherArray = updatedData.proficiencies.other === undefined
+      ? categorizeProficiencies(originalProficiencies).other
+      : parseCommaSeparated(updatedData.proficiencies.other);
 
     // Flatten to backwards-compatible array
     updatedData.proficienciesAndLanguages = [
@@ -123,7 +132,7 @@ export const prepareDnd5eFormForSave = (form: any, defaultThemeColor: string): a
       ...weaponsArray,
       ...toolsArray,
       ...languagesArray,
-      ...uncategorizedOriginals,
+      ...otherArray,
     ];
   }
 
