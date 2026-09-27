@@ -87,6 +87,7 @@ export interface DnD5eHitPoints {
 
 /** Daily survival ledger and numeric 2014 exhaustion. Missing fields are not assumed to be zero. */
 export interface DnD5eSurvival {
+  intakeDay?: string;
   lastResolvedDay?: string;
   daysWithoutFood?: number;
   foodTodayPounds?: number;

@@ -376,12 +376,21 @@ export const DnD5eCharacterView: React.FC<DnD5eCharacterViewProps> = ({ characte
         {!data.survival && <p className="text-sm text-amber-900">Daily needs have not been recorded on this sheet.</p>}
         {data.survival && (
           <div className="text-sm text-stone-700 space-y-1">
-            <p>Last resolved day: {data.survival.lastResolvedDay || 'unknown'}</p>
-            <p>Food: {data.survival.foodTodayPounds ?? 'unknown'} lb · Water: {data.survival.waterTodayGallons ?? 'unknown'} / {data.survival.waterRequiredGallons ?? 'unknown'} gal</p>
-            {data.survival.lastResolvedDay && typeof data.survival.foodTodayPounds === 'number' && data.survival.foodTodayPounds < 1 && (
+            {data.survival.intakeDay ? (
+              <p>Tracked day: {data.survival.intakeDay} ({data.survival.lastResolvedDay === data.survival.intakeDay ? 'resolved' : 'open'})</p>
+            ) : (
+              <p>Last resolved day: {data.survival.lastResolvedDay || 'not recorded'}</p>
+            )}
+            {data.survival.intakeDay && data.survival.lastResolvedDay && data.survival.lastResolvedDay !== data.survival.intakeDay && (
+              <p>Last resolved day: {data.survival.lastResolvedDay}</p>
+            )}
+            <p>Food: {data.survival.foodTodayPounds ?? 'not recorded'} lb · Water: {data.survival.waterTodayGallons ?? 'not recorded'} / {data.survival.waterRequiredGallons ?? 'not recorded'} gal</p>
+            {data.survival.lastResolvedDay && (!data.survival.intakeDay || data.survival.intakeDay === data.survival.lastResolvedDay)
+              && typeof data.survival.foodTodayPounds === 'number' && data.survival.foodTodayPounds < 1 && (
               <p className="font-semibold text-amber-900">Food short by {1 - data.survival.foodTodayPounds} lb on the resolved day.</p>
             )}
-            {data.survival.lastResolvedDay && typeof data.survival.waterTodayGallons === 'number'
+            {data.survival.lastResolvedDay && (!data.survival.intakeDay || data.survival.intakeDay === data.survival.lastResolvedDay)
+              && typeof data.survival.waterTodayGallons === 'number'
               && typeof data.survival.waterRequiredGallons === 'number'
               && data.survival.waterTodayGallons < data.survival.waterRequiredGallons && (
                 <p className="font-semibold text-amber-900">Water short by {data.survival.waterRequiredGallons - data.survival.waterTodayGallons} gal on the resolved day.</p>

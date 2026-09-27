@@ -70,6 +70,21 @@ describe('D&D 5e spellcasting validation', () => {
 });
 
 describe('D&D 5e survival state', () => {
+  it('preserves the open intake day without claiming it was resolved', () => {
+    const survival = { intakeDay: '8. Mlžníku L. K. 351', daysWithoutFood: 0,
+      foodTodayPounds: 1, waterRequiredGallons: 1,
+      exhaustionLevel: 0, deprivationLockedLevels: 0 };
+    const result = dnd5eCharacterDataSchema.safeParse({ ...requiredCharacterData, survival });
+    expect(result.success).toBe(true);
+    if (result.success) expect((result.data as any).survival).toEqual(survival);
+  });
+
+  it('rejects a blank intake day', () => {
+    const result = dnd5eCharacterDataSchema.safeParse({ ...requiredCharacterData,
+      survival: { intakeDay: '   ', foodTodayPounds: 1 } });
+    expect(result.success).toBe(false);
+  });
+
   it('preserves a dated food, water, and exhaustion tracker', () => {
     const survival = { lastResolvedDay: '8. Mlžníku', daysWithoutFood: 0.5,
       foodTodayPounds: 0.5, waterTodayGallons: 0.5, waterRequiredGallons: 1,

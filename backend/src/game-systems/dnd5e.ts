@@ -241,6 +241,7 @@ export interface DnD5eCharacterData {
   speed: number;
   hp: DnD5eHitPoints;
   survival?: {
+    intakeDay?: string;
     lastResolvedDay?: string;
     daysWithoutFood?: number;
     foodTodayPounds?: number;
