@@ -68,3 +68,21 @@ describe('D&D 5e spellcasting validation', () => {
     expect(result.success).toBe(false);
   });
 });
+
+describe('D&D 5e survival state', () => {
+  it('preserves a dated food, water, and exhaustion tracker', () => {
+    const survival = { lastResolvedDay: '8. Mlžníku', daysWithoutFood: 0.5,
+      foodTodayPounds: 0.5, waterTodayGallons: 0.5, waterRequiredGallons: 1,
+      exhaustionLevel: 2, deprivationLockedLevels: 1 };
+    const result = dnd5eCharacterDataSchema.safeParse({ ...requiredCharacterData, survival });
+    expect(result.success).toBe(true);
+    if (result.success) expect((result.data as any).survival).toEqual(survival);
+  });
+
+  it('rejects negative intake and more locked levels than total exhaustion', () => {
+    expect(dnd5eCharacterDataSchema.safeParse({ ...requiredCharacterData,
+      survival: { waterTodayGallons: -0.5 } }).success).toBe(false);
+    expect(dnd5eCharacterDataSchema.safeParse({ ...requiredCharacterData,
+      survival: { exhaustionLevel: 1, deprivationLockedLevels: 2 } }).success).toBe(false);
+  });
+});

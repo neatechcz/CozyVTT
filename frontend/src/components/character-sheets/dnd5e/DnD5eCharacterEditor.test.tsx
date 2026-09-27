@@ -76,6 +76,56 @@ describe('DnD5eCharacterEditor', () => {
     expect(onSave.mock.calls[0]?.[0].inspiration).toBe(true);
   });
 
+  it('shows Czech proficiencies in editable categories and preserves other training on save', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const character = makeNonSpellcaster();
+    character.data = { ...character.data, proficienciesAndLanguages: [
+      'Záchranné hody na Moudrost',
+      'Všechny zbroje',
+      'Štíty',
+      'Jednoduché zbraně',
+      'Rapíry',
+      'Kovářské nářadí',
+      'Obecná řeč',
+      'Trpasličština',
+      'Historie',
+    ] } as Character['data'];
+    render(<DnD5eCharacterEditor character={character} onSave={onSave} onCancel={vi.fn()} />);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Features' }));
+    expect(screen.getByPlaceholderText('Light Armor, Medium Armor, Shields')).toHaveValue('Všechny zbroje, Štíty');
+    expect(screen.getByPlaceholderText('Simple Weapons, Martial Weapons, or specific weapons (Daggers, Longswords, Shortbows)')).toHaveValue('Jednoduché zbraně, Rapíry');
+    expect(screen.getByPlaceholderText("Thieves' Tools, Smith's Tools, Calligrapher's Supplies, Musical Instruments, Vehicles (Land/Water)")).toHaveValue('Kovářské nářadí');
+    expect(screen.getByPlaceholderText('Common, Elvish, Dwarvish, Draconic')).toHaveValue('Obecná řeč, Trpasličština');
+    expect(screen.getByPlaceholderText('Saving throws, skills, and other training')).toHaveValue('Záchranné hody na Moudrost, Historie');
+
+    fireEvent.change(screen.getByPlaceholderText('Light Armor, Medium Armor, Shields'), {
+      target: { value: 'Lehké zbroje, Štíty' },
+    });
+    fireEvent.click(screen.getByRole('button', { name: /save/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0][0].proficienciesAndLanguages).toEqual([
+      'Lehké zbroje', 'Štíty', 'Jednoduché zbraně', 'Rapíry', 'Kovářské nářadí',
+      'Obecná řeč', 'Trpasličština', 'Záchranné hody na Moudrost', 'Historie',
+    ]);
+  });
+
+  it('saves dated food and water intake with a numeric exhaustion level', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<DnD5eCharacterEditor character={makeNonSpellcaster()} onSave={onSave} onCancel={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Combat' }));
+    fireEvent.change(screen.getByLabelText('Last resolved day'), { target: { value: '8. Mlžníku' } });
+    fireEvent.change(screen.getByLabelText('Food on resolved day (lb)'), { target: { value: '0.5' } });
+    fireEvent.change(screen.getByLabelText('Water on resolved day (gallons)'), { target: { value: '0.5' } });
+    fireEvent.change(screen.getByLabelText('Exhaustion level'), { target: { value: '2' } });
+    fireEvent.click(screen.getByRole('button', { name: /save/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0][0]).toMatchObject({
+      survival: { lastResolvedDay: '8. Mlžníku', foodTodayPounds: 0.5,
+        waterTodayGallons: 0.5, exhaustionLevel: 2 },
+      conditions: expect.arrayContaining(['exhausted']),
+    });
+  });
   it('preserves uncategorized legacy proficiencies when one category is edited', async () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
     render(

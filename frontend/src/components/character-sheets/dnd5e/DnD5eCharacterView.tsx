@@ -26,7 +26,8 @@ import { SkillsList } from './components/SkillsList';
 import { AttacksList } from './components/AttacksList';
 import { InventoryList } from './components/InventoryList';
 import { SpellcastingBlock } from './components/SpellcastingBlock';
-import { withAdvantage, withDisadvantage } from '../../../utils/characterRolls';
+import { effectiveMaximumHp, effectiveSpeed, exhaustionEffects, rollWithExhaustion, type RollMode } from '../../../utils/dnd5eSurvival';
+import { categorizeProficiencies } from './dnd5eFormData';
 
 interface DnD5eCharacterViewProps {
   character: Character;
@@ -99,8 +100,11 @@ export const DnD5eCharacterView: React.FC<DnD5eCharacterViewProps> = ({ characte
     return () => document.removeEventListener('mousedown', handler);
   }, [rollPopup]);
 
-  const handleRoll = (expression: string, purpose: string) => {
-    if (onRoll) onRoll(expression, purpose);
+  const handleRoll = (expression: string, purpose: string, mode: RollMode = 'normal') => {
+    const rolled = rollWithExhaustion(expression, purpose, data.survival?.exhaustionLevel ?? 0, mode);
+    const actualMode = rolled.startsWith('2d20kh1') ? 'Advantage'
+      : rolled.startsWith('2d20kl1') ? 'Disadvantage' : '';
+    if (onRoll) onRoll(rolled, actualMode ? `${purpose} (${actualMode})` : purpose);
     setRollPopup(null);
   };
 
@@ -348,7 +352,8 @@ export const DnD5eCharacterView: React.FC<DnD5eCharacterViewProps> = ({ characte
           <div className="bg-stone-50 border-2 border-stone-300 rounded-lg p-4 text-center">
             <Footprints className="w-6 h-6 mx-auto mb-2 text-blue-600" />
             <div className="text-xs text-stone-500 mb-1">Speed</div>
-            <div className="text-2xl font-bold text-stone-800">{data.speed} ft</div>
+            <div className="text-2xl font-bold text-stone-800">{effectiveSpeed(data.speed, data.survival?.exhaustionLevel ?? 0)} ft</div>
+            {(data.survival?.exhaustionLevel ?? 0) >= 2 && <div className="text-xs text-stone-500">Base {data.speed} ft</div>}
           </div>
         )}
         {data.hp && (
@@ -356,12 +361,38 @@ export const DnD5eCharacterView: React.FC<DnD5eCharacterViewProps> = ({ characte
             <Heart className="w-6 h-6 mx-auto mb-2 text-red-600" />
             <div className="text-xs text-stone-500 mb-1">Hit Points</div>
             <div className="text-2xl font-bold text-red-700">
-              {data.hp.current}/{data.hp.maximum}
+              {Math.min(data.hp.current, effectiveMaximumHp(data.hp.maximum, data.survival?.exhaustionLevel ?? 0))}/{effectiveMaximumHp(data.hp.maximum, data.survival?.exhaustionLevel ?? 0)}
             </div>
+            {(data.survival?.exhaustionLevel ?? 0) >= 4 && <div className="text-xs text-red-700 mt-1">Base maximum {data.hp.maximum}; reconcile current HP on the sheet</div>}
             {data.hp.temporary > 0 && (
               <div className="text-xs text-blue-600 mt-1">+{data.hp.temporary} temp</div>
             )}
           </div>
+        )}
+      </div>
+
+      <div className="bg-amber-50 border border-amber-200 rounded-lg p-4">
+        <h3 className="text-lg font-semibold text-stone-800 mb-2">Food, Water & Exhaustion</h3>
+        {!data.survival && <p className="text-sm text-amber-900">Daily needs have not been recorded on this sheet.</p>}
+        {data.survival && (
+          <div className="text-sm text-stone-700 space-y-1">
+            <p>Last resolved day: {data.survival.lastResolvedDay || 'unknown'}</p>
+            <p>Food: {data.survival.foodTodayPounds ?? 'unknown'} lb · Water: {data.survival.waterTodayGallons ?? 'unknown'} / {data.survival.waterRequiredGallons ?? 'unknown'} gal</p>
+            {data.survival.lastResolvedDay && typeof data.survival.foodTodayPounds === 'number' && data.survival.foodTodayPounds < 1 && (
+              <p className="font-semibold text-amber-900">Food short by {1 - data.survival.foodTodayPounds} lb on the resolved day.</p>
+            )}
+            {data.survival.lastResolvedDay && typeof data.survival.waterTodayGallons === 'number'
+              && typeof data.survival.waterRequiredGallons === 'number'
+              && data.survival.waterTodayGallons < data.survival.waterRequiredGallons && (
+                <p className="font-semibold text-amber-900">Water short by {data.survival.waterRequiredGallons - data.survival.waterTodayGallons} gal on the resolved day.</p>
+              )}
+            <p>Days without food: {data.survival.daysWithoutFood ?? 'unknown'}</p>
+            <p>Exhaustion: {data.survival.exhaustionLevel ?? 'unknown'} / 6 · Deprivation-locked: {data.survival.deprivationLockedLevels ?? 'unknown'}</p>
+            {(data.survival.exhaustionLevel ?? 0) > 0 && <p>Effects: {exhaustionEffects(data.survival.exhaustionLevel).join('; ')}.</p>}
+          </div>
+        )}
+        {data.conditions?.includes('exhausted') && data.survival?.exhaustionLevel === undefined && (
+          <p className="text-sm text-amber-900 mt-2">Exhausted is marked, but its level is unknown.</p>
         )}
       </div>
 
@@ -473,54 +504,9 @@ export const DnD5eCharacterView: React.FC<DnD5eCharacterViewProps> = ({ characte
     </div>
   );
 
-  // Helper function to categorize proficiencies
-  const categorizeProficiencies = (items: string[]) => {
-    const armor: string[] = [];
-    const weapons: string[] = [];
-    const tools: string[] = [];
-    const languages: string[] = [];
-
-    // Common D&D 5e languages
-    const knownLanguages = [
-      'Common', 'Dwarvish', 'Elvish', 'Giant', 'Gnomish', 'Goblin', 'Halfling', 'Orc',
-      'Abyssal', 'Celestial', 'Draconic', 'Deep Speech', 'Infernal', 'Primordial',
-      'Sylvan', 'Undercommon', 'Aquan', 'Auran', 'Ignan', 'Terran'
-    ];
-
-    items.forEach(item => {
-      const lower = item.toLowerCase();
-
-      // Check if it's a language
-      if (knownLanguages.some(lang => item.includes(lang))) {
-        languages.push(item);
-      }
-      // Check if it's armor
-      else if (lower.includes('armor') || lower.includes('shield')) {
-        armor.push(item);
-      }
-      // Check if it's a tool
-      else if (
-        lower.includes('tools') || lower.includes('kit') ||
-        lower.includes('instrument') || lower.includes('supplies') ||
-        lower.includes('drum') || lower.includes('flute') ||
-        lower.includes('lute') || lower.includes('viol') || lower.includes('horn')
-      ) {
-        tools.push(item);
-      }
-      // Otherwise, assume it's a weapon
-      else {
-        weapons.push(item);
-      }
-    });
-
-    return { armor, weapons, tools, languages };
-  };
-
   // Render Features tab
   const renderFeaturesTab = () => {
-    const proficiencies = data.proficienciesAndLanguages
-      ? categorizeProficiencies(data.proficienciesAndLanguages)
-      : { armor: [], weapons: [], tools: [], languages: [] };
+    const proficiencies = categorizeProficiencies(data.proficienciesAndLanguages || []);
 
     return (
       <div className="space-y-6">
@@ -577,6 +563,16 @@ export const DnD5eCharacterView: React.FC<DnD5eCharacterViewProps> = ({ characte
                   </div>
                   <div className="text-stone-800">
                     {proficiencies.languages.join(', ')}
+                  </div>
+                </div>
+              )}
+              {proficiencies.other.length > 0 && (
+                <div>
+                  <div className="text-sm font-semibold text-stone-700 mb-2 uppercase tracking-wide">
+                    Other Training
+                  </div>
+                  <div className="text-stone-800">
+                    {proficiencies.other.join(', ')}
                   </div>
                 </div>
               )}
@@ -744,14 +740,14 @@ export const DnD5eCharacterView: React.FC<DnD5eCharacterViewProps> = ({ characte
           <div className="px-3 py-2 bg-red-700 text-white text-xs font-semibold truncate">
             {rollPopup.purpose}
           </div>
-          {[
-            { label: 'Normal', expr: rollPopup.expression, suffix: '' },
-            { label: 'Advantage', expr: withAdvantage(rollPopup.expression), suffix: ' (Advantage)' },
-            { label: 'Disadvantage', expr: withDisadvantage(rollPopup.expression), suffix: ' (Disadvantage)' },
-          ].map(({ label, expr, suffix }) => (
+          {([
+            { label: 'Normal', mode: 'normal' },
+            { label: 'Advantage', mode: 'advantage' },
+            { label: 'Disadvantage', mode: 'disadvantage' },
+          ] as const).map(({ label, mode }) => (
             <button
               key={label}
-              onClick={() => handleRoll(expr, rollPopup.purpose + suffix)}
+              onClick={() => handleRoll(rollPopup.expression, rollPopup.purpose, mode)}
               className="w-full flex items-center gap-2 px-3 py-2 text-sm text-stone-700 hover:bg-red-50 transition-colors text-left"
             >
               <Dices className="w-3.5 h-3.5 text-red-700 flex-shrink-0" />

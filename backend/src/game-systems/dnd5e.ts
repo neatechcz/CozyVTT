@@ -240,6 +240,15 @@ export interface DnD5eCharacterData {
   initiative: number;
   speed: number;
   hp: DnD5eHitPoints;
+  survival?: {
+    lastResolvedDay?: string;
+    daysWithoutFood?: number;
+    foodTodayPounds?: number;
+    waterTodayGallons?: number;
+    waterRequiredGallons?: number;
+    exhaustionLevel?: number;
+    deprivationLockedLevels?: number;
+  };
   conditions: string[];
   hitDice: DnD5eHitDice[];
   deathSaves: DnD5eDeathSaves;
