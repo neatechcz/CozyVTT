@@ -202,9 +202,23 @@ model Campaign {
   creatureTemplates  CreatureTemplate[]
   creatureFavorites  CreatureFavorite[]
   tokenTemplates     TokenTemplate[]
+  spellDescriptions  CampaignSpellDescription[]
 
   @@index([ownerId])
   @@index([status])
+}
+
+model CampaignSpellDescription {
+  id             String   @id @default(uuid())
+  campaignId     String
+  campaign       Campaign @relation(fields: [campaignId], references: [id], onDelete: Cascade)
+  normalizedName String
+  name           String
+  description    String   @db.Text
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@unique([campaignId, normalizedName])
 }
 
 model CampaignMembership {
