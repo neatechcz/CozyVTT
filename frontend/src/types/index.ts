@@ -512,6 +512,7 @@ export interface VibePeriod {
 }
 
 export interface CampaignMembership {
+  isProtectedDm?: boolean;
   id: string;
   userId: string;
   campaignId: string;

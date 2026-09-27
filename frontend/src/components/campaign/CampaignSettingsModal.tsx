@@ -94,9 +94,9 @@ export default function CampaignSettingsModal({
       setChatCooldownEnabled(campaign.chatCooldownEnabled);
       setChatCooldownSeconds(campaign.chatCooldownSeconds);
       setDeleteConfirmName('');
-      setActiveTab('general');
+      setActiveTab(user && isCampaignDm(campaign, user.id) ? 'general' : 'members');
     }
-  }, [isOpen, campaign]);
+  }, [isOpen, campaign, user]);
 
   if (!campaign) return null;
 
@@ -228,8 +228,7 @@ export default function CampaignSettingsModal({
   const actorCanDeleteCampaign = !!user && canDeleteCampaign(campaign, user);
   const deleteNameMatches = deleteConfirmName.trim() === campaign.name;
   const settingsTabs: { id: SettingsTab; label: string }[] = [
-    { id: 'general', label: 'General' },
-    { id: 'chat', label: 'Chat' },
+    ...(actorIsDm ? [{ id: 'general' as const, label: 'General' }, { id: 'chat' as const, label: 'Chat' }] : []),
     { id: 'members', label: 'Members' },
     ...(actorCanDeleteCampaign
       ? [{ id: 'danger' as const, label: 'Danger Zone' }]
@@ -516,14 +515,14 @@ export default function CampaignSettingsModal({
                         <Users className="w-4 h-4" />
                         <span>{memberships.length} member{memberships.length !== 1 ? 's' : ''}</span>
                       </div>
-                      <Button
+                      {actorIsDm && <Button
                         type="button"
                         onClick={() => setShowInviteModal(true)}
                         variant="secondary" className="flex items-center gap-2 text-sm"
                       >
                         <UserPlus className="w-4 h-4" />
                         Invite Player
-                      </Button>
+                      </Button>}
                     </div>
 
                     {/* Member list */}
@@ -532,22 +531,21 @@ export default function CampaignSettingsModal({
                         const isSelf = membership.userId === user?.id;
                         const isOwner = membership.userId === campaign.ownerId;
                         const isDm = membership.role === 'DM';
+                        const isProtectedDm = isDm && membership.isProtectedDm === true;
                         const isRemoving = removingMemberId === membership.userId;
                         const isChanging = changingMemberId === membership.userId;
                         const canChangeRole =
                           !isOwner &&
+                          !isProtectedDm &&
                           (isDm
                             ? actorCanManageDmRoles
                             : actorIsDm || actorCanManageDmRoles);
                         const canRemove =
                           !!user &&
+                          !isProtectedDm &&
                           canRemoveCampaignMember(campaign, user, membership);
                         const soleDm = memberships.filter((member) => member.role === 'DM');
-                        const protectedDm = soleDm.some((member) =>
-                          ['codex-mcp@neatech.cz', 'vaclav.soukup@neatech.cz'].includes(
-                            member.user?.email?.toLowerCase() ?? '',
-                          ),
-                        );
+                        const protectedDm = soleDm.some((member) => member.isProtectedDm);
                         const canTransferDm =
                           !isDm && soleDm.length === 1 && !protectedDm &&
                           (actorIsDm || actorCanManageDmRoles);

@@ -4,6 +4,7 @@ import { GameSystem } from '../game-systems';
 import { ValidationResult } from '../validators/game-systems';
 import { deepEqual, isPlainObject, isSafePath, resolvePath, setAtPath } from '../utils/character-paths';
 import { CharacterTx, withCharacterRowLock } from './characterLock';
+import { clampDnd5eCurrentHp } from '../utils/dnd5eExhaustion';
 
 /**
  * Character Field-Level PATCH
@@ -192,8 +193,13 @@ export async function patchCharacterData(
       };
     }
 
+    const normalized = character.gameSystem === GameSystem.DND_5E
+      ? clampDnd5eCurrentHp(result.data)
+      : { data: result.data, changed: false };
+    const applied = normalized.changed ? [...new Set([...result.applied, 'hp.current'])] : result.applied;
+
     if (character.gameSystem) {
-      const validation = validate(character.gameSystem as GameSystem, result.data);
+      const validation = validate(character.gameSystem as GameSystem, normalized.data);
       if (!validation.success) {
         return { status: 'invalid', errors: validation.errors };
       }
@@ -201,7 +207,7 @@ export async function patchCharacterData(
 
     const { count } = await tx.character.updateMany({
       where: { id, updatedAt: character.updatedAt },
-      data: { data: result.data as Prisma.InputJsonValue },
+      data: { data: normalized.data as Prisma.InputJsonValue },
     });
 
     const saved = await tx.character.findUnique({ where: { id }, include: characterInclude });
@@ -229,7 +235,7 @@ export async function patchCharacterData(
       status: 'ok',
       written: true,
       character: saved,
-      applied: result.applied,
+      applied,
       conflicts: result.conflicts,
     };
   });

@@ -26,6 +26,8 @@ import { broadcastToCampaign, broadcastToCharacterViewers } from '../websocket/u
 import logger from '../utils/logger';
 import { errorMessage } from '../utils/errors';
 import { readTokens, toJson, readJsonObject } from '../utils/prisma-json';
+import { clampDnd5eCurrentHp } from '../utils/dnd5eExhaustion';
+import { addCharacterToCampaignRosters, removeCharacterFromCampaignRosters } from '../services/campaignCharacterRoster';
 import { extractCharacterHp, sameCharacterHp } from '../utils/characterHp';
 
 /**
@@ -233,6 +235,9 @@ router.post('/', authenticated, async (req: AuthenticatedRequest, res: Response)
       name,
       owner?.displayName ?? ''
     );
+    const storedData = finalGameSystem === GameSystem.DND_5E
+      ? clampDnd5eCurrentHp(dataWithIdentity).data
+      : dataWithIdentity;
 
     // Validate gameSystem if provided
     if (finalGameSystem !== undefined && finalGameSystem !== null) {
@@ -250,7 +255,7 @@ router.post('/', authenticated, async (req: AuthenticatedRequest, res: Response)
       }
 
       // Validate character data against schema if gameSystem is specified
-      const validationResult = validateCharacterData(finalGameSystem as GameSystem, dataWithIdentity);
+      const validationResult = validateCharacterData(finalGameSystem as GameSystem, storedData);
       if (!validationResult.success) {
         return res.status(400).json({
           error: 'Validation Error',
@@ -276,19 +281,14 @@ router.post('/', authenticated, async (req: AuthenticatedRequest, res: Response)
         data: {
           userId,
           name,
-          data: dataWithIdentity as Prisma.InputJsonValue,
+          data: storedData as Prisma.InputJsonValue,
           tokenImageUrl: normalizedTokenImageUrl,
           campaignId: campaignId || null,
           gameSystem: finalGameSystem || null,
         },
       });
 
-      if (campaignId && membershipToJoin && !membershipToJoin.characterIds.includes(created.id)) {
-        await tx.campaignMembership.update({
-          where: { userId_campaignId: { userId, campaignId } },
-          data: { characterIds: [...membershipToJoin.characterIds, created.id] },
-        });
-      }
+      if (campaignId && membershipToJoin) await addCharacterToCampaignRosters(tx, campaignId, userId, created.id);
 
       return created;
     });
@@ -638,9 +638,13 @@ router.put('/:id', authenticated, async (req: AuthenticatedRequest, res: Respons
       });
     }
 
+    const normalizedData = data !== undefined && character.gameSystem === GameSystem.DND_5E
+      ? clampDnd5eCurrentHp(data as Record<string, unknown>).data
+      : data;
+
     // Validate data update if character has gameSystem
-    if (character.gameSystem && data !== undefined) {
-      const validationResult = validateCharacterData(character.gameSystem as GameSystem, data);
+    if (character.gameSystem && normalizedData !== undefined) {
+      const validationResult = validateCharacterData(character.gameSystem as GameSystem, normalizedData);
       if (!validationResult.success) {
         return res.status(400).json({
           error: 'Validation Error',
@@ -657,7 +661,7 @@ router.put('/:id', authenticated, async (req: AuthenticatedRequest, res: Respons
       tokenImageUrl?: string | null;
     } = {};
     if (name !== undefined) updateData.name = name;
-    if (data !== undefined) updateData.data = toJson(data);
+    if (normalizedData !== undefined) updateData.data = toJson(normalizedData);
 
     // Keep the `name` column in step with the name typed on the sheet.
     //
@@ -667,8 +671,8 @@ router.put('/:id', authenticated, async (req: AuthenticatedRequest, res: Respons
     // only the blob, so everything outside the sheet went on showing the name
     // the character was created with. The sheet is the thing the user typed
     // into, so it wins; an explicit `name` in the request still takes priority.
-    if (name === undefined && data !== undefined && character.gameSystem) {
-      const sheetName = sheetNameFor(character.gameSystem as GameSystem, data as Record<string, unknown>);
+    if (name === undefined && normalizedData !== undefined && character.gameSystem) {
+      const sheetName = sheetNameFor(character.gameSystem as GameSystem, normalizedData as Record<string, unknown>);
       if (sheetName && sheetName !== character.name) {
         updateData.name = sheetName;
       }
@@ -915,6 +919,18 @@ router.patch('/:id/data', characterDataPatchBodyParser, authenticated, async (re
 
     if (written) {
       await broadcastCharacterUpdated(updatedCharacter, userId, applied);
+      if (updatedCharacter.campaignId && applied.some((path) =>
+        path === 'hp' || path.startsWith('hp.') || path === 'survival' ||
+        path.startsWith('survival.exhaustionLevel') || path === 'exhaustionLevel'
+      )) {
+        const hp = extractCharacterHp(updatedCharacter.gameSystem, readJsonObject(updatedCharacter.data));
+        if (hp) {
+          broadcastToCampaign(updatedCharacter.campaignId, 'character.hp.updated', {
+            characterId: updatedCharacter.id,
+            hp,
+          });
+        }
+      }
     }
 
     const status = applied.length === 0 && conflicts.length > 0 ? 409 : 200;
@@ -966,8 +982,9 @@ router.delete('/:id', authenticated, async (req: AuthenticatedRequest, res: Resp
       });
     }
 
-    await prisma.character.delete({
-      where: { id },
+    await prisma.$transaction(async (tx) => {
+      if (character.campaignId) await removeCharacterFromCampaignRosters(tx, character.campaignId, id);
+      await tx.character.delete({ where: { id } });
     });
 
     return res.status(200).json({
@@ -1016,44 +1033,12 @@ router.post('/:id/assign', authenticated, async (req: AuthenticatedRequest, res:
 
     // Handle unassignment (campaignId is null, empty string, or undefined)
     if (!campaignId || campaignId === '') {
-      // Remove from previous campaign's membership characterIds if assigned
-      if (character.campaignId) {
-        const previousMembership = await prisma.campaignMembership.findUnique({
-          where: {
-            userId_campaignId: {
-              userId,
-              campaignId: character.campaignId,
-            },
-          },
+      const updatedCharacter = await prisma.$transaction(async (tx) => {
+        if (character.campaignId) await removeCharacterFromCampaignRosters(tx, character.campaignId, id);
+        return tx.character.update({
+          where: { id }, data: { campaignId: null },
+          include: { campaign: { select: { id: true, name: true, gameSystem: true } } },
         });
-
-        if (previousMembership) {
-          await prisma.campaignMembership.update({
-            where: {
-              userId_campaignId: {
-                userId,
-                campaignId: character.campaignId,
-              },
-            },
-            data: {
-              characterIds: previousMembership.characterIds.filter((cId) => cId !== id),
-            },
-          });
-        }
-      }
-
-      const updatedCharacter = await prisma.character.update({
-        where: { id },
-        data: { campaignId: null },
-        include: {
-          campaign: {
-            select: {
-              id: true,
-              name: true,
-              gameSystem: true,
-            },
-          },
-        },
       });
 
       // Broadcast roster.updated WebSocket event
@@ -1128,60 +1113,15 @@ router.post('/:id/assign', authenticated, async (req: AuthenticatedRequest, res:
       });
     }
 
-    // Remove from previous campaign's membership if changing campaigns
-    if (character.campaignId && character.campaignId !== campaignId) {
-      const previousMembership = await prisma.campaignMembership.findUnique({
-        where: {
-          userId_campaignId: {
-            userId,
-            campaignId: character.campaignId,
-          },
-        },
-      });
-
-      if (previousMembership) {
-        await prisma.campaignMembership.update({
-          where: {
-            userId_campaignId: {
-              userId,
-              campaignId: character.campaignId,
-            },
-          },
-          data: {
-            characterIds: previousMembership.characterIds.filter((cId) => cId !== id),
-          },
-        });
+    const updatedCharacter = await prisma.$transaction(async (tx) => {
+      if (character.campaignId && character.campaignId !== campaignId) {
+        await removeCharacterFromCampaignRosters(tx, character.campaignId, id);
       }
-    }
-
-    // Add to new campaign's membership characterIds
-    if (!membership.characterIds.includes(id)) {
-      await prisma.campaignMembership.update({
-        where: {
-          userId_campaignId: {
-            userId,
-            campaignId,
-          },
-        },
-        data: {
-          characterIds: [...membership.characterIds, id],
-        },
+      await addCharacterToCampaignRosters(tx, campaignId, userId, id);
+      return tx.character.update({
+        where: { id }, data: { campaignId },
+        include: { campaign: { select: { id: true, name: true, gameSystem: true } } },
       });
-    }
-
-    // Assign character to campaign
-    const updatedCharacter = await prisma.character.update({
-      where: { id },
-      data: { campaignId },
-      include: {
-        campaign: {
-          select: {
-            id: true,
-            name: true,
-            gameSystem: true,
-          },
-        },
-      },
     });
 
     // Broadcast roster.updated WebSocket event

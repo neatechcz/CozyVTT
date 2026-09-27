@@ -1256,17 +1256,20 @@ describe('hit dice', () => {
     return character.id;
   }
 
-  it('spends one die and tells the campaign', async () => {
+  it('spends one die and tells only sheet viewers', async () => {
     const characterId = await giveHitDice(3);
     const player = await server.connectAndAuth(player1Cookie, campaignId);
     const dm = await server.connectAndAuth(dmCookie, campaignId);
+    const other = await server.connectAndAuth(player2Cookie, campaignId);
 
     const dmSees = waitForEvent<{ characterId: string; character: { data: any } }>(dm, 'character.updated');
+    const otherSeesNothing = expectNoEvent(other, 'character.updated');
     player.emit('character.hitdice.spend', { characterId, index: 0 });
 
     const update = await dmSees;
     expect(update.characterId).toBe(characterId);
     expect(update.character.data.hitDice[0].remaining).toBe(2);
+    await otherSeesNothing;
 
     // Persisted, not just broadcast.
     const row = await prisma.character.findUniqueOrThrow({ where: { id: characterId } });
@@ -1274,6 +1277,7 @@ describe('hit dice', () => {
 
     player.disconnect();
     dm.disconnect();
+    other.disconnect();
   });
 
   it('refuses to spend a die that is not there', async () => {

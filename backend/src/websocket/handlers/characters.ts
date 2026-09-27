@@ -11,6 +11,7 @@ import { resolveUpdatedBy } from '../../services/characterPatch';
 import { getCharacterSheetRecipientIds } from '../utils';
 import logger from '../../utils/logger';
 import { toJson } from '../../utils/prisma-json';
+import { effectiveDnd5eHpMaximum } from '../../utils/dnd5eExhaustion';
 
 /** One hit dice pool: `total` is the pool ("5d8"), `remaining` how many are left. */
 interface HitDiceEntry {
@@ -37,7 +38,9 @@ function applyHpDelta(gameSystem: string | null, charData: Record<string, any>, 
       if (!charData.hp || typeof charData.hp.maximum !== 'number') {
         return { error: 'Character does not have HP tracking' };
       }
-      const max = charData.hp.maximum;
+      const max = gameSystem === 'DND_5E'
+        ? effectiveDnd5eHpMaximum(charData) ?? charData.hp.maximum
+        : charData.hp.maximum;
       const temp = typeof charData.hp.temporary === 'number' ? charData.hp.temporary : 0;
       const current = Math.max(0, Math.min(max, (typeof charData.hp.current === 'number' ? charData.hp.current : max) + delta));
       charData.hp.current = current;
@@ -185,63 +188,64 @@ export function registerCharacterHandlers(io: Server, socket: AuthenticatedSocke
         return;
       }
 
-      const character = await prisma.character.findUnique({ where: { id: characterId } });
-      if (!character) {
-        socket.emit('error', { message: 'Character not found' });
-        return;
-      }
+      const campaignId = socket.campaignId;
+      const outcome = await withCharacterRowLock(prisma, characterId, async (tx) => {
+        const character = await tx.character.findUnique({ where: { id: characterId } });
+        if (!character) return { error: 'Character not found' };
 
-      const membership = await prisma.campaignMembership.findFirst({
-        where: { campaignId: socket.campaignId, characterIds: { has: characterId } },
-      });
-      if (!membership) {
-        socket.emit('error', { message: 'Character is not in this campaign' });
-        return;
-      }
+        const membership = await tx.campaignMembership.findUnique({
+          where: { userId_campaignId: { userId: socket.userId!, campaignId } },
+        });
+        if (!membership || character.campaignId !== campaignId) {
+          return { error: 'Character is not in this campaign' };
+        }
+        if (character.userId !== socket.userId && membership.role !== 'DM' &&
+          !(membership.role === 'PLAYER' && membership.characterIds.includes(characterId))) {
+          return { error: 'You do not have permission to spend this character\'s hit dice' };
+        }
+        if (character.gameSystem !== 'DND_5E') {
+          return { error: 'Hit dice are not tracked for this game system' };
+        }
 
-      if (character.userId !== socket.userId && socket.role !== 'DM') {
-        socket.emit('error', { message: 'You do not have permission to spend this character\'s hit dice' });
-        return;
-      }
+        const charData = character.data as unknown as CharacterHitDiceData;
+        const pools = Array.isArray(charData.hitDice) ? (charData.hitDice as HitDiceEntry[]) : null;
+        if (!pools || !pools[index]) return { error: 'No hit dice pool at that position' };
+        const remaining = typeof pools[index].remaining === 'number' ? pools[index].remaining : 0;
+        if (remaining <= 0) return { error: 'No hit dice remaining to spend' };
+        pools[index].remaining = remaining - 1;
 
-      if (character.gameSystem !== 'DND_5E') {
-        socket.emit('error', { message: 'Hit dice are not tracked for this game system' });
-        return;
-      }
-
-      const charData = character.data as unknown as CharacterHitDiceData;
-      const pools = Array.isArray(charData.hitDice) ? (charData.hitDice as HitDiceEntry[]) : null;
-      if (!pools || !pools[index]) {
-        socket.emit('error', { message: 'No hit dice pool at that position' });
-        return;
-      }
-
-      const entry = pools[index];
-      const remaining = typeof entry.remaining === 'number' ? entry.remaining : 0;
-      if (remaining <= 0) {
-        socket.emit('error', { message: 'No hit dice remaining to spend' });
-        return;
-      }
-
-      entry.remaining = remaining - 1;
-
-      const updated = await prisma.character.update({
-        where: { id: characterId },
-        data: { data: toJson(charData) },
+        const saved = await tx.character.update({
+          where: { id: characterId },
+          data: { data: toJson(charData) },
+          include: { campaign: { select: { id: true, name: true } } },
+        });
+        return { saved };
       });
 
-      // The sheet blob changed, so this goes out as `character.updated` — the
-      // event an open character sheet already refreshes on — rather than a
-      // narrow one of its own that nothing would listen to. No token art or
-      // name changed, so nothing needs to repaint the map.
-      io.to(socket.campaignId).emit('character.updated', {
-        characterId,
-        character: updated,
-        userId: socket.userId,
-        tokensChanged: false,
-      });
+      if ('error' in outcome) {
+        socket.emit('error', { message: outcome.error });
+        return;
+      }
+
+      try {
+        const recipients = await getCharacterSheetRecipientIds(campaignId, characterId, outcome.saved.userId);
+        const updatedBy = await resolveUpdatedBy(prisma, socket.userId!);
+        io.to(recipients).emit('character.updated', {
+          characterId,
+          character: outcome.saved,
+          userId: socket.userId,
+          changedPaths: ['hitDice'],
+          updatedBy,
+        });
+      } catch (error) {
+        logger.error('Failed to broadcast hit die spend', { err: error });
+      }
 
     } catch (error) {
+      if (isCharacterLockTimeout(error)) {
+        socket.emit('error', { message: CHARACTER_BUSY_MESSAGE });
+        return;
+      }
       logger.error('character.hitdice.spend failed', { err: error });
       socket.emit('error', { message: 'Failed to spend hit die' });
     }

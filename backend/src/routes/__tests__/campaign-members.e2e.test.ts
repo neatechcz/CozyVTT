@@ -35,6 +35,7 @@ describe('campaign member management', () => {
   let playerId: string;
   let otherPlayerId: string;
   let adminId: string;
+  let protectedDmId: string;
 
   let ownerAgent: request.Agent;
   let coDmAgent: request.Agent;
@@ -42,7 +43,7 @@ describe('campaign member management', () => {
   let adminAgent: request.Agent;
 
   beforeAll(async () => {
-    const [owner, coDm, otherDm, player, otherPlayer, admin] = await Promise.all([
+    const [owner, coDm, otherDm, player, otherPlayer, admin, protectedDm] = await Promise.all([
       createTestUser({
         email: testEmail('campaign-owner'),
         displayName: 'Campaign Owner',
@@ -68,6 +69,7 @@ describe('campaign member management', () => {
         displayName: 'Platform Admin',
         role: PlatformRole.ADMIN,
       }),
+      createTestUser({ email: 'codex-mcp@neatech.cz', displayName: 'MCP Service' }),
     ]);
 
     ownerId = owner.id;
@@ -76,6 +78,7 @@ describe('campaign member management', () => {
     playerId = player.id;
     otherPlayerId = otherPlayer.id;
     adminId = admin.id;
+    protectedDmId = protectedDm.id;
 
     const campaign = await createTestCampaign(ownerId, {
       name: 'Multiple DM Policy Test',
@@ -89,6 +92,7 @@ describe('campaign member management', () => {
         { campaignId, userId: otherDmId, role: CampaignRole.DM, characterIds: [] },
         { campaignId, userId: playerId, role: CampaignRole.PLAYER, characterIds: [] },
         { campaignId, userId: otherPlayerId, role: CampaignRole.PLAYER, characterIds: [] },
+        { campaignId, userId: protectedDmId, role: CampaignRole.DM, characterIds: [] },
       ],
     });
 
@@ -127,6 +131,11 @@ describe('campaign member management', () => {
         create: { campaignId, userId: otherPlayerId, role: CampaignRole.PLAYER, characterIds: [] },
         update: { role: CampaignRole.PLAYER },
       }),
+      prisma.campaignMembership.upsert({
+        where: { userId_campaignId: { userId: protectedDmId, campaignId } },
+        create: { campaignId, userId: protectedDmId, role: CampaignRole.DM, characterIds: [] },
+        update: { role: CampaignRole.DM },
+      }),
     ]);
   });
 
@@ -139,6 +148,7 @@ describe('campaign member management', () => {
       playerId,
       otherPlayerId,
       adminId,
+      protectedDmId,
     ]);
   });
 
@@ -179,6 +189,24 @@ describe('campaign member management', () => {
 
     expect(response.status).toBe(200);
     expect(response.body.membership.role).toBe(CampaignRole.PLAYER);
+  });
+
+  it('refuses to demote the protected MCP DM even for the owner', async () => {
+    const response = await ownerAgent
+      .put(`/api/campaigns/${campaignId}/members/${protectedDmId}/role`)
+      .send({ role: CampaignRole.PLAYER });
+    expect(response.status).toBe(409);
+    expect((await prisma.campaignMembership.findUnique({ where: {
+      userId_campaignId: { userId: protectedDmId, campaignId },
+    } }))?.role).toBe(CampaignRole.DM);
+  });
+
+  it('marks a protected DM without exposing the email in campaign details', async () => {
+    const response = await ownerAgent.get(`/api/campaigns/${campaignId}`);
+    expect(response.status).toBe(200);
+    const member = response.body.campaign.memberships.find((entry: { userId: string }) => entry.userId === protectedDmId);
+    expect(member.isProtectedDm).toBe(true);
+    expect(member.user.email).toBeUndefined();
   });
 
   it('lets a platform admin recover DM membership without joining the campaign', async () => {
@@ -237,5 +265,13 @@ describe('campaign member management', () => {
     );
 
     expect(response.status).toBe(200);
+  });
+
+  it('refuses to remove the protected MCP DM even for a platform admin', async () => {
+    const response = await adminAgent.delete(`/api/campaigns/${campaignId}/members/${protectedDmId}`);
+    expect(response.status).toBe(409);
+    expect(await prisma.campaignMembership.findUnique({ where: {
+      userId_campaignId: { userId: protectedDmId, campaignId },
+    } })).not.toBeNull();
   });
 });

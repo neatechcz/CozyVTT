@@ -53,7 +53,7 @@ function membership(user: User, role: CampaignRole): CampaignMembership {
   };
 }
 
-const campaign = {
+const campaign: Campaign = {
   id: 'campaign-1',
   name: 'Multiple DM Campaign',
   description: null,
@@ -75,7 +75,7 @@ const campaign = {
     membership(coDm, CampaignRole.DM),
     membership(player, CampaignRole.PLAYER),
   ],
-} satisfies Campaign;
+};
 
 vi.mock('@/contexts/CampaignContext', () => ({
   useCampaign: () => ({ campaign, refreshCampaign: mocks.refreshCampaign }),
@@ -158,6 +158,38 @@ describe('CampaignSettingsModal multiple-DM controls', () => {
     expect(
       within(coDmRole).getByRole('option', { name: 'DM' }),
     ).toBeInTheDocument();
+  });
+
+  it('does not offer demotion or removal of the protected MCP DM', () => {
+    const protectedMember = campaign.memberships![1];
+    const previous = protectedMember.isProtectedDm;
+    protectedMember.isProtectedDm = true;
+    try {
+      currentUser = owner;
+      renderModal();
+      openMembersTab();
+      expect(screen.queryByRole('combobox', { name: 'Role for Co DM' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Remove Co DM from campaign' })).not.toBeInTheDocument();
+    } finally {
+      protectedMember.isProtectedDm = previous;
+    }
+  });
+
+  it('opens only authorized tabs for an owner who transferred the DM seat', () => {
+    const ownerMember = campaign.memberships![0];
+    const previous = ownerMember.role;
+    ownerMember.role = CampaignRole.PLAYER;
+    try {
+      currentUser = owner;
+      renderModal();
+      expect(screen.queryByRole('button', { name: 'General' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Chat' })).not.toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Members' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Danger Zone' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Invite Player' })).not.toBeInTheDocument();
+    } finally {
+      ownerMember.role = previous;
+    }
   });
 
   it('does not let a co-DM manage DM roles or delete the campaign', () => {

@@ -26,7 +26,7 @@ import express from 'express';
 import request from 'supertest';
 import characterRoutes, { characterDataPatchBodyParser } from '../characters';
 import { prisma } from '../../config/database';
-import { broadcastToCharacterViewers } from '../../websocket/utils';
+import { broadcastToCampaign, broadcastToCharacterViewers } from '../../websocket/utils';
 import { GameSystem } from '../../game-systems';
 import { getBlankCharacterTemplate } from '../../validators/game-systems';
 
@@ -51,6 +51,7 @@ const db = prisma as unknown as {
 };
 /** character.updated goes to the sheet's viewers (owner, DMs, assigned player), not the campaign room */
 const broadcast = broadcastToCharacterViewers as jest.Mock;
+const campaignBroadcast = broadcastToCampaign as jest.Mock;
 
 const OWNER = 'user-owner';
 const DM = 'user-dm';
@@ -161,6 +162,19 @@ function patch(userId: string | null, body: unknown, id = 'char-1') {
 }
 
 describe('PATCH /api/characters/:id/data', () => {
+  test('normalizes current HP to the level-four exhaustion cap during a field patch', async () => {
+    const data = getBlankCharacterTemplate(GameSystem.DND_5E) as unknown as Record<string, unknown>;
+    seed({ data: { ...data, hp: { maximum: 21, current: 18, temporary: 0 },
+      survival: { exhaustionLevel: 4 }, exhaustionLevel: 4 } });
+    const res = await patch(OWNER, { changes: [{ path: 'experiencePoints', base: data.experiencePoints, value: 1 }] });
+    expect(res.status).toBe(200);
+    expect(res.body.character.data.hp).toMatchObject({ maximum: 21, current: 10 });
+    expect(res.body.applied).toContain('hp.current');
+    expect(campaignBroadcast).toHaveBeenCalledWith('camp-1', 'character.hp.updated', {
+      characterId: 'char-1',
+      hp: { current: 10, max: 10, temp: 0 },
+    });
+  });
   test('200 applies changes, persists them and broadcasts changedPaths + updatedBy', async () => {
     seed();
 
@@ -448,6 +462,15 @@ describe('PUT /api/characters/:id', () => {
   function put(userId: string, body: unknown) {
     return request(app).put('/api/characters/char-1').set('x-test-user', userId).send(body as object);
   }
+
+  test('normalizes a whole-sheet write to the level-four exhaustion cap', async () => {
+    const row = seed();
+    const data = { ...clone(row.data), hp: { maximum: 21, current: 18, temporary: 0 },
+      survival: { exhaustionLevel: 4 }, exhaustionLevel: 4 };
+    const res = await put(OWNER, { data });
+    expect(res.status).toBe(200);
+    expect(res.body.character.data.hp).toMatchObject({ maximum: 21, current: 10 });
+  });
 
   test('broadcast carries changedPaths (diff of old and new data) and updatedBy', async () => {
     const row = seed();

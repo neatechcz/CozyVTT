@@ -19,6 +19,13 @@ describe('extractCharacterHp', () => {
     ).toEqual({ current: 11, max: 27, temp: 4 });
   });
 
+  it('shows the effective HP maximum under level-four exhaustion', () => {
+    expect(extractCharacterHp('DND_5E', {
+      hp: { maximum: 21, current: 18, temporary: 0 },
+      survival: { exhaustionLevel: 4 }, exhaustionLevel: 1,
+    })).toEqual({ current: 10, max: 10, temp: 0 });
+  });
+
   it('reads top-level hp for Pathfinder 2e', () => {
     expect(
       extractCharacterHp('PATHFINDER_2E', { hp: { maximum: 20, current: 20, temporary: 0 } })

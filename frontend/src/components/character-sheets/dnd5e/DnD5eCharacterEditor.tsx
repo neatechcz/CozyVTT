@@ -31,7 +31,7 @@ import {
   prepareDnd5eFormForSave,
   saveFormInputsOf,
 } from './dnd5eFormData';
-import { exhaustionEffects } from '../../../utils/dnd5eSurvival';
+import { effectiveMaximumHp, exhaustionEffects, trackedExhaustionLevel } from '../../../utils/dnd5eSurvival';
 import { readFeatureEntriesForEditing } from '@/utils/featureEntries';
 import { DND5E_CONDITIONS } from '@/utils/conditions';
 
@@ -499,7 +499,9 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
 
   const updateExhaustionLevel = (level: number) => {
     store.editIn(formData, 'survival.exhaustionLevel', level);
-    store.editIn(formData, 'exhaustionLevel', level);
+    if (formData.hp && formData.hp.current > effectiveMaximumHp(formData.hp.maximum, level)) {
+      store.editIn(formData, 'hp.current', effectiveMaximumHp(formData.hp.maximum, level));
+    }
     if ((formData.survival?.deprivationLockedLevels ?? 0) > level) {
       store.editIn(formData, 'survival.deprivationLockedLevels', level);
     }
@@ -508,6 +510,12 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
         .filter((condition: string) => condition !== 'exhausted' && condition !== 'exhaustion');
       return level > 0 ? [...other, 'exhausted'] : other;
     });
+  };
+
+  const updateMaximumHp = (maximum: number) => {
+    store.editIn(formData, 'hp.maximum', maximum);
+    const effective = effectiveMaximumHp(maximum, trackedExhaustionLevel(formData) ?? 0);
+    if (formData.hp && formData.hp.current > effective) store.editIn(formData, 'hp.current', effective);
   };
 
   // Append to an array field (keeps items someone else added meanwhile)
@@ -1032,7 +1040,7 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
               type="number"
               min="0"
               value={formData.hp?.maximum || 0}
-              onChange={(e) => updateField('hp.maximum', parseInt(e.target.value) || 0)}
+              onChange={(e) => updateMaximumHp(parseInt(e.target.value) || 0)}
               className="w-full px-3 py-2 border border-stone-300 rounded-lg text-center text-lg font-bold focus:outline-none focus:ring-2 focus:ring-red-500"
             />
           </div>
@@ -1041,8 +1049,10 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
             <input
               type="number"
               min="0"
+              max={effectiveMaximumHp(formData.hp?.maximum ?? 0, trackedExhaustionLevel(formData) ?? 0)}
               value={formData.hp?.current || 0}
-              onChange={(e) => updateField('hp.current', parseInt(e.target.value) || 0)}
+              onChange={(e) => updateField('hp.current', Math.min(parseInt(e.target.value) || 0,
+                effectiveMaximumHp(formData.hp?.maximum ?? 0, trackedExhaustionLevel(formData) ?? 0)))}
               className="w-full px-3 py-2 border border-stone-300 rounded-lg text-center text-lg font-bold text-red-700 focus:outline-none focus:ring-2 focus:ring-red-500"
             />
           </div>

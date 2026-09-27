@@ -33,6 +33,7 @@ import logger from '../utils/logger';
 import { encodeMessageCursor, decodeMessageCursor } from '../utils/messageCursor';
 
 const router = Router();
+const PROTECTED_DM_EMAILS = new Set(['codex-mcp@neatech.cz', 'vaclav.soukup@neatech.cz']);
 
 // ── Import file upload (memory storage — ZIP stays in buffer) ───────────────
 const importUpload = multer({
@@ -223,6 +224,7 @@ router.get('/:campaignId', campaignMember, async (req: AuthenticatedRequest, res
                 id: true,
                 displayName: true,
                 avatarUrl: true,
+                email: true,
               },
             },
           },
@@ -286,12 +288,17 @@ router.get('/:campaignId', campaignMember, async (req: AuthenticatedRequest, res
     const isDM = req.campaignMembership!.role === 'DM';
     const userId = req.session.userId!;
     const visibleIds = new Set(req.campaignMembership!.characterIds);
+    const safeMemberships = campaignRest.memberships.map(({ user, ...member }) => ({
+      ...member,
+      user: { id: user.id, displayName: user.displayName, avatarUrl: user.avatarUrl },
+      isProtectedDm: member.role === 'DM' && PROTECTED_DM_EMAILS.has(user.email.toLowerCase()),
+    }));
     return res.status(200).json({
       campaign: {
         ...campaignRest,
         characters: isDM ? campaignRest.characters : campaignRest.characters.filter((character) =>
           character.userId === userId || visibleIds.has(character.id)),
-        memberships: isDM ? campaignRest.memberships : campaignRest.memberships.map((member) => ({
+        memberships: isDM ? safeMemberships : safeMemberships.map((member) => ({
           ...member,
           characterIds: member.userId === userId ? member.characterIds : [],
         })),
@@ -971,6 +978,7 @@ router.delete('/:campaignId/members/:userId', authenticated, async (req: Authent
             campaignId,
           },
         },
+        include: { user: { select: { email: true } } },
       }),
     ]);
 
@@ -1008,6 +1016,13 @@ router.delete('/:campaignId/members/:userId', authenticated, async (req: Authent
       return res.status(400).json({
         error: 'Bad Request',
         message: 'The campaign owner cannot be removed',
+      });
+    }
+
+    if (membership.role === 'DM' && PROTECTED_DM_EMAILS.has(membership.user.email.toLowerCase())) {
+      return res.status(409).json({
+        error: 'Conflict',
+        message: 'This protected DM membership cannot be removed',
       });
     }
 
@@ -1084,6 +1099,7 @@ router.put('/:campaignId/members/:userId/role', authenticated, async (req: Authe
             campaignId,
           },
         },
+        include: { user: { select: { email: true } } },
       }),
     ]);
 
@@ -1122,6 +1138,14 @@ router.put('/:campaignId/members/:userId/role', authenticated, async (req: Authe
       return res.status(400).json({
         error: 'Bad Request',
         message: 'The campaign owner must remain a Dungeon Master',
+      });
+    }
+
+    if (membership.role === 'DM' && role !== 'DM' &&
+      PROTECTED_DM_EMAILS.has(membership.user.email.toLowerCase())) {
+      return res.status(409).json({
+        error: 'Conflict',
+        message: 'This protected DM membership cannot be demoted',
       });
     }
 
@@ -1244,8 +1268,7 @@ router.put('/:campaignId/dm', authenticated, async (req: AuthenticatedRequest, r
     // Production games deliberately have two DM members (the MCP service and
     // Václav), each with the full character roster. The upstream single-seat
     // transfer must never demote either account or leave the second DM behind.
-    const protectedEmails = new Set(['codex-mcp@neatech.cz', 'vaclav.soukup@neatech.cz']);
-    if (sittingDms.length > 1 || sittingDms.some((member) => protectedEmails.has(member.user.email.toLowerCase()))) {
+    if (sittingDms.length > 1 || sittingDms.some((member) => PROTECTED_DM_EMAILS.has(member.user.email.toLowerCase()))) {
       return res.status(409).json({
         error: 'Conflict',
         message: 'This campaign uses protected co-DM access; the single-DM transfer is unavailable',

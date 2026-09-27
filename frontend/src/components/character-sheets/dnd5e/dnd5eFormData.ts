@@ -101,6 +101,7 @@ export const parseCommaSeparated = (value: string | string[] | undefined): strin
  * proficiency list is saved only when the user edited the proficiencies.
  */
 export const saveFormInputsOf = (path: string): string[] => {
+  if (path === 'exhaustionLevel') return ['survival.exhaustionLevel'];
   if (path === 'proficienciesAndLanguages') return ['proficiencies'];
   if (path === 'featuresAndTraits' || path === 'spellcasting.cantrips') return [path];
   return [];

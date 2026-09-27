@@ -24,7 +24,14 @@ export function extractCharacterHp(
   if (!data || !gameSystem) return null;
 
   switch (gameSystem) {
-    case 'DND_5E':
+    case 'DND_5E': {
+      const hp = readHp(record(data.hp), false);
+      if (!hp) return null;
+      const level = record(data.survival)?.exhaustionLevel ?? data.exhaustionLevel;
+      if (typeof level !== 'number' || level < 4) return hp;
+      const max = Math.floor(hp.max / 2);
+      return { ...hp, max, current: Math.min(hp.current, max) };
+    }
     case 'PATHFINDER_2E':
     case 'FLEXIBLE':
       return readHp(record(data.hp), false);

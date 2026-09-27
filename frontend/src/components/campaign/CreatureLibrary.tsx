@@ -532,7 +532,7 @@ export default function CreatureLibrary({ isOpen, onClose }: CreatureLibraryProp
                         )}
                       </Button>
                       <p className="text-[10px] text-stone-gray/40">
-                        SRD content used under the Open Game License v1.0a.
+                        SRD content used under CC BY 4.0.
                       </p>
                     </div>
                   )}
@@ -587,6 +587,7 @@ export default function CreatureLibrary({ isOpen, onClose }: CreatureLibraryProp
             {/* ── Create / Edit Custom Form (inline) ── */}
             {showCreateForm && (
               <CreatureForm
+                key={editingCreature?.id ?? 'new'}
                 campaignId={campaign?.id || ''}
                 gameSystem={campaign?.gameSystem ?? null}
                 editingCreature={editingCreature}

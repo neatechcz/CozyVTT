@@ -33,6 +33,7 @@ const app = createTestApp();
 
 describe('creating a character with a campaign preselected', () => {
   let dmId: string;
+  let coDmId: string;
   let playerId: string;
   let outsiderId: string;
   let campaignId: string;
@@ -48,9 +49,11 @@ describe('creating a character with a campaign preselected', () => {
   beforeAll(async () => {
     const stamp = Date.now();
     const dm = await createTestUser({ email: `cca_dm_${stamp}@test.invalid`, isApproved: true });
+    const coDm = await createTestUser({ email: `cca_codm_${stamp}@test.invalid`, isApproved: true });
     const player = await createTestUser({ email: `cca_pl_${stamp}@test.invalid`, isApproved: true });
     const outsider = await createTestUser({ email: `cca_out_${stamp}@test.invalid`, isApproved: true });
     dmId = dm.id;
+    coDmId = coDm.id;
     playerId = player.id;
     outsiderId = outsider.id;
 
@@ -60,6 +63,7 @@ describe('creating a character with a campaign preselected', () => {
     await prisma.campaignMembership.createMany({
       data: [
         { userId: dmId, campaignId, role: 'DM', characterIds: [] },
+        { userId: coDmId, campaignId, role: 'DM', characterIds: [] },
         { userId: playerId, campaignId, role: 'PLAYER', characterIds: [] },
       ],
     });
@@ -70,7 +74,7 @@ describe('creating a character with a campaign preselected', () => {
 
   afterAll(async () => {
     await cleanupCampaigns([campaignId]);
-    await cleanupUsers([dmId, playerId, outsiderId]);
+    await cleanupUsers([dmId, coDmId, playerId, outsiderId]);
     await prisma.$disconnect();
   });
 
@@ -97,6 +101,19 @@ describe('creating a character with a campaign preselected', () => {
 
     const membership = await membershipFor(playerId);
     expect(membership?.characterIds).toContain(res.body.character.id);
+    expect((await membershipFor(dmId))?.characterIds).toContain(res.body.character.id);
+    expect((await membershipFor(coDmId))?.characterIds).toContain(res.body.character.id);
+  });
+
+  it('keeps both DM rosters complete when a character is assigned and then unassigned', async () => {
+    const created = await playerAgent.post('/api/characters').send({ name: 'Travelling Hero' }).expect(201);
+    const id = created.body.character.id;
+    await playerAgent.post(`/api/characters/${id}/assign`).send({ campaignId }).expect(200);
+    expect((await membershipFor(dmId))?.characterIds).toContain(id);
+    expect((await membershipFor(coDmId))?.characterIds).toContain(id);
+    await playerAgent.post(`/api/characters/${id}/assign`).send({ campaignId: null }).expect(200);
+    expect((await membershipFor(dmId))?.characterIds).not.toContain(id);
+    expect((await membershipFor(coDmId))?.characterIds).not.toContain(id);
   });
 
   it('shows the new character on the campaign roster straight away', async () => {
