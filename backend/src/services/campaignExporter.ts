@@ -74,6 +74,7 @@ export async function exportCampaign(
       maps: true,
       creatureTemplates: { where: { source: 'custom' } },
       tokenTemplates: true,
+      spellDescriptions: true,
     },
   });
 
@@ -218,6 +219,7 @@ export async function exportCampaign(
     currentVibe: campaign.currentVibe,
     spiritLayerEnabled: campaign.spiritLayerEnabled,
     spiritLayerStyle: campaign.spiritLayerStyle,
+    spellDescriptions: campaign.spellDescriptions.map(({ name, description }) => ({ name, description })),
   };
 
   // 10. Create ZIP archive

@@ -29,6 +29,7 @@ import {
 } from '../validators/campaignImport';
 import type { MapData, AssetManifestData } from '../validators/campaignImport';
 import { isSafeArchivePath } from '../utils/archive';
+import { normalizeSpellName } from '../utils/spell-names';
 import logger from '../utils/logger';
 
 const UPLOADS_BASE = process.env.UPLOAD_DIR || 'uploads';
@@ -224,6 +225,19 @@ export async function importCampaign(
       role: 'DM',
     },
   });
+
+  // Restore campaign spell reference text before importing maps and assets.
+  if (campaignSettings.spellDescriptions?.length) {
+    await prisma.campaignSpellDescription.createMany({
+      data: campaignSettings.spellDescriptions.map(({ name, description }) => ({
+        campaignId: newCampaignId,
+        normalizedName: normalizeSpellName(name),
+        name,
+        description,
+      })),
+      skipDuplicates: true,
+    });
+  }
 
   // 7. Import assets (so we can remap references)
   const assetRefMap = new Map<string, string>(); // old UUID → new asset URL

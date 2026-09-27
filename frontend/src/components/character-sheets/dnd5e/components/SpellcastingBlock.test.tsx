@@ -40,6 +40,19 @@ describe('SpellcastingBlock details', () => {
     expect(screen.queryByRole('region', { name: 'Detail kouzla Light' })).not.toBeInTheDocument();
   });
 
+  it('does not show a previous spell description after a live list change', async () => {
+    requests.load = async (_campaignId, name) => ({ name, description: `${name} rules.` });
+    const { rerender } = render(<SpellcastingBlock spellcasting={spellcasting} campaignId="campaign-1" />);
+    fireEvent.click(screen.getByRole('button', { name: 'Light' }));
+    expect(await screen.findByText('Light rules.')).toBeInTheDocument();
+
+    rerender(<SpellcastingBlock spellcasting={{ ...spellcasting, cantrips: ['Mage Hand'] }} campaignId="campaign-1" />);
+    expect(screen.queryByText('Light rules.')).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Mage Hand' }));
+    expect(await screen.findByText('Mage Hand rules.')).toBeInTheDocument();
+    expect(requests.calls).toEqual([['campaign-1', 'Light'], ['campaign-1', 'Mage Hand']]);
+  });
+
   it('opens a levelled spell description', async () => {
     requests.load = async () => ({ name: 'Magic Missile', description: 'Three darts.' });
     render(<SpellcastingBlock spellcasting={spellcasting} campaignId="campaign-1" />);

@@ -5,6 +5,7 @@
  */
 
 import { z } from 'zod';
+import { normalizeSpellName } from '../utils/spell-names';
 
 // ── Limits ──────────────────────────────────────────────────────────────────
 
@@ -111,6 +112,10 @@ export const CampaignSettingsSchema = z.object({
   currentVibe: z.string().max(100).nullable().optional(),
   spiritLayerEnabled: z.boolean().optional(),
   spiritLayerStyle: z.string().max(100).optional(),
+  spellDescriptions: z.array(z.object({
+    name: z.string().trim().min(1).max(120).refine((name) => !!normalizeSpellName(name)),
+    description: z.string().trim().min(1).max(20000),
+  }).strip()).max(1000).optional(),
 }).strip();
 
 // ── Wall segment ────────────────────────────────────────────────────────────

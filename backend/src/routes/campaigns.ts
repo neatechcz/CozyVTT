@@ -16,6 +16,7 @@ import { previewCampaignImport, importCampaign } from '../services/campaignImpor
 import { CreateCampaignSchema } from '../validators/campaigns';
 import logger from '../utils/logger';
 import { z } from 'zod';
+import { normalizeSpellName } from '../utils/spell-names';
 
 const router = Router();
 
@@ -1672,11 +1673,6 @@ router.post('/import', authenticated, (req: Request, res: Response, next: NextFu
 });
 
 // Campaign spell descriptions are shared reference text, separate from character sheets.
-function normalizeSpellName(name: string): string {
-  return name.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase()
-    .replace(/[\s'’`\-‐‑–—]/g, '');
-}
-
 const spellNameSchema = z.string().trim().min(1).max(120);
 const spellDescriptionSchema = z.object({ description: z.string().trim().min(1).max(20000) });
 

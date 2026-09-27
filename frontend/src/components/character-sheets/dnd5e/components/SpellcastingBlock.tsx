@@ -188,12 +188,12 @@ export const SpellcastingBlock: React.FC<SpellcastingBlockProps> = ({ spellcasti
           <div className="flex flex-wrap gap-2">
             {spellcasting.cantrips.map((cantrip, idx) => (
               <div key={idx}>
-                <button type="button" onClick={() => toggleDetail(`cantrip-${idx}`, cantrip)}
-                  aria-expanded={selected?.key === `cantrip-${idx}`}
+                <button type="button" onClick={() => toggleDetail(`cantrip-${idx}-${cantrip}`, cantrip)}
+                  aria-expanded={selected?.key === `cantrip-${idx}-${cantrip}`}
                   className="px-2 py-1 text-sm bg-yellow-100 text-yellow-800 rounded border border-yellow-300 hover:bg-yellow-200 focus-visible:ring-2 focus-visible:ring-yellow-600">
                   {cantrip}
                 </button>
-                {renderDetail(`cantrip-${idx}`)}
+                {renderDetail(`cantrip-${idx}-${cantrip}`)}
               </div>
             ))}
           </div>
@@ -232,9 +232,9 @@ export const SpellcastingBlock: React.FC<SpellcastingBlockProps> = ({ spellcasti
                 <div className="space-y-1">
                   {spellsByLevel[level].map((spell, idx) => (
                     <div key={idx}>
-                      <SpellRow spell={spell} onOpen={() => toggleDetail(`spell-${level}-${idx}`, spell.name)}
-                        expanded={selected?.key === `spell-${level}-${idx}`} />
-                      {renderDetail(`spell-${level}-${idx}`)}
+                      <SpellRow spell={spell} onOpen={() => toggleDetail(`spell-${level}-${idx}-${spell.name}`, spell.name)}
+                        expanded={selected?.key === `spell-${level}-${idx}-${spell.name}`} />
+                      {renderDetail(`spell-${level}-${idx}-${spell.name}`)}
                     </div>
                   ))}
                 </div>
