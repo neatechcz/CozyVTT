@@ -129,6 +129,39 @@ describe('DnD5eCharacterEditor', () => {
     });
   });
 
+  it('preserves spaces while typing an intake date without clearing intake for whitespace alone', () => {
+    const character = makeNonSpellcaster();
+    (character.data as any).survival = { intakeDay: '8.', foodTodayPounds: 1 };
+    render(<DnD5eCharacterEditor character={character} onSave={vi.fn()} onCancel={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Combat' }));
+    const day = screen.getByLabelText('Tracked day (in-game)');
+    fireEvent.change(day, { target: { value: '8. ' } });
+    expect(day).toHaveValue('8. ');
+    expect(screen.getByLabelText('Food on tracked day (lb)')).toHaveValue(1);
+    fireEvent.change(day, { target: { value: '8. M' } });
+    expect(day).toHaveValue('8. M');
+    expect(screen.getByLabelText('Food on tracked day (lb)')).toHaveValue(null);
+  });
+
+  it('clears the previous day intake atomically when the tracked day changes', async () => {
+    const character = makeNonSpellcaster();
+    (character.data as any).survival = {
+      intakeDay: 'Day A', lastResolvedDay: 'Day before A',
+      foodTodayPounds: 1, waterTodayGallons: 1, waterRequiredGallons: 2,
+      daysWithoutFood: 0.5, exhaustionLevel: 1, deprivationExhaustionLevels: 1,
+    };
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    render(<DnD5eCharacterEditor character={character} onSave={onSave} onCancel={vi.fn()} />);
+    fireEvent.click(screen.getByRole('button', { name: 'Combat' }));
+    fireEvent.change(screen.getByLabelText('Tracked day (in-game)'), { target: { value: 'Day B' } });
+    fireEvent.click(screen.getByRole('button', { name: /save/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    expect(onSave.mock.calls[0][0].survival).toEqual({
+      intakeDay: 'Day B', lastResolvedDay: 'Day before A',
+      daysWithoutFood: 0.5, exhaustionLevel: 1, deprivationExhaustionLevels: 1,
+    });
+  });
+
   it('saves an open intake day separately from the last resolved day', async () => {
     const onSave = vi.fn().mockResolvedValue(undefined);
     render(<DnD5eCharacterEditor character={makeNonSpellcaster()} onSave={onSave} onCancel={vi.fn()} />);

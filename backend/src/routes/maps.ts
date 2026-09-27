@@ -610,7 +610,7 @@ router.put('/:id/difficult-terrain', campaignDM, async (req: AuthenticatedReques
       return res.status(400).json({ error: 'Validation Error', message: 'cells cannot contain more than 100000 entries' });
     }
 
-    const result = await withCampaignMapRowLock(prisma, campaignId, mapId, async (tx, _campaign, map) => {
+    const result = await withCampaignMapRowLock(prisma, campaignId, mapId, async (tx, campaign, map) => {
       const uniqueCells: Array<{ x: number; y: number }> = [];
       const seenCells = new Set<string>();
       for (const cell of input) {
@@ -637,13 +637,13 @@ router.put('/:id/difficult-terrain', campaignDM, async (req: AuthenticatedReques
         where: { id: mapId },
         data: { difficultTerrain: uniqueCells as any },
       });
-      return { status: 200 as const, body: { difficultTerrain: uniqueCells }, map: updatedMap };
+      return { status: 200 as const, body: { difficultTerrain: uniqueCells }, map: updatedMap, isCurrentMap: campaign.currentMapId === mapId };
     });
 
     if (result.status !== 200) return res.status(result.status).json(result.body);
     bumpMapVersion(mapId);
     try {
-      await broadcastMapSnapshot(campaignId, result.map);
+      if (result.isCurrentMap) await broadcastMapSnapshot(campaignId, result.map);
     } catch (error) {
       logger.warn('Failed to broadcast difficult terrain map change', { err: error, campaignId, mapId });
     }

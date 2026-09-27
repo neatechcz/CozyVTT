@@ -406,6 +406,19 @@ describe('difficult terrain', () => {
     }));
   });
 
+  it('saves future-map terrain without showing that map to players', async () => {
+    const campaign = { spiritLayerEnabled: false, currentMapId: 'current-map', combatState: null };
+    db.campaign.findUnique.mockResolvedValue(campaign);
+    const res = await request(app).put(`${BASE}/difficult-terrain`).send({ cells: [{ x: 2, y: 3 }] });
+    expect(res.status).toBe(200);
+    expect(stored.difficultTerrain).toEqual([{ x: 2, y: 3 }]);
+    for (const viewer of [dm, alice]) {
+      expect(viewer.emit.mock.calls.filter(([event]) => event === 'map.changed')).toEqual([]);
+    }
+    expect(db.campaign.update).not.toHaveBeenCalled();
+    expect(campaign.currentMapId).toBe('current-map');
+  });
+
   it('requires DM and rejects invalid, out-of-map, or oversized cell lists', async () => {
     mockAuth.role = 'PLAYER';
     const forbidden = await request(app).put(`${BASE}/difficult-terrain`).send({ cells: [] });

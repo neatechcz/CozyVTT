@@ -201,6 +201,9 @@ export interface NpcStatBlock {
   notes?: string;
 }
 
+export type MovementOnlyStatBlock = Pick<NpcStatBlock, 'speed'>;
+export type TokenStatBlock = NpcStatBlock | MovementOnlyStatBlock;
+
 /** Creature template from the library (DB model). */
 export interface CreatureTemplate {
   id: string;
@@ -239,7 +242,7 @@ export interface TokenTemplate {
   notes: string | null;
   hp: TokenHp | null;
   showHpBar: boolean;
-  statBlock: NpcStatBlock | null;
+  statBlock: TokenStatBlock | null;
   sightRadius: number | null;
   campaignId: string;
   createdById: string | null;
@@ -724,7 +727,7 @@ export interface Token {
   /** Display mode: pog (circular + border), top-down (circular, no border), full-art (rectangular, alpha). Default: pog */
   displayMode?: TokenDisplayMode;
   /** NPC stat block — populated when placing from creature library or entered manually. */
-  statBlock?: NpcStatBlock | null;
+  statBlock?: TokenStatBlock | null;
   /** ID of the creature template this token was created from (if any). */
   creatureTemplateId?: string | null;
 }

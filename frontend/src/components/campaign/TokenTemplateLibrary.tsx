@@ -28,6 +28,7 @@ import type { TokenTemplate, NpcStatBlock, Campaign } from '@/types';
 import { TokenType, AssetType, AssetScope, CampaignRole } from '@/types';
 import type { TokenDisplayMode } from '@/types';
 import StatBlockEditor from './npc-stat-blocks/StatBlockEditor';
+import { isFullNpcStatBlock, type TokenStatBlock } from '@/utils/npcStatBlock';
 import Button from '@/components/ui/Button';
 import { useServerConfigQuery } from '@/hooks/queries';
 import { getUploadLimit, formatUploadLimit } from '@/utils/uploadLimits';
@@ -479,7 +480,7 @@ function TemplateRow({
           {/* Details */}
           {template.statBlock && (
             <div className="glass-panel p-2 text-[10px] text-stone-gray space-y-0.5">
-              <div>AC {(template.statBlock as NpcStatBlock).ac} &middot; Speed {(template.statBlock as NpcStatBlock).speed}</div>
+              <div>{isFullNpcStatBlock(template.statBlock) && <>AC {template.statBlock.ac} &middot; </>}Speed {template.statBlock.speed}</div>
             </div>
           )}
           {template.hp && (
@@ -522,8 +523,8 @@ function TemplateForm({ campaignId, editingTemplate, onCreated, onEdited, onCanc
   const [imageUrl, setImageUrl] = useState(editingTemplate?.imageUrl ?? '');
   const [showHpBar, setShowHpBar] = useState(editingTemplate?.showHpBar ?? false);
   const [hpMax, setHpMax] = useState(editingTemplate?.hp?.max ?? 10);
-  const [statBlock, setStatBlock] = useState<NpcStatBlock | null>(
-    (editingTemplate?.statBlock as NpcStatBlock | null) ?? null
+  const [statBlock, setStatBlock] = useState<TokenStatBlock | null>(
+    editingTemplate?.statBlock ?? null
   );
   const [showStatBlock, setShowStatBlock] = useState(false);
 
@@ -708,11 +709,18 @@ function TemplateForm({ campaignId, editingTemplate, onCreated, onEdited, onCanc
           </button>
           {showStatBlock && statBlock && (
             <div className="pl-1 pt-1">
-              <StatBlockEditor
-                statBlock={statBlock}
-                onChange={setStatBlock}
-                gameSystem={campaign?.gameSystem ?? null}
-              />
+              {isFullNpcStatBlock(statBlock) ? (
+                <StatBlockEditor
+                  statBlock={statBlock}
+                  onChange={setStatBlock}
+                  gameSystem={campaign?.gameSystem ?? null}
+                />
+              ) : (
+                <label className="text-xs text-stone-gray">Speed
+                  <input className="input-cozy mt-1 w-full" value={statBlock.speed}
+                    onChange={(event) => setStatBlock({ speed: event.target.value })} />
+                </label>
+              )}
               <button
                 type="button"
                 onClick={() => { setStatBlock(null); setShowStatBlock(false); }}

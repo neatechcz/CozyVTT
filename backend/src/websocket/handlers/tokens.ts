@@ -620,7 +620,7 @@ export function registerTokenHandlers(io: Server, socket: AuthenticatedSocket): 
           } as const;
         }
 
-        if (campaign.gameSystem !== 'DND_5E') {
+        if (campaign.gameSystem !== null && campaign.gameSystem !== 'DND_5E') {
           return reject('UNSUPPORTED_COMBAT_SYSTEM', 'Server-authoritative movement is only available for D&D 5e combat.');
         }
         if (state.mapId !== mapId) {
@@ -660,12 +660,18 @@ export function registerTokenHandlers(io: Server, socket: AuthenticatedSocket): 
           actor = { kind: 'pc', characterData: character.data };
         } else {
           let templateStatBlock: unknown;
+          let templateGameSystem: string | null = null;
           if ((token as any).creatureTemplateId) {
             const template = await tx.creatureTemplate.findUnique({
               where: { id: (token as any).creatureTemplateId },
-              select: { statBlock: true },
+              select: { statBlock: true, gameSystem: true },
             });
             templateStatBlock = template?.statBlock;
+            templateGameSystem = template?.gameSystem ?? null;
+          }
+          if ((campaign.gameSystem === null && templateGameSystem !== 'DND_5E') ||
+              (templateGameSystem !== null && templateGameSystem !== 'DND_5E')) {
+            return reject('UNSUPPORTED_COMBAT_SYSTEM', 'The token’s linked creature must identify D&D 5e rules.');
           }
           actor = {
             kind: 'npc',

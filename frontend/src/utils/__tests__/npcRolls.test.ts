@@ -193,9 +193,16 @@ describe('buildNpcRolls — edge cases', () => {
     expect(buildNpcRolls(goblin).abilities).toHaveLength(6);
   });
 
-  it('survives a stat block with no abilities recorded', () => {
+  it('offers no derived rolls when ability scores are not recorded', () => {
     const bare = { ac: 10, speed: '30 ft.' } as NpcStatBlock;
     const rolls = buildNpcRolls(bare, 'DND_5E');
-    expect(find(rolls.abilities, 'STR')?.expression).toBe('1d20+0');
+    expect(rolls.abilities).toEqual([]);
+    expect(rolls.savingThrows).toEqual([]);
+  });
+});
+
+ it.each(['DND_5E', 'PATHFINDER_2E', null])('offers no invented rolls for a speed-only block (%s)', (system) => {
+  expect(buildNpcRolls({ speed: '30 ft.' } as NpcStatBlock, system)).toEqual({
+    abilities: [], savingThrows: [], skills: [], combat: [], hitDice: [],
   });
 });

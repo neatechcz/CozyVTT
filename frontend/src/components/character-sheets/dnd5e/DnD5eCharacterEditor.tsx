@@ -1184,7 +1184,17 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <label className="text-xs font-semibold text-stone-700">Tracked day (in-game)
             <input type="text" value={formData.survival?.intakeDay ?? ''}
-              onChange={(e) => { if (e.target.value.trim()) updateField('survival.intakeDay', e.target.value); }}
+              onChange={(e) => {
+                const intakeDay = e.target.value;
+                if (!intakeDay.trim()) return;
+                const survival = { ...formData.survival, intakeDay };
+                if (intakeDay.trim() !== formData.survival?.intakeDay?.trim()) {
+                  delete survival.foodTodayPounds;
+                  delete survival.waterTodayGallons;
+                  delete survival.waterRequiredGallons;
+                }
+                updateField('survival', survival);
+              }}
               placeholder="In-game date" className="mt-1 w-full px-2 py-1 border border-stone-300 rounded" />
           </label>
 

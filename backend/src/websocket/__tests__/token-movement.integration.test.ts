@@ -153,6 +153,7 @@ afterAll(async () => {
 });
 
 beforeEach(async () => {
+  await prisma.campaign.update({ where: { id: campaignId }, data: { gameSystem: 'DND_5E', currentMapId: mapId } });
   await prisma.map.update({ where: { id: mapId }, data: {
     tokens: tokens() as any,
     wallSegments: [] as any,
@@ -565,4 +566,45 @@ it('keeps out-of-combat placement available and checks the full token footprint'
   } finally {
     player.disconnect();
   }
+});
+
+
+it('starts and moves a linked D&D character in a legacy campaign with no ruleset', async () => {
+  await prisma.campaign.update({ where: { id: campaignId }, data: { gameSystem: null } });
+  await withCampaignRowLock(prisma, campaignId, async (tx, campaign) => {
+    const state = await loadCampaignCombatState(prisma, campaignId);
+    await saveCampaignCombatState(tx, campaign.id, { ...state, active: false, currentTokenId: null, movement: null });
+  });
+  const dm = await server.connectAndAuth(dmCookie, campaignId);
+  try {
+    const started = waitForEvent<any>(dm, 'initiative.state');
+    dm.emit('initiative.start');
+    expect((await started).movement).toMatchObject({ tokenId: playerTokenId, speedFeet: 30 });
+    const requestId = randomUUID();
+    const result = waitForMoveOutcome(dm, requestId);
+    dm.emit('token.move.end', { requestId, tokenId: playerTokenId, mapId, x: 6, y: 5, route: [{ x: 6, y: 5 }] });
+    expect(await result).toMatchObject({ kind: 'accepted', payload: { movement: { spentFeet: 5, remainingMovementFeet: 25 } } });
+  } finally { dm.disconnect(); }
+});
+
+it('wraps to the first combatant when removing the active last combatant', async () => {
+  const second = randomUUID();
+  const last = randomUUID();
+  await prisma.map.update({ where: { id: mapId }, data: { tokens: [
+    ...tokens(),
+    ...[second, last].map((id) => ({ ...tokens()[0], id, characterId: null, type: 'npc', statBlock: { speed: '30 ft.' } })),
+  ] as any } });
+  const state = await loadCampaignCombatState(prisma, campaignId);
+  await withCampaignRowLock(prisma, campaignId, async (tx, campaign) => {
+    await saveCampaignCombatState(tx, campaign.id, {
+      ...state, currentTokenId: last,
+      combatants: [playerTokenId, second, last].map((id, index) => ({ ...state.combatants[0], tokenId: id, initiative: 20 - index })),
+    });
+  });
+  const dm = await server.connectAndAuth(dmCookie, campaignId);
+  try {
+    const removed = waitForEvent<any>(dm, 'initiative.state');
+    dm.emit('initiative.remove', { tokenId: last });
+    expect(await removed).toMatchObject({ round: 2, currentTokenId: playerTokenId, movement: { tokenId: playerTokenId, spentFeet: 0, speedFeet: 30 } });
+  } finally { dm.disconnect(); }
 });

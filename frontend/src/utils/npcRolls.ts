@@ -19,6 +19,7 @@ import {
   isValidDiceExpression,
 } from './characterRolls';
 import type { NpcStatBlock } from '@/types';
+import { isFullNpcStatBlock, type TokenStatBlock } from './npcStatBlock';
 import {
   ABILITY_KEYS,
   ABILITY_LABELS,
@@ -270,10 +271,10 @@ export function systemSupportsNpcRolls(gameSystem: string | null | undefined): b
  * roll input.
  */
 export function buildNpcRolls(
-  statBlock: NpcStatBlock | null | undefined,
+  statBlock: TokenStatBlock | null | undefined,
   gameSystem: string | null = 'DND_5E'
 ): CharacterRolls {
-  if (!statBlock) return EMPTY_ROLLS;
+  if (!isFullNpcStatBlock(statBlock)) return EMPTY_ROLLS;
 
   switch (gameSystem) {
     case 'PATHFINDER_2E':

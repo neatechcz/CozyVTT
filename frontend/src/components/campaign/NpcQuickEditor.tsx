@@ -29,6 +29,7 @@ import { TokenType, TokenDisposition, AssetType, AssetScope } from '@/types';
 import { StatBlockViewer, StatBlockEditor } from './npc-stat-blocks';
 import Button from '@/components/ui/Button';
 import AssetGrid from '@/components/assets/AssetGrid';
+import { isFullNpcStatBlock, type TokenStatBlock } from '@/utils/npcStatBlock';
 
 // ============================================
 // Constants
@@ -87,7 +88,7 @@ export default function NpcQuickEditor({ token, campaignId, mapId, onClose, onTo
   const [isRemoving, setIsRemoving] = useState(false);
   const [enableHpPrompt, setEnableHpPrompt] = useState(false);
   const [newHpMax, setNewHpMax] = useState('');
-  const [statBlock, setStatBlock] = useState<NpcStatBlock | null>((token.statBlock as NpcStatBlock) ?? null);
+  const [statBlock, setStatBlock] = useState<TokenStatBlock | null>(token.statBlock ?? null);
   const [editingStatBlock, setEditingStatBlock] = useState(false);
   const [showCreateStatBlock, setShowCreateStatBlock] = useState(false);
 
@@ -153,7 +154,7 @@ export default function NpcQuickEditor({ token, campaignId, mapId, onClose, onTo
   }, [newHpMax, saveUpdate]);
 
   // ── Stat block ──
-  const handleStatBlockChange = useCallback(async (updated: NpcStatBlock) => {
+  const handleStatBlockChange = useCallback(async (updated: TokenStatBlock) => {
     setStatBlock(updated);
     await saveUpdate({ statBlock: updated } as Partial<Token>);
   }, [saveUpdate]);
@@ -383,7 +384,7 @@ export default function NpcQuickEditor({ token, campaignId, mapId, onClose, onTo
     setNotes(token.notes ?? '');
     setVisible(token.visible);
     setControlledBy(token.controlledBy ?? null);
-    setStatBlock((token.statBlock as NpcStatBlock) ?? null);
+    setStatBlock(token.statBlock ?? null);
     setEditingStatBlock(false);
     setShowCreateStatBlock(false);
     setShowImagePicker(false);
@@ -756,7 +757,23 @@ export default function NpcQuickEditor({ token, campaignId, mapId, onClose, onTo
                 </div>
 
                 {statBlock ? (
-                  editingStatBlock ? (
+                  !isFullNpcStatBlock(statBlock) ? (
+                    <div className="glass-panel p-3">
+                      {editingStatBlock ? (
+                        <label className="text-xs text-stone-gray">Speed
+                          <input className="input-cozy mt-1 w-full" value={statBlock.speed}
+                            onChange={(event) => setStatBlock({ speed: event.target.value })}
+                            onBlur={() => {
+                              const speed = statBlock.speed.trim();
+                              if (speed) void handleStatBlockChange({ speed });
+                            }} />
+                        </label>
+                      ) : (
+                        <p className="text-sm"><span className="font-semibold">Speed: </span><span>{statBlock.speed}</span></p>
+                      )}
+                      <p className="text-xs text-stone-gray mt-2">Only movement speed is recorded.</p>
+                    </div>
+                  ) : editingStatBlock ? (
                     <div className="glass-panel p-3 max-h-96 overflow-y-auto">
                       <StatBlockEditor
                         statBlock={statBlock}

@@ -250,7 +250,7 @@ export function registerInitiativeHandlers(io: Server, socket: AuthenticatedSock
         }
 
         if (current.active && current.currentTokenId === tokenId) {
-          const nextIndex = oldCurrentIndex < 0 ? 0 : Math.min(oldCurrentIndex, current.combatants.length - 1);
+          const nextIndex = oldCurrentIndex < 0 || oldCurrentIndex >= current.combatants.length ? 0 : oldCurrentIndex;
           if (oldCurrentIndex >= current.combatants.length) current.round += 1;
           const nextTokenId = current.combatants[nextIndex].tokenId;
           await setActiveTurn(tx, campaign, current, nextTokenId);
