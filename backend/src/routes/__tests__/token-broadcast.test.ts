@@ -163,7 +163,7 @@ describe('token REST routes broadcast token events', () => {
       _prisma: unknown,
       campaignId: string,
       mapId: string,
-      callback: Function,
+      callback: (...args: unknown[]) => unknown,
     ) => {
       const map = await mockedPrisma.map.findUnique({ where: { id: mapId } });
       if (!map || map.campaignId !== campaignId) throw new MapRowNotFoundError(mapId, campaignId);

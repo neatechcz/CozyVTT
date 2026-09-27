@@ -28,7 +28,7 @@ jest.mock('../../config/database', () => ({
 jest.mock('../../services/combatStatePersistence', () => {
   const db = jest.requireMock('../../config/database').prisma;
   return {
-    withCampaignMapRowLock: async (_prisma: unknown, campaignId: string, mapId: string, run: Function) => {
+    withCampaignMapRowLock: async (_prisma: unknown, campaignId: string, mapId: string, run: (...args: unknown[]) => unknown) => {
       const map = await db.map.findUnique({ where: { id: mapId } });
       if (!map || map.campaignId !== campaignId) return null;
       const campaign = {

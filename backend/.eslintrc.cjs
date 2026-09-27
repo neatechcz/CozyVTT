@@ -10,7 +10,8 @@
 // legacy usages — new files, and any file cleaned up, are held to the rule.
 // Entries come off the list as each cluster is converted; when the list is
 // empty the block goes with it. The 1.4 merge carries legacy MCP and sheet
-// extensions listed below; new files still fail lint.
+// extensions listed below, including combat/spells from main a490807;
+// new files still fail lint.
 module.exports = {
   root: true,
   env: { node: true, es2022: true },
@@ -66,6 +67,7 @@ module.exports = {
         'src/middleware/passwordChange.test.ts',
         'src/routes/__tests__/auth.e2e.test.ts',
         'src/routes/__tests__/campaign-get-maps.test.ts',
+        'src/routes/__tests__/campaign-spells.test.ts',
         'src/routes/__tests__/characters-lock.e2e.test.ts',
         'src/routes/__tests__/characters-patch.test.ts',
         'src/routes/__tests__/controller-token-broadcast.test.ts',
@@ -76,6 +78,8 @@ module.exports = {
         'src/routes/__tests__/token-broadcast.test.ts',
         'src/routes/maps.ts',
         'src/services/__tests__/characterLock.test.ts',
+        'src/services/__tests__/combatStatePersistence.test.ts',
+        'src/services/campaignSpellDescriptions.roundtrip.test.ts',
         'src/validators/__tests__/userPreferences.test.ts',
         'src/validators/game-systems/__tests__/validation.test.ts',
         'src/validators/game-systems/dnd5e.schema.test.ts',
@@ -88,9 +92,11 @@ module.exports = {
         'src/websocket/__tests__/spirit-token-toggle.test.ts',
         'src/websocket/__tests__/token-broadcast-lighting.test.ts',
         'src/websocket/__tests__/token-move-visibility.test.ts',
+        'src/websocket/__tests__/token-movement.integration.test.ts',
         'src/websocket/__tests__/walls.test.ts',
         'src/websocket/handlers/characters.ts',
         'src/websocket/handlers/initiative.ts',
+        'src/websocket/handlers/tokens.ts',
       ],
       rules: { '@typescript-eslint/no-explicit-any': 'off' },
     },

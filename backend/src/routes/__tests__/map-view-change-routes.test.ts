@@ -159,7 +159,7 @@ beforeEach(() => {
   db.campaign.update.mockResolvedValue({ id: CAMPAIGN_ID, currentMapId: MAP_ID, currentMap: { id: MAP_ID } });
   db.character.findMany.mockResolvedValue([]);
   movementDuringLockWait = null;
-  mockWithCampaignMapRowLock.mockImplementation(async (_prisma: unknown, _campaignId: string, mapId: string, fn: Function) => {
+  mockWithCampaignMapRowLock.mockImplementation(async (_prisma: unknown, _campaignId: string, mapId: string, fn: (...args: unknown[]) => unknown) => {
     if (movementDuringLockWait) stored.tokens[0].position = movementDuringLockWait;
     const campaign = await db.campaign.findUnique({ where: { id: CAMPAIGN_ID } });
     const tx = {

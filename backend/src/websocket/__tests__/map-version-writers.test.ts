@@ -94,14 +94,14 @@ beforeEach(() => {
   db.campaign.update.mockResolvedValue({ id: CAMPAIGN_ID, currentMapId: MAP_ID, spiritLayerEnabled: true });
   db.session.findFirst.mockResolvedValue(null);
   db.session.update.mockResolvedValue({});
-  mockWithCampaignRowLock.mockImplementation(async (_prisma: unknown, _campaignId: string, fn: Function) => {
+  mockWithCampaignRowLock.mockImplementation(async (_prisma: unknown, _campaignId: string, fn: (...args: unknown[]) => unknown) => {
     return fn(db, await db.campaign.findUnique({ where: { id: CAMPAIGN_ID } }));
   });
   mockLockCampaignMapRows.mockImplementation(async (_tx: unknown, _campaignId: string, mapId: string) => ({
     campaign: { id: CAMPAIGN_ID, combatState: null },
     map: await db.map.findFirst({ where: { id: mapId, campaignId: CAMPAIGN_ID } }),
   }));
-  mockWithCampaignMapRowLock.mockImplementation(async (_prisma: unknown, _campaignId: string, mapId: string, fn: Function) => {
+  mockWithCampaignMapRowLock.mockImplementation(async (_prisma: unknown, _campaignId: string, mapId: string, fn: (...args: unknown[]) => unknown) => {
     const currentMap = await db.map.findUnique({ where: { id: mapId } });
     return fn(db, { id: CAMPAIGN_ID, gameSystem: 'DND_5E', combatState: persistedCombatState }, currentMap);
   });

@@ -1,5 +1,6 @@
 import { randomUUID } from 'crypto';
 import { Prisma } from '@prisma/client';
+import type { CombatState } from '../initiativeState';
 import type { Socket as ClientSocket } from 'socket.io-client';
 import { prisma } from '../../config/database';
 import { loadCampaignCombatState, saveCampaignCombatState, withCampaignRowLock } from '../../services/combatStatePersistence';
@@ -577,7 +578,7 @@ it('starts and moves a linked D&D character in a legacy campaign with no ruleset
   });
   const dm = await server.connectAndAuth(dmCookie, campaignId);
   try {
-    const started = waitForEvent<any>(dm, 'initiative.state');
+    const started = waitForEvent<CombatState>(dm, 'initiative.state');
     dm.emit('initiative.start');
     expect((await started).movement).toMatchObject({ tokenId: playerTokenId, speedFeet: 30 });
     const requestId = randomUUID();
@@ -593,7 +594,7 @@ it('wraps to the first combatant when removing the active last combatant', async
   await prisma.map.update({ where: { id: mapId }, data: { tokens: [
     ...tokens(),
     ...[second, last].map((id) => ({ ...tokens()[0], id, characterId: null, type: 'npc', statBlock: { speed: '30 ft.' } })),
-  ] as any } });
+  ] as Prisma.InputJsonArray } });
   const state = await loadCampaignCombatState(prisma, campaignId);
   await withCampaignRowLock(prisma, campaignId, async (tx, campaign) => {
     await saveCampaignCombatState(tx, campaign.id, {
@@ -603,7 +604,7 @@ it('wraps to the first combatant when removing the active last combatant', async
   });
   const dm = await server.connectAndAuth(dmCookie, campaignId);
   try {
-    const removed = waitForEvent<any>(dm, 'initiative.state');
+    const removed = waitForEvent<CombatState>(dm, 'initiative.state');
     dm.emit('initiative.remove', { tokenId: last });
     expect(await removed).toMatchObject({ round: 2, currentTokenId: playerTokenId, movement: { tokenId: playerTokenId, spentFeet: 0, speedFeet: 30 } });
   } finally { dm.disconnect(); }

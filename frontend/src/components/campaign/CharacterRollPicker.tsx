@@ -192,7 +192,7 @@ export default function CharacterRollPicker({
     let purpose = opt.purpose;
 
     if (character?.gameSystem === 'DND_5E' && opt.supportsAdvantage) {
-      expr = rollWithExhaustion(expr, purpose, trackedExhaustionLevel(character.data as any) ?? 0, mode);
+      expr = rollWithExhaustion(expr, purpose, trackedExhaustionLevel(character.data as Parameters<typeof trackedExhaustionLevel>[0]) ?? 0, mode);
       const actualMode = expr.startsWith('2d20kh1') ? 'Advantage'
         : expr.startsWith('2d20kl1') ? 'Disadvantage' : '';
       if (actualMode) purpose = `${purpose} (${actualMode})`;
