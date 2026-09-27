@@ -457,7 +457,7 @@ export const DnD5eCharacterView: React.FC<DnD5eCharacterViewProps> = ({ characte
   const renderSpellsTab = () => (
     <div>
       {data.spellcasting ? (
-        <SpellcastingBlock spellcasting={data.spellcasting} />
+        <SpellcastingBlock spellcasting={data.spellcasting} campaignId={character.campaignId} />
       ) : (
         <div className="text-center py-12 text-stone-500">
           <Sparkles className="w-12 h-12 mx-auto mb-3 text-stone-400" />
