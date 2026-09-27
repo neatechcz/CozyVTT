@@ -15,6 +15,7 @@ import { exportCampaign } from '../services/campaignExporter';
 import { previewCampaignImport, importCampaign } from '../services/campaignImporter';
 import { CreateCampaignSchema } from '../validators/campaigns';
 import logger from '../utils/logger';
+import { z } from 'zod';
 
 const router = Router();
 
@@ -1667,6 +1668,62 @@ router.post('/import', authenticated, (req: Request, res: Response, next: NextFu
       error: 'Import Failed',
       message: error.message || 'Failed to import campaign.',
     });
+  }
+});
+
+// Campaign spell descriptions are shared reference text, separate from character sheets.
+function normalizeSpellName(name: string): string {
+  return name.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase()
+    .replace(/[\s'’`\-‐‑–—]/g, '');
+}
+
+const spellNameSchema = z.string().trim().min(1).max(120);
+const spellDescriptionSchema = z.object({ description: z.string().trim().min(1).max(20000) });
+
+router.get('/:campaignId/spells/:name', campaignMember, async (req: AuthenticatedRequest, res: Response) => {
+  const parsedName = spellNameSchema.safeParse(req.params.name);
+  if (!parsedName.success || !normalizeSpellName(parsedName.data)) {
+    return res.status(400).json({ error: 'Invalid spell name' });
+  }
+  try {
+    const spell = await prisma.campaignSpellDescription.findUnique({
+      where: { campaignId_normalizedName: {
+        campaignId: req.params.campaignId,
+        normalizedName: normalizeSpellName(parsedName.data),
+      } },
+    });
+    if (!spell) return res.status(404).json({ error: 'Spell description not found' });
+    return res.status(200).json({ spell: { name: spell.name, description: spell.description, updatedAt: spell.updatedAt } });
+  } catch (error) {
+    logger.error('Failed to get spell description', { err: error });
+    return res.status(500).json({ error: 'Failed to get spell description' });
+  }
+});
+
+router.put('/:campaignId/spells/:name', campaignDM, async (req: AuthenticatedRequest, res: Response) => {
+  const parsedName = spellNameSchema.safeParse(req.params.name);
+  const parsedBody = spellDescriptionSchema.safeParse(req.body);
+  if (!parsedName.success || !normalizeSpellName(parsedName.data) || !parsedBody.success) {
+    return res.status(400).json({ error: 'Invalid spell name or description' });
+  }
+  try {
+    const spell = await prisma.campaignSpellDescription.upsert({
+      where: { campaignId_normalizedName: {
+        campaignId: req.params.campaignId,
+        normalizedName: normalizeSpellName(parsedName.data),
+      } },
+      create: {
+        campaignId: req.params.campaignId,
+        normalizedName: normalizeSpellName(parsedName.data),
+        name: parsedName.data,
+        description: parsedBody.data.description,
+      },
+      update: { description: parsedBody.data.description },
+    });
+    return res.status(200).json({ spell: { name: spell.name, description: spell.description, updatedAt: spell.updatedAt } });
+  } catch (error) {
+    logger.error('Failed to save spell description', { err: error });
+    return res.status(500).json({ error: 'Failed to save spell description' });
   }
 });
 
