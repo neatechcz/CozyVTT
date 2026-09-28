@@ -88,12 +88,12 @@ export default function SessionSidebar() {
   };
 
   return (
-    <aside className="h-full flex flex-col bg-parchment/30 border-l border-moss-green/20">
+    <aside className="h-full min-w-0 flex flex-col bg-parchment/30 border-l border-moss-green/20">
       {/* Tab bar */}
       <div
         role="tablist"
         aria-label="Session panels"
-        className="flex items-stretch gap-1 px-2 pt-2 border-b border-moss-green/20 flex-shrink-0"
+        className="flex min-w-0 items-stretch gap-0.5 px-1 pt-2 border-b border-moss-green/20 flex-shrink-0 sm:gap-1 sm:px-2"
       >
         {TABS.map(({ key, label, icon: Icon }, index) => {
           const active = activeTab === key;
@@ -108,7 +108,7 @@ export default function SessionSidebar() {
               onClick={() => setActiveTab(key)}
               onKeyDown={(e) => handleTabKeyDown(e, index)}
               className={cn(
-                'flex-1 flex items-center justify-center gap-1.5 px-2 py-2 rounded-t-lg',
+                'min-w-0 min-h-11 flex-1 flex items-center justify-center gap-1 px-1 py-2 rounded-t-lg sm:gap-1.5 sm:px-2',
                 'text-xs font-medium transition-colors duration-150',
                 'focus:outline-none focus-visible:ring-2 focus-visible:ring-brand',
                 active
@@ -117,7 +117,7 @@ export default function SessionSidebar() {
               )}
             >
               <Icon className="w-4 h-4 flex-shrink-0" aria-hidden="true" />
-              <span>{label}</span>
+              <span className="truncate">{label}</span>
               {key === 'chat' && unreadChat > 0 && (
                 <span
                   className="min-w-[18px] h-[18px] px-1 rounded-full bg-brand text-canvas text-[10px] font-bold flex items-center justify-center"

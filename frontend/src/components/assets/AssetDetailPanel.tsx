@@ -229,11 +229,11 @@ export default function AssetDetailPanel({ asset, onClose, onDelete, onUpdate }:
             role="dialog"
             aria-modal="true"
             aria-labelledby={titleId}
-            className="absolute right-0 top-0 h-full w-full max-w-2xl bg-paper-white shadow-2xl overflow-y-auto"
+            className="absolute right-0 top-0 h-full w-full max-w-2xl overflow-x-hidden overflow-y-auto bg-paper-white shadow-2xl"
             onClick={(e) => e.stopPropagation()}
           >
             {/* Header */}
-            <div className="sticky top-0 z-10 bg-moss-green/10 backdrop-blur-sm border-b border-moss-green/20 p-6">
+            <div className="sticky top-0 z-10 border-b border-moss-green/20 bg-moss-green/10 p-3 backdrop-blur-sm sm:p-6">
               <div className="flex items-start justify-between">
                 <div className="flex-1 min-w-0">
                   <h2 id={titleId} className="text-2xl font-bold text-moss-green mb-1 truncate">
@@ -261,7 +261,7 @@ export default function AssetDetailPanel({ asset, onClose, onDelete, onUpdate }:
               </div>
 
               {/* Action Buttons */}
-              <div className="flex items-center gap-3 mt-4">
+              <div className="mt-4 flex flex-wrap items-center gap-2 sm:gap-3">
                 <Button
                   onClick={handleDownload}
                   className="flex-1 flex items-center justify-center gap-2"
@@ -282,16 +282,16 @@ export default function AssetDetailPanel({ asset, onClose, onDelete, onUpdate }:
             </div>
 
             {/* Content */}
-            <div className="p-6 space-y-6">
+            <div className="space-y-6 p-3 sm:p-6">
               {/* Preview */}
               <div>
                 <h3 className="text-lg font-semibold text-moss-green mb-3">Preview</h3>
                 <div className="relative w-full rounded-lg overflow-hidden bg-moss-green/10">
                   {currentAsset.type === AssetType.AUDIO ? (
                     <div className="flex items-center justify-center h-64">
-                      <div className="text-center">
+                      <div className="min-w-0 text-center">
                         <FileAudio className="w-20 h-20 mx-auto mb-4 text-spirit-purple" />
-                        <audio src={getAssetUrl()} controls className="mx-auto" />
+                        <audio src={getAssetUrl()} controls className="mx-auto max-w-full" />
                       </div>
                     </div>
                   ) : (
@@ -485,18 +485,18 @@ export default function AssetDetailPanel({ asset, onClose, onDelete, onUpdate }:
                 <h3 className="text-lg font-semibold text-moss-green mb-3">Technical Details</h3>
                 <div className="p-4 bg-parchment/50 border border-moss-green/20 rounded-lg">
                   <div className="space-y-2 font-mono text-sm">
-                    <div className="flex justify-between">
+                    <div className="flex min-w-0 flex-wrap justify-between gap-x-3">
                       <span className="text-stone-gray/70">Asset ID:</span>
-                      <span className="text-stone-gray">{currentAsset.id}</span>
+                      <span className="break-all text-stone-gray">{currentAsset.id}</span>
                     </div>
-                    <div className="flex justify-between">
+                    <div className="flex min-w-0 flex-wrap justify-between gap-x-3">
                       <span className="text-stone-gray/70">Filename:</span>
-                      <span className="text-stone-gray truncate ml-4">{currentAsset.filename}</span>
+                      <span className="break-all text-stone-gray">{currentAsset.filename}</span>
                     </div>
                     {currentAsset.campaignId && (
-                      <div className="flex justify-between">
+                      <div className="flex min-w-0 flex-wrap justify-between gap-x-3">
                         <span className="text-stone-gray/70">Campaign ID:</span>
-                        <span className="text-stone-gray truncate ml-4">{currentAsset.campaignId}</span>
+                        <span className="break-all text-stone-gray">{currentAsset.campaignId}</span>
                       </div>
                     )}
                   </div>

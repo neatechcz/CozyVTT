@@ -7,7 +7,7 @@ import { CharacterSheetProps } from '../types';
 
 export const Shadowrun6eCharacterSheet: React.FC<CharacterSheetProps> = () => {
   return (
-    <div className="glass-panel p-6">
+    <div className="min-w-0 glass-panel p-4 sm:p-6">
       <div className="flex flex-col items-center justify-center py-12 space-y-4">
         <div className="p-4 rounded-full bg-purple-100">
           <AlertCircle className="w-8 h-8 text-purple-600" />

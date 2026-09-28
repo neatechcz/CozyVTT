@@ -352,8 +352,8 @@ export const CallOfCthulhu7eCharacterEditor: React.FC<CallOfCthulhu7eCharacterEd
       : {};
 
     const headerClasses = isCustomColor
-      ? 'text-parchment p-6 rounded-t-lg relative border-b-4 border-amber-600'
-      : `bg-gradient-to-r ${themeColor.from} via-${themeColor.accent} ${themeColor.to} text-parchment p-6 rounded-t-lg relative border-b-4 border-${themeColor.border}`;
+      ? 'text-parchment p-4 sm:p-6 rounded-t-lg relative border-b-4 border-amber-600'
+      : `bg-gradient-to-r ${themeColor.from} via-${themeColor.accent} ${themeColor.to} text-parchment p-4 sm:p-6 rounded-t-lg relative border-b-4 border-${themeColor.border}`;
 
     return (
       <div className={headerClasses} style={headerStyle}>
@@ -368,7 +368,7 @@ export const CallOfCthulhu7eCharacterEditor: React.FC<CallOfCthulhu7eCharacterEd
 
         {/* Color Picker Dropdown */}
         {showColorPicker && (
-          <div className="absolute top-16 right-4 bg-white text-stone-800 rounded-lg shadow-xl p-4 z-10 border-2 border-stone-200 max-w-md">
+          <div className="absolute top-16 left-2 right-2 sm:left-auto sm:right-4 bg-white text-stone-800 rounded-lg shadow-xl p-4 z-10 border-2 border-stone-200 max-w-md max-h-[70dvh] overflow-y-auto">
             <h4 className="font-semibold mb-3">Theme Color</h4>
 
             {/* Preset Colors */}
@@ -437,7 +437,7 @@ export const CallOfCthulhu7eCharacterEditor: React.FC<CallOfCthulhu7eCharacterEd
         )}
 
         {/* Action Buttons */}
-        <div className="absolute top-4 right-16 flex items-center space-x-2">
+        <div className="mb-4 flex flex-wrap items-center justify-end gap-2 pr-10 sm:absolute sm:top-4 sm:right-16 sm:mb-0 sm:pr-0">
         <button
           onClick={handleSave}
           disabled={isSaving}
@@ -455,7 +455,7 @@ export const CallOfCthulhu7eCharacterEditor: React.FC<CallOfCthulhu7eCharacterEd
         </button>
       </div>
 
-      <div className="flex items-start space-x-4 pr-48">
+      <div className="flex min-w-0 flex-col gap-4 sm:flex-row sm:items-start sm:pr-48 sm:pt-14">
         {/* Token Image */}
         <div className="flex-shrink-0 relative">
           <label htmlFor="token-upload" className="cursor-pointer group">
@@ -491,7 +491,7 @@ export const CallOfCthulhu7eCharacterEditor: React.FC<CallOfCthulhu7eCharacterEd
         </div>
 
         {/* Character Info */}
-        <div className="flex-1 space-y-3">
+        <div className="min-w-0 flex-1 space-y-3">
           <input
             type="text"
             value={formData.investigatorName || ''}
@@ -500,7 +500,7 @@ export const CallOfCthulhu7eCharacterEditor: React.FC<CallOfCthulhu7eCharacterEd
             className="text-3xl font-bold bg-white/10 border-2 border-white/30 rounded px-3 py-1 w-full text-parchment placeholder:text-parchment-light/50 focus:outline-none focus:ring-2 focus:ring-amber-500"
           />
 
-          <div className="grid grid-cols-3 gap-3">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
             <input
               type="text"
               value={formData.playerName || ''}
@@ -524,7 +524,7 @@ export const CallOfCthulhu7eCharacterEditor: React.FC<CallOfCthulhu7eCharacterEd
             />
           </div>
 
-          <div className="grid grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
             <input
               type="number"
               value={formData.age || ''}
@@ -563,7 +563,7 @@ export const CallOfCthulhu7eCharacterEditor: React.FC<CallOfCthulhu7eCharacterEd
 
   // Render tabs
   const renderTabs = () => (
-    <div className="flex space-x-1 border-b-2 border-sepia-400 bg-parchment-light/50 px-4">
+    <div className="flex max-w-full gap-1 overflow-x-auto border-b-2 border-sepia-400 bg-parchment-light/50 px-2 sm:px-4">
       {TABS.map((tab) => {
         const Icon = tab.icon;
         const isActive = activeTab === tab.id;
@@ -572,7 +572,7 @@ export const CallOfCthulhu7eCharacterEditor: React.FC<CallOfCthulhu7eCharacterEd
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
             className={`
-              flex items-center space-x-2 px-4 py-3 font-medium transition-colors
+              flex shrink-0 items-center space-x-2 whitespace-nowrap px-3 sm:px-4 py-3 font-medium transition-colors
               ${
                 isActive
                   ? 'text-green-800 border-b-2 border-green-800 -mb-0.5 bg-parchment'
@@ -897,10 +897,10 @@ export const CallOfCthulhu7eCharacterEditor: React.FC<CallOfCthulhu7eCharacterEd
 
   // Main render
   return (
-    <div className="glass-panel overflow-hidden">
+    <div className="character-sheet min-w-0 glass-panel overflow-hidden">
       {renderHeader()}
       {renderTabs()}
-      <div className="p-6 bg-parchment max-h-[calc(100vh-200px)] overflow-y-auto">
+      <div className="min-w-0 bg-parchment p-3 sm:p-6 max-h-[calc(100dvh-200px)] overflow-y-auto">
         {activeTab === 'overview' && renderOverviewTab()}
         {activeTab === 'skills' && renderSkillsTab()}
         {activeTab === 'combat' && renderCombatTab()}

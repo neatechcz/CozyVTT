@@ -141,12 +141,12 @@ export const FlexibleCharacterSheetEdit: React.FC<FlexibleCharacterSheetEditProp
   };
 
   return (
-    <div className="glass-panel p-6">
+    <div className="character-sheet min-w-0 glass-panel p-3 sm:p-6">
       {/* Header with Save/Cancel */}
-      <div className="flex items-center justify-between pb-4 border-b border-moss-green/20 mb-6">
-        <div className="flex items-center gap-4">
+      <div className="flex min-w-0 flex-col gap-4 pb-4 border-b border-moss-green/20 mb-6 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex min-w-0 items-center gap-3 sm:gap-4">
           {/* Token Image Upload */}
-          <div className="relative group">
+          <div className="relative group shrink-0">
             <input
               type="file"
               id="token-upload-flexible"
@@ -174,19 +174,19 @@ export const FlexibleCharacterSheetEdit: React.FC<FlexibleCharacterSheetEditProp
               </div>
             </label>
             {tokenError && (
-              <div className="absolute top-full mt-1 text-xs text-red-500 whitespace-nowrap">
+              <div className="mt-1 max-w-16 break-words text-xs text-red-500">
                 {tokenError}
               </div>
             )}
             {!character.campaignId && (
-              <div className="absolute top-full mt-1 text-xs text-amber-600 whitespace-nowrap">
+              <div className="mt-1 max-w-16 break-words text-xs text-amber-600">
                 Saves as personal token
               </div>
             )}
           </div>
 
-          <div>
-            <h2 className="text-2xl font-bold text-moss-green">
+          <div className="min-w-0">
+            <h2 className="break-words text-xl font-bold text-moss-green sm:text-2xl">
               Editing: {character.name}
             </h2>
             <p className="text-sm text-stone-gray">
@@ -194,7 +194,7 @@ export const FlexibleCharacterSheetEdit: React.FC<FlexibleCharacterSheetEditProp
             </p>
           </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           <button
             onClick={handleSave}
             disabled={isSaving}

@@ -66,10 +66,10 @@ export const FlexibleCharacterSheetView: React.FC<FlexibleCharacterSheetViewProp
   };
 
   return (
-    <div className="glass-panel p-6">
+    <div className="character-sheet min-w-0 glass-panel p-3 sm:p-6">
       {/* Header */}
-      <div className="flex items-center justify-between pb-4 border-b border-moss-green/20 mb-6">
-        <div className="flex items-center gap-3">
+      <div className="flex min-w-0 flex-col gap-3 pb-4 border-b border-moss-green/20 mb-6 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex min-w-0 items-center gap-3">
           {character.tokenImageUrl ? (
             <img
               src={character.tokenImageUrl}
@@ -81,8 +81,8 @@ export const FlexibleCharacterSheetView: React.FC<FlexibleCharacterSheetViewProp
               <User className="w-6 h-6 text-moss-green" />
             </div>
           )}
-          <div>
-            <h2 className="text-2xl font-bold text-moss-green">{character.name}</h2>
+          <div className="min-w-0">
+            <h2 className="break-words text-xl font-bold text-moss-green sm:text-2xl">{character.name}</h2>
             <p className="text-sm text-stone-gray">Flexible Character Sheet</p>
           </div>
         </div>

@@ -154,7 +154,7 @@ function TokenRow({ token, campaignId, mapId, onEditToken }: TokenRowProps) {
       </div>
 
       {/* Actions — shown on hover */}
-      <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
+      <div className="token-roster-actions flex items-center gap-0.5 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity flex-shrink-0">
         {/* Edit (NPC/Object only) */}
         {canEdit && onEditToken && (
           <button

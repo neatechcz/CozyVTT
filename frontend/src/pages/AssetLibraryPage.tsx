@@ -173,9 +173,9 @@ export default function AssetLibraryPage() {
     <div className="min-h-screen bg-gradient-to-br from-soft-cream via-parchment to-warm-amber/20">
       {/* Header */}
       <div className="bg-moss-green/10 border-b border-moss-green/20">
-        <div className="max-w-7xl mx-auto px-6 py-6">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
+        <div className="max-w-7xl mx-auto px-3 py-4 sm:px-6 sm:py-6">
+          <div className="flex min-w-0 items-start justify-between gap-2 sm:items-center">
+            <div className="flex min-w-0 items-center gap-2 sm:gap-4">
               <Button
                 onClick={() => navigate('/dashboard')}
                 variant="secondary" className="flex items-center gap-2"
@@ -185,9 +185,9 @@ export default function AssetLibraryPage() {
                 <Home className="w-5 h-5" aria-hidden="true" />
                 <span className="hidden sm:inline">Dashboard</span>
               </Button>
-              <div>
-                <h1 className="text-3xl font-bold text-moss-green mb-2">Asset Library</h1>
-                <p className="text-stone-gray">Manage your maps, tokens, audio, and avatars</p>
+              <div className="min-w-0">
+                <h1 className="text-xl font-bold text-moss-green mb-1 sm:mb-2 sm:text-3xl">Asset Library</h1>
+                <p className="text-xs sm:text-base text-stone-gray">Manage your maps, tokens, audio, and avatars</p>
               </div>
             </div>
 
@@ -210,10 +210,10 @@ export default function AssetLibraryPage() {
         </div>
       </div>
 
-      <main id="main-content" className="max-w-7xl mx-auto px-6 py-8">
+      <main id="main-content" className="max-w-7xl mx-auto min-w-0 px-3 py-4 sm:px-6 sm:py-8">
         {/* Toolbar */}
         <div className="bg-parchment/50 border border-moss-green/20 rounded-xl p-4 mb-4">
-          <div className="flex flex-col lg:flex-row gap-4">
+          <div className="flex min-w-0 flex-col lg:flex-row gap-4">
             {/* Search */}
             <div className="flex-1 relative">
               <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-5 h-5 text-stone-gray/40" />

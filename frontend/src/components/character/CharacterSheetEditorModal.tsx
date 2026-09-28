@@ -197,13 +197,13 @@ export default function CharacterSheetEditorModal({
 
   return (
     <>
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" aria-hidden="true">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4 bg-black/70 backdrop-blur-sm" aria-hidden="true">
       <div
         ref={modalRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="character-sheet-editor-title"
-        className="bg-soft-cream border-2 border-moss-green/30 rounded-xl shadow-2xl w-full max-w-6xl max-h-[95vh] overflow-hidden flex flex-col"
+        className="bg-soft-cream border-2 border-moss-green/30 rounded-none sm:rounded-xl shadow-2xl w-full max-w-6xl h-[100dvh] sm:h-auto sm:max-h-[95dvh] min-w-0 overflow-hidden flex flex-col"
       >
         {/* Close Button */}
         <div className="absolute top-4 right-4 z-10">
@@ -223,7 +223,7 @@ export default function CharacterSheetEditorModal({
         </h2>
 
         {/* Editor Content */}
-        <div className="flex-1 overflow-y-auto">
+        <div className="min-w-0 flex-1 overflow-y-auto">
           {renderCharacterEditor()}
         </div>
       </div>

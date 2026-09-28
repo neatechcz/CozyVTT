@@ -113,8 +113,8 @@ export const CallOfCthulhu7eCharacterView: React.FC<CallOfCthulhu7eCharacterView
       : {};
 
     const headerClasses = isCustomColor
-      ? 'text-parchment p-6 rounded-t-lg relative border-b-4 border-amber-600'
-      : `bg-gradient-to-r ${themeColor.from} via-${themeColor.accent} ${themeColor.to} text-parchment p-6 rounded-t-lg relative border-b-4 border-${themeColor.border}`;
+      ? 'text-parchment p-4 sm:p-6 rounded-t-lg relative border-b-4 border-amber-600'
+      : `bg-gradient-to-r ${themeColor.from} via-${themeColor.accent} ${themeColor.to} text-parchment p-4 sm:p-6 rounded-t-lg relative border-b-4 border-${themeColor.border}`;
 
     return (
       <div className={headerClasses} style={headerStyle}>
@@ -129,7 +129,7 @@ export const CallOfCthulhu7eCharacterView: React.FC<CallOfCthulhu7eCharacterView
 
         {/* Color Picker Dropdown */}
         {showColorPicker && (
-          <div className="absolute top-16 right-4 bg-white text-stone-800 rounded-lg shadow-xl p-4 z-10 border-2 border-stone-200 max-w-md">
+          <div className="absolute top-16 left-2 right-2 sm:left-auto sm:right-4 bg-white text-stone-800 rounded-lg shadow-xl p-4 z-10 border-2 border-stone-200 max-w-md max-h-[70dvh] overflow-y-auto">
             <h4 className="font-semibold mb-3">Theme Color</h4>
 
             {/* Preset Colors */}
@@ -209,8 +209,8 @@ export const CallOfCthulhu7eCharacterView: React.FC<CallOfCthulhu7eCharacterView
           </button>
         )}
 
-      <div className="flex items-start justify-between pr-24">
-        <div className="flex items-start space-x-4">
+      <div className="flex min-w-0 flex-col gap-4 pt-12 sm:flex-row sm:items-start sm:justify-between sm:pr-24 sm:pt-0">
+        <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-start sm:gap-4">
           {/* Token Image */}
           <div className="flex-shrink-0">
             {character.tokenImageUrl ? (
@@ -227,12 +227,12 @@ export const CallOfCthulhu7eCharacterView: React.FC<CallOfCthulhu7eCharacterView
           </div>
 
           {/* Character Info */}
-          <div>
-            <h2 className="text-3xl font-bold mb-2 text-parchment drop-shadow-lg">
+          <div className="min-w-0">
+            <h2 className="break-words text-2xl font-bold mb-2 text-parchment drop-shadow-lg sm:text-3xl">
               {data.investigatorName || 'Unnamed Investigator'}
             </h2>
             <div className="space-y-1 text-parchment-light">
-              <div className="flex items-center space-x-4">
+              <div className="flex flex-wrap items-center gap-2 sm:gap-4">
                 <span className="font-medium">{data.occupation || 'No Occupation'}</span>
                 {data.era && <span>• {data.era}</span>}
               </div>
@@ -241,7 +241,7 @@ export const CallOfCthulhu7eCharacterView: React.FC<CallOfCthulhu7eCharacterView
                   <span className="text-amber-300">Residence:</span> {data.residence}
                 </div>
               )}
-              <div className="flex items-center space-x-4 text-sm">
+              <div className="flex flex-wrap items-center gap-2 text-sm sm:gap-4">
                 {data.age && <span>Age {data.age}</span>}
                 {data.sex && <span>• {data.sex}</span>}
                 {data.birthplace && <span>• Born in {data.birthplace}</span>}
@@ -252,7 +252,7 @@ export const CallOfCthulhu7eCharacterView: React.FC<CallOfCthulhu7eCharacterView
 
         {/* Player Name */}
         {data.playerName && (
-          <div className="text-right">
+          <div className="text-left sm:text-right">
             <div className="text-xs text-amber-300 uppercase tracking-wide">Player</div>
             <div className="text-lg font-semibold text-parchment">{data.playerName}</div>
           </div>
@@ -264,7 +264,7 @@ export const CallOfCthulhu7eCharacterView: React.FC<CallOfCthulhu7eCharacterView
 
   // Render tabs
   const renderTabs = () => (
-    <div className="flex space-x-1 border-b-2 border-sepia-400 bg-parchment-light/50 px-4">
+    <div className="flex max-w-full gap-1 overflow-x-auto border-b-2 border-sepia-400 bg-parchment-light/50 px-2 sm:px-4">
       {TABS.map((tab) => {
         const Icon = tab.icon;
         const isActive = activeTab === tab.id;
@@ -273,7 +273,7 @@ export const CallOfCthulhu7eCharacterView: React.FC<CallOfCthulhu7eCharacterView
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
             className={`
-              flex items-center space-x-2 px-4 py-3 font-medium transition-colors
+              flex shrink-0 items-center space-x-2 whitespace-nowrap px-3 sm:px-4 py-3 font-medium transition-colors
               ${
                 isActive
                   ? 'text-green-800 border-b-2 border-green-800 -mb-0.5 bg-parchment'
@@ -655,10 +655,10 @@ export const CallOfCthulhu7eCharacterView: React.FC<CallOfCthulhu7eCharacterView
 
   // Main render
   return (
-    <div className="glass-panel overflow-hidden">
+    <div className="character-sheet min-w-0 glass-panel overflow-hidden">
       {renderHeader()}
       {renderTabs()}
-      <div className="p-6 bg-parchment">
+      <div className="min-w-0 bg-parchment p-3 sm:p-6">
         {activeTab === 'overview' && renderOverviewTab()}
         {activeTab === 'skills' && renderSkillsTab()}
         {activeTab === 'combat' && renderCombatTab()}

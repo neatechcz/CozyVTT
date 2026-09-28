@@ -585,9 +585,9 @@ export default function CharacterEditorPage() {
         </div>
       )}
       {/* Header */}
-      <div className="glass-panel m-4 p-4">
-        <div className="flex items-center justify-between gap-4">
-          <div className="flex items-center gap-3">
+      <div className="glass-panel m-2 p-3 sm:m-4 sm:p-4">
+        <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:justify-between sm:gap-4">
+          <div className="flex min-w-0 items-center gap-3">
             <button
               onClick={handleBack}
               className="p-2 rounded-lg hover:bg-moss-green/10 transition-colors"
@@ -595,8 +595,8 @@ export default function CharacterEditorPage() {
             >
               <ArrowLeft className="w-5 h-5 text-moss-green" />
             </button>
-            <div>
-              <h1 className="text-2xl font-bold text-moss-green">
+            <div className="min-w-0">
+              <h1 className="break-words text-xl sm:text-2xl font-bold text-moss-green">
                 Editing: {character.name}
               </h1>
               {campaign && (
@@ -607,7 +607,7 @@ export default function CharacterEditorPage() {
             </div>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex flex-wrap items-center gap-2 sm:gap-3">
             {/* Save Status */}
             {unsavedChanges && (
               <span className="text-sm text-sunset-orange">Unsaved changes</span>
@@ -645,7 +645,7 @@ export default function CharacterEditorPage() {
       </div>
 
       {/* Character Sheet Editor */}
-      <div className="p-4">
+      <div className="min-w-0 p-2 sm:p-4">
         {liveCampaignId && liveStatus === 'offline' && (
           <div
             role="status"

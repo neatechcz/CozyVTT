@@ -2614,7 +2614,7 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
           ref={canvasRef}
           width={canvasSize.width}
           height={canvasSize.height}
-          className={`absolute inset-0 ${
+          className={`absolute inset-0 touch-none ${
             draggedToken ? 'cursor-grabbing' :
             wallMode === 'wall-draw' ? 'cursor-crosshair' :
             wallMode === 'wall-polygon' ? 'cursor-crosshair' :
@@ -2627,10 +2627,25 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
             (hoverToken || hoveredDoorId) ? 'cursor-pointer' :
             'cursor-move'
           }`}
-          onMouseDown={handleMouseDown}
-          onMouseMove={handleMouseMove}
-          onMouseUp={handleMouseUp}
-          onMouseLeave={handleMouseLeave}
+          onPointerDown={(event) => {
+            if (event.pointerType === 'touch' && !event.isPrimary) return;
+            event.currentTarget.setPointerCapture(event.pointerId);
+            handleMouseDown(event);
+          }}
+          onPointerMove={(event) => {
+            if (event.pointerType === 'touch' && !event.isPrimary) return;
+            handleMouseMove(event);
+          }}
+          onPointerUp={(event) => {
+            handleMouseUp(event);
+            if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+              event.currentTarget.releasePointerCapture(event.pointerId);
+            }
+          }}
+          onPointerCancel={handleMouseLeave}
+          onPointerLeave={(event) => {
+            if (event.pointerType !== 'touch' && !event.currentTarget.hasPointerCapture(event.pointerId)) handleMouseLeave();
+          }}
           onContextMenu={handleContextMenu}
         />
       </div>
@@ -2721,7 +2736,7 @@ export default function MapCanvas({ onEditToken }: MapCanvasProps) {
       )}
 
       {/* Toolbar - Glassmorphism */}
-      <div className="absolute top-4 left-4 glass-panel p-2 flex items-center gap-2 bg-parchment/90 backdrop-blur-sm">
+      <div className="map-toolbar absolute top-2 left-2 right-2 z-20 glass-panel flex max-w-full items-center gap-2 overflow-x-auto bg-parchment/90 p-2 backdrop-blur-sm sm:top-4 sm:left-4 sm:right-auto sm:overflow-visible">
         {/* Zoom Out */}
         <Button
           onClick={mapControls.zoomOut}

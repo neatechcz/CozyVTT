@@ -153,26 +153,26 @@ export default function CharacterSheetViewerModal({
 
   return (
     <>
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm" aria-hidden="true">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-0 sm:p-4 bg-black/70 backdrop-blur-sm" aria-hidden="true">
       <div
         ref={modalRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="character-sheet-viewer-title"
-        className="bg-soft-cream border-2 border-moss-green/30 rounded-xl shadow-2xl w-full max-w-6xl max-h-[95vh] overflow-hidden flex flex-col"
+        className="bg-soft-cream border-2 border-moss-green/30 rounded-none sm:rounded-xl shadow-2xl w-full max-w-6xl h-[100dvh] sm:h-auto sm:max-h-[95dvh] min-w-0 overflow-hidden flex flex-col"
       >
         {/* Header */}
-        <div className="flex items-start justify-between p-6 border-b border-moss-green/20 bg-parchment/30">
-          <div className="flex-1">
+        <div className="flex min-w-0 items-start justify-between gap-2 p-3 sm:p-6 border-b border-moss-green/20 bg-parchment/30">
+          <div className="min-w-0 flex-1">
             <div className="flex items-center gap-3 mb-2">
               <div className="p-2 rounded-full bg-moss-green/10">
                 <UserIcon className="w-5 h-5 text-moss-green" />
               </div>
-              <div>
-                <h2 id="character-sheet-viewer-title" className="text-2xl font-bold text-moss-green">
+              <div className="min-w-0">
+                <h2 id="character-sheet-viewer-title" className="break-words text-lg sm:text-2xl font-bold text-moss-green">
                   {character.name}
                 </h2>
-                <div className="flex items-center gap-3 text-sm text-warm-gray">
+                <div className="flex flex-wrap items-center gap-2 text-xs sm:text-sm text-warm-gray">
                   <span>Player: {playerName}</span>
                   <span>•</span>
                   <span>{getSystemName(character.gameSystem)}</span>
@@ -192,11 +192,11 @@ export default function CharacterSheetViewerModal({
           </div>
 
           {/* Actions */}
-          <div className="flex items-center gap-2 ml-4">
+          <div className="flex shrink-0 items-center gap-1 sm:gap-2 sm:ml-4">
             {canEdit && (
               <button
                 onClick={handleEdit}
-                className="flex items-center gap-2 px-4 py-2 bg-moss-green text-white rounded-lg hover:bg-moss-green/90 transition-colors"
+                className="flex items-center gap-2 px-2 sm:px-4 py-2 bg-moss-green text-white rounded-lg hover:bg-moss-green/90 transition-colors"
               >
                 <Edit className="w-4 h-4" />
                 Edit
@@ -213,7 +213,7 @@ export default function CharacterSheetViewerModal({
         </div>
 
         {/* Character Sheet Content */}
-        <div className="flex-1 overflow-y-auto p-6">
+        <div className="min-w-0 flex-1 overflow-y-auto p-2 sm:p-6">
           {renderCharacterSheet()}
         </div>
 

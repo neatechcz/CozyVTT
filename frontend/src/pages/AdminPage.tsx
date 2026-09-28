@@ -822,8 +822,8 @@ export default function AdminPage() {
       {/* ---- Header ---- */}
       <header className="bg-moss-green/10 border-b border-moss-green/20">
         <div className="max-w-7xl mx-auto px-4 py-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-4">
+          <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+            <div className="flex min-w-0 flex-wrap items-center gap-2 sm:gap-4">
               <button
                 onClick={() => navigate('/dashboard')}
                 aria-label="Back to Dashboard"
@@ -833,14 +833,14 @@ export default function AdminPage() {
                 Dashboard
               </button>
               <div>
-                <h1 className="text-2xl font-bold text-moss-green font-heading flex items-center gap-2">
+                <h1 className="text-xl sm:text-2xl font-bold text-moss-green font-heading flex items-center gap-2">
                   <Shield className="w-6 h-6" aria-hidden="true" />
                   Admin Panel
                 </h1>
                 <p className="text-xs text-warm-gray mt-0.5">Platform administration</p>
               </div>
             </div>
-            <span className="text-sm text-warm-gray">
+            <span className="max-w-full break-words text-xs sm:text-sm text-warm-gray">
               Signed in as{' '}
               <span className="font-medium text-moss-green">{user?.displayName}</span>
             </span>
@@ -848,7 +848,7 @@ export default function AdminPage() {
 
           {/* Tab Navigation */}
           <nav aria-label="Admin panel sections">
-            <div role="tablist" aria-label="Admin tabs" className="flex flex-wrap gap-1 mt-4 max-w-full">
+            <div role="tablist" aria-label="Admin tabs" className="mt-4 flex max-w-full flex-wrap gap-1">
               {tabs.map(tab => (
                 <button
                   key={tab.id}
@@ -859,7 +859,7 @@ export default function AdminPage() {
                   tabIndex={activeTab === tab.id ? 0 : -1}
                   onClick={() => setActiveTab(tab.id)}
                   onKeyDown={event => handleTabKeyDown(event, tab.id)}
-                  className={`flex items-center gap-2 px-4 py-2 rounded-t-lg text-sm font-medium transition-colors ${
+                  className={`flex shrink-0 items-center gap-2 whitespace-nowrap px-3 sm:px-4 py-2 rounded-t-lg text-sm font-medium transition-colors ${
                     activeTab === tab.id
                       ? 'bg-paper text-moss-green border border-b-paper border-moss-green/20 -mb-px'
                       : 'text-warm-gray hover:text-moss-green hover:bg-paper/50'
@@ -1460,7 +1460,7 @@ export default function AdminPage() {
             {/* Filter Bar */}
             <div className="flex flex-wrap items-center gap-3 mb-4">
               {/* Search */}
-              <div className="relative flex-1 min-w-48">
+              <div className="relative min-w-0 flex-1 basis-48">
                 <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-warm-gray" />
                 <input
                   type="text"

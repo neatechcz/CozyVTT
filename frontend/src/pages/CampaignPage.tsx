@@ -48,6 +48,7 @@ import TokenTemplateLibrary from '@/components/campaign/TokenTemplateLibrary';
 import TokenRoster from '@/components/campaign/TokenRoster';
 import CampaignSettingsModal from '@/components/campaign/CampaignSettingsModal';
 import SessionSidebar from '@/components/campaign/SessionSidebar';
+import CampaignMobileLayout from '@/components/campaign/CampaignMobileLayout';
 import SessionToolbar, { type SessionToolKey } from '@/components/campaign/SessionToolbar';
 import ConnectionStatus from '@/components/ConnectionStatus';
 import { CampaignStatus, TokenType } from '@/types';
@@ -96,6 +97,15 @@ function CampaignPageContent() {
   const rightPanelRef = usePanelRef();
   const [leftCollapsed, setLeftCollapsed] = useState(false);
   const [rightCollapsed, setRightCollapsed] = useState(false);
+  const [isCompactLayout, setIsCompactLayout] = useState(() => window.innerWidth < 1024);
+
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 1023px)');
+    const updateLayout = () => setIsCompactLayout(media.matches);
+    updateLayout();
+    media.addEventListener('change', updateLayout);
+    return () => media.removeEventListener('change', updateLayout);
+  }, []);
 
   const togglePanel = (
     panelRef: React.RefObject<PanelImperativeHandle | null>,
@@ -210,11 +220,56 @@ function CampaignPageContent() {
     );
   }
 
+  const partyContent = (
+    <aside className="h-full min-w-0 overflow-y-auto p-3 sm:p-4 space-y-4 bg-parchment/30 border-r border-moss-green/20">
+      <CampaignInfo />
+      <CampaignRoster />
+      {userRole === 'DM' && (
+        <TokenRoster
+          onEditToken={(token) => {
+            const effectiveType = token.type ?? (token.characterId ? TokenType.PLAYER : TokenType.NPC);
+            if (effectiveType === TokenType.NPC || effectiveType === TokenType.OBJECT) setQuickEditToken(token);
+          }}
+        />
+      )}
+    </aside>
+  );
+
+  const mapContent = (
+    <section className="h-full min-h-0 min-w-0 p-2 sm:p-4">
+      <Suspense fallback={<div className="flex h-full items-center justify-center" aria-live="polite" aria-label="Loading map"><Loader2 className="h-8 w-8 animate-spin text-moss-green" aria-hidden="true" /></div>}>
+        <MapCanvas
+          onEditToken={(token) => {
+            const effectiveType = token.type ?? (token.characterId ? TokenType.PLAYER : TokenType.NPC);
+            if (effectiveType === TokenType.NPC || effectiveType === TokenType.OBJECT) setQuickEditToken(token);
+          }}
+        />
+      </Suspense>
+    </section>
+  );
+
+  const dmTools = userRole === 'DM' ? (
+    <SessionToolbar
+      openPanels={{
+        maps: isMapManagerOpen,
+        tokens: isTokenManagerOpen,
+        creatures: isCreatureLibraryOpen,
+        templates: isTokenTemplateLibraryOpen,
+        spirit: isSpiritLayerOpen,
+        atmosphere: isAtmospherePanelOpen,
+        settings: isSettingsOpen,
+      }}
+      onOpen={(key) => sessionPanelOpeners[key]()}
+      spiritLayerEnabled={campaign.spiritLayerEnabled}
+      mobileLabels={isCompactLayout}
+    />
+  ) : undefined;
+
   return (
-    <div className="h-screen flex flex-col bg-gradient-to-br from-soft-cream via-parchment to-warm-amber/20">
+    <div className="flex h-screen h-[100dvh] min-w-0 flex-col overflow-hidden bg-gradient-to-br from-soft-cream via-parchment to-warm-amber/20">
       {/* Header Bar */}
-      <header className="hidden lg:flex items-center justify-between px-4 py-3 bg-moss-green/10 border-b border-moss-green/20 shadow-sm">
-        <div className="flex items-center gap-3">
+      <header className="flex min-w-0 shrink-0 items-center justify-between gap-2 px-2 py-2 sm:px-4 lg:py-3 bg-moss-green/10 border-b border-moss-green/20 shadow-sm">
+        <div className="flex min-w-0 items-center gap-2 sm:gap-3">
           <Button
             onClick={() => navigate('/dashboard')}
             variant="secondary" className="flex items-center gap-2"
@@ -223,14 +278,14 @@ function CampaignPageContent() {
             <span className="hidden sm:inline">Dashboard</span>
           </Button>
 
-          <div className="h-6 w-px bg-moss-green/20" />
+          <div className="hidden h-6 w-px bg-moss-green/20 sm:block" />
 
-          <h1 className="text-xl font-bold text-moss-green">
+          <h1 className="min-w-0 truncate text-base font-bold text-moss-green sm:text-xl">
             {campaign.name}
           </h1>
         </div>
 
-        <div className="flex items-center gap-3">
+        <div className="flex shrink-0 items-center gap-2 lg:gap-3">
           {/* Connection Status */}
           <ConnectionStatus />
 
@@ -256,7 +311,7 @@ function CampaignPageContent() {
 
           {/* Vibe indicator (visible to all) */}
           {campaign?.currentVibe && (
-            <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-warm-amber/10 border border-warm-amber/20">
+            <div className="hidden lg:flex items-center gap-1.5 px-2 py-1 rounded-lg bg-warm-amber/10 border border-warm-amber/20">
               <Sun className="w-3.5 h-3.5 text-warm-amber" />
               <span className="text-xs font-medium text-warm-amber capitalize hidden sm:inline">
                 {campaign.currentVibe}
@@ -266,27 +321,15 @@ function CampaignPageContent() {
 
           {/* DM tools — grouped icon toolbar */}
           {userRole === 'DM' && (
-            <>
+            <div className="hidden lg:flex items-center">
               <div className="h-6 w-px bg-moss-green/20" />
-              <SessionToolbar
-                openPanels={{
-                  maps: isMapManagerOpen,
-                  tokens: isTokenManagerOpen,
-                  creatures: isCreatureLibraryOpen,
-                  templates: isTokenTemplateLibraryOpen,
-                  spirit: isSpiritLayerOpen,
-                  atmosphere: isAtmospherePanelOpen,
-                  settings: isSettingsOpen,
-                }}
-                onOpen={(key) => sessionPanelOpeners[key]()}
-                spiritLayerEnabled={campaign?.spiritLayerEnabled}
-              />
-            </>
+              {dmTools}
+            </div>
           )}
 
           {/* Sidebar collapse toggles (all roles) */}
-          <div className="h-6 w-px bg-moss-green/20" />
-          <div className="flex items-center gap-1">
+          <div className="hidden h-6 w-px bg-moss-green/20 lg:block" />
+          <div className="hidden items-center gap-1 lg:flex">
             <Tooltip content={leftCollapsed ? 'Show party panel' : 'Hide party panel'} side="bottom">
               <Button
                 variant="ghost"
@@ -320,7 +363,15 @@ function CampaignPageContent() {
       )}
 
       {/* Main Content - Three Resizable Panels */}
-      <main className="flex-1 min-h-0 overflow-hidden hidden lg:block">
+      <main id="main-content" className="flex-1 min-h-0 min-w-0 overflow-hidden">
+        {isCompactLayout ? (
+          <CampaignMobileLayout
+            party={partyContent}
+            map={mapContent}
+            session={<SessionSidebar />}
+            dmTools={dmTools}
+          />
+        ) : (
         <Group
           orientation="horizontal"
           className="h-full w-full"
@@ -337,45 +388,14 @@ function CampaignPageContent() {
             onResize={(size) => setLeftCollapsed(size.asPercentage === 0)}
             className="h-full"
           >
-            <aside className="h-full overflow-y-auto p-4 space-y-4 bg-parchment/30 border-r border-moss-green/20">
-              <CampaignInfo />
-              <CampaignRoster />
-              {/* Token Roster — DM only */}
-              {userRole === 'DM' && (
-                <TokenRoster
-                  onEditToken={(token) => {
-                    const effectiveType = token.type ?? (token.characterId ? TokenType.PLAYER : TokenType.NPC);
-                    if (effectiveType === TokenType.NPC || effectiveType === TokenType.OBJECT) {
-                      setQuickEditToken(token);
-                    }
-                  }}
-                />
-              )}
-            </aside>
+            {partyContent}
           </Panel>
 
           <Separator className="w-1.5 bg-moss-green/10 transition-colors data-[separator=hover]:bg-brand/30 data-[separator=active]:bg-brand/50" />
 
           {/* Center Panel — map canvas */}
           <Panel id="map" defaultSize={55} minSize={30} className="h-full">
-            <section className="h-full min-w-0 p-4">
-              <Suspense
-                fallback={
-                  <div className="w-full h-full flex items-center justify-center" aria-live="polite" aria-label="Loading map">
-                    <Loader2 className="w-8 h-8 text-moss-green animate-spin" aria-hidden="true" />
-                  </div>
-                }
-              >
-                <MapCanvas
-                  onEditToken={(token) => {
-                    const effectiveType = token.type ?? (token.characterId ? TokenType.PLAYER : TokenType.NPC);
-                    if (effectiveType === TokenType.NPC || effectiveType === TokenType.OBJECT) {
-                      setQuickEditToken(token);
-                    }
-                  }}
-                />
-              </Suspense>
-            </section>
+            {mapContent}
           </Panel>
 
           <Separator className="w-1.5 bg-moss-green/10 transition-colors data-[separator=hover]:bg-brand/30 data-[separator=active]:bg-brand/50" />
@@ -393,6 +413,7 @@ function CampaignPageContent() {
             <SessionSidebar />
           </Panel>
         </Group>
+        )}
       </main>
 
       {/* Map Manager slide-over panel (DM only) */}
@@ -468,21 +489,6 @@ function CampaignPageContent() {
       {/* Atmosphere Player — mounts for ALL users, manages ambient audio sync */}
       <AtmospherePlayer />
 
-      {/* Mobile Warning */}
-      <div className="lg:hidden fixed inset-0 bg-black/80 flex items-center justify-center p-4 z-50">
-        <div className="card-cozy max-w-md text-center space-y-4">
-          <h2 className="text-xl font-bold text-moss-green">
-            Desktop Required
-          </h2>
-          <p className="text-stone-gray">
-            The campaign view is optimized for desktop screens (1024px+). Mobile
-            support will be added in future updates.
-          </p>
-          <Button onClick={() => navigate('/dashboard')}>
-            Back to Dashboard
-          </Button>
-        </div>
-      </div>
     </div>
   );
 }

@@ -56,34 +56,42 @@ interface SessionToolbarProps {
   onOpen: (key: SessionToolKey) => void;
   /** Spirit layer active for the campaign — keeps the purple ring cue. */
   spiritLayerEnabled?: boolean;
+  /** Keep tool names visible when there is no hover gesture. */
+  mobileLabels?: boolean;
 }
 
 export default function SessionToolbar({
   openPanels,
   onOpen,
   spiritLayerEnabled = false,
+  mobileLabels = false,
 }: SessionToolbarProps) {
   return (
     <div className="flex items-center gap-1" role="toolbar" aria-label="DM tools">
       {TOOL_GROUPS.map((group, groupIndex) => (
-        <div key={groupIndex} className="flex items-center gap-1">
+        <div key={groupIndex} className="flex shrink-0 items-center gap-1">
           {groupIndex > 0 && <div className="h-6 w-px bg-moss-green/20 mx-1" aria-hidden="true" />}
-          {group.map(({ key, label, icon }) => (
-            <Tooltip key={key} content={label} side="bottom">
+          {group.map(({ key, label, icon }) => {
+            const button = (
               <Button
+                key={key}
                 variant="ghost"
-                iconOnly
+                iconOnly={!mobileLabels}
                 icon={icon}
                 aria-label={label}
                 onClick={() => onOpen(key)}
                 className={cn(
+                  mobileLabels && 'flex min-h-14 min-w-28 shrink-0 flex-col items-center justify-center gap-1 rounded-lg border border-brand/20 bg-paper/60 px-2 py-1 text-center text-xs [&_svg]:!mr-0',
                   openPanels[key] && '!bg-accent/15 !text-accent',
                   key === 'spirit' && 'text-spirit-purple',
                   key === 'spirit' && spiritLayerEnabled && 'ring-2 ring-spirit-purple/50'
                 )}
-              />
-            </Tooltip>
-          ))}
+              >
+                {mobileLabels && <span>{label}</span>}
+              </Button>
+            );
+            return mobileLabels ? button : <Tooltip key={key} content={label} side="bottom">{button}</Tooltip>;
+          })}
         </div>
       ))}
     </div>

@@ -83,7 +83,7 @@ export default function Modal({
           />
 
           {/* Dialog */}
-          <div className={cn('fixed inset-0 flex items-center justify-center p-4', zDialog)}>
+          <div className={cn('fixed inset-0 flex items-center justify-center p-2 sm:p-4', zDialog)}>
             <motion.div
               ref={modalRef}
               role="dialog"
@@ -94,22 +94,22 @@ export default function Modal({
               exit={{ opacity: 0, scale: 0.95, y: 20 }}
               transition={{ duration: 0.2 }}
               className={cn(
-                'w-full p-6 relative rounded-cozy-lg border border-brand/20 shadow-2xl',
+                'w-full min-w-0 p-4 sm:p-6 relative rounded-cozy-lg border border-brand/20 shadow-2xl',
                 'bg-surface-light/95 backdrop-blur-cozy',
-                'max-h-[90vh] overflow-y-auto',
+                'max-h-[calc(100dvh-1rem)] sm:max-h-[90dvh] overflow-y-auto',
                 SIZE_CLASSES[size]
               )}
               onClick={(e) => e.stopPropagation()}
             >
               {/* Header */}
-              <div className="flex items-center justify-between mb-6">
-                <div className="flex items-center gap-3">
+              <div className="flex min-w-0 items-start justify-between gap-2 mb-4 sm:mb-6">
+                <div className="flex min-w-0 items-center gap-3">
                   {Icon && (
                     <div className="p-2 rounded-lg bg-brand/10" aria-hidden="true">
                       <Icon className="w-6 h-6 text-brand" />
                     </div>
                   )}
-                  <h2 id={titleId} className="text-2xl font-semibold text-brand font-heading">
+                  <h2 id={titleId} className="min-w-0 break-words text-xl font-semibold text-brand font-heading sm:text-2xl">
                     {title}
                   </h2>
                 </div>
@@ -118,7 +118,7 @@ export default function Modal({
                   type="button"
                   onClick={handleClose}
                   disabled={closeDisabled}
-                  className="p-2 rounded-lg hover:bg-ink/10 transition-colors
+                  className="shrink-0 p-2 rounded-lg hover:bg-ink/10 transition-colors
                              disabled:opacity-50 disabled:cursor-not-allowed
                              focus:outline-none focus:ring-2 focus:ring-brand"
                   aria-label="Close dialog"
@@ -131,7 +131,7 @@ export default function Modal({
               {children}
 
               {/* Footer */}
-              {footer && <div className="flex gap-3 justify-end pt-4">{footer}</div>}
+              {footer && <div className="flex flex-wrap gap-3 justify-end pt-4">{footer}</div>}
             </motion.div>
           </div>
         </>

@@ -132,7 +132,7 @@ function AvatarCropModal({ imageSrc, onConfirm, onClose, returnFocusRef }: Avata
     const minDim = Math.min(img.naturalWidth, img.naturalHeight);
     const visibleSize = minDim / zoom;
     // pixels-per-canvas-pixel in image space
-    const scale = visibleSize / CANVAS_SIZE;
+    const scale = visibleSize / (canvasRef.current?.getBoundingClientRect().width || CANVAS_SIZE);
     const dx = (e.clientX - dragStart.x) * scale;
     const dy = (e.clientY - dragStart.y) * scale;
     setOffset(clampOffset(offsetStart.x - dx, offsetStart.y - dy));
@@ -182,9 +182,9 @@ function AvatarCropModal({ imageSrc, onConfirm, onClose, returnFocusRef }: Avata
       className="fixed inset-0 z-[9999] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm"
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
-      <div className="bg-soft-cream border border-moss-green/30 rounded-xl shadow-2xl w-full max-w-sm">
+      <div className="bg-soft-cream border border-moss-green/30 rounded-xl shadow-2xl w-full max-w-sm max-h-[calc(100dvh-2rem)] overflow-y-auto">
         {/* Header */}
-        <div className="flex items-center justify-between px-5 pt-5 pb-3 border-b border-moss-green/15">
+        <div className="flex flex-wrap items-center justify-between gap-1 px-3 sm:px-5 pt-4 sm:pt-5 pb-3 border-b border-moss-green/15">
           <h3 id={titleId} className="text-base font-semibold text-moss-green">Crop Avatar</h3>
           <p className="text-xs text-warm-gray flex items-center gap-1">
             <Move className="w-3 h-3" /> Drag to reposition
@@ -192,18 +192,18 @@ function AvatarCropModal({ imageSrc, onConfirm, onClose, returnFocusRef }: Avata
         </div>
 
         {/* Canvas */}
-        <div className="p-5 space-y-4">
+        <div className="p-3 sm:p-5 space-y-4">
           <div className="flex justify-center">
-            <div className="relative rounded-full overflow-hidden border-2 border-moss-green/30 w-[300px] h-[300px]">
+            <div className="relative rounded-full overflow-hidden border-2 border-moss-green/30 w-[min(300px,calc(100vw-5rem))] aspect-square">
               <canvas
                 ref={canvasRef}
                 width={CANVAS_SIZE}
                 height={CANVAS_SIZE}
-                className="cursor-grab active:cursor-grabbing block"
-                onMouseDown={handleMouseDown}
-                onMouseMove={handleMouseMove}
-                onMouseUp={handleMouseUp}
-                onMouseLeave={handleMouseUp}
+                className="block h-full w-full touch-none cursor-grab active:cursor-grabbing"
+                onPointerDown={(event) => { event.currentTarget.setPointerCapture(event.pointerId); handleMouseDown(event); }}
+                onPointerMove={handleMouseMove}
+                onPointerUp={handleMouseUp}
+                onPointerCancel={handleMouseUp}
               />
               {!imgLoaded && (
                 <div className="absolute inset-0 flex items-center justify-center bg-moss-green/10">
@@ -596,7 +596,7 @@ export default function ProfilePage() {
       <main id="main-content" className="max-w-4xl mx-auto px-4 py-8 space-y-6">
 
         {/* ── Profile Information ── */}
-        <section className="glass-panel p-6">
+        <section className="glass-panel p-4 sm:p-6">
           <div className="flex items-center justify-between mb-5">
             <h2 className="text-xl font-semibold text-moss-green">Profile Information</h2>
             {!editingProfile && (
@@ -606,7 +606,7 @@ export default function ProfilePage() {
             )}
           </div>
 
-          <div className="flex items-start gap-6">
+          <div className="flex min-w-0 flex-col gap-4 sm:flex-row sm:items-start sm:gap-6">
             {/* Avatar */}
             <div className="flex-shrink-0">
               <button
@@ -652,7 +652,7 @@ export default function ProfilePage() {
             </div>
 
             {/* Fields */}
-            <div className="flex-1 space-y-4">
+            <div className="min-w-0 flex-1 space-y-4">
               {/* Display name */}
               <div>
                 <label className="block text-xs font-medium text-stone-gray mb-1">Display Name</label>

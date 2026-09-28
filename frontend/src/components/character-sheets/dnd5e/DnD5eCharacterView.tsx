@@ -141,8 +141,8 @@ export const DnD5eCharacterView: React.FC<DnD5eCharacterViewProps> = ({ characte
       : {};
 
     const headerClasses = isCustomColor
-      ? 'text-white p-6 rounded-t-lg relative'
-      : `bg-gradient-to-r ${themeColor.from} ${themeColor.to} text-white p-6 rounded-t-lg relative`;
+      ? 'text-white p-4 sm:p-6 rounded-t-lg relative'
+      : `bg-gradient-to-r ${themeColor.from} ${themeColor.to} text-white p-4 sm:p-6 rounded-t-lg relative`;
 
     return (
       <div className={headerClasses} style={headerStyle}>
@@ -158,8 +158,8 @@ export const DnD5eCharacterView: React.FC<DnD5eCharacterViewProps> = ({ characte
           </button>
         )}
 
-      <div className="flex items-start justify-between pr-24">
-        <div className="flex items-start space-x-4">
+      <div className="flex min-w-0 flex-col gap-4 pt-12 sm:flex-row sm:items-start sm:justify-between sm:pr-24 sm:pt-0">
+        <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-start sm:gap-4">
           {/* Token Image */}
           <div className="flex-shrink-0">
             {character.tokenImageUrl ? (
@@ -176,9 +176,9 @@ export const DnD5eCharacterView: React.FC<DnD5eCharacterViewProps> = ({ characte
           </div>
 
           {/* Character Info */}
-          <div>
-            <h2 className="text-3xl font-bold mb-1">{data.characterName || 'Unnamed Character'}</h2>
-            <div className="flex items-center space-x-4 text-red-100">
+          <div className="min-w-0">
+            <h2 className="break-words text-2xl font-bold mb-1 sm:text-3xl">{data.characterName || 'Unnamed Character'}</h2>
+            <div className="flex flex-wrap items-center gap-2 text-red-100 sm:gap-4">
               <span>
                 Level {data.level} {data.race} {data.class}
               </span>
@@ -189,7 +189,7 @@ export const DnD5eCharacterView: React.FC<DnD5eCharacterViewProps> = ({ characte
         </div>
 
         {data.experiencePoints !== undefined && (
-          <div className="text-right">
+          <div className="text-left sm:text-right">
             <div className="text-xs text-red-200">Experience</div>
             <div className="text-xl font-bold">{data.experiencePoints.toLocaleString()}</div>
           </div>
@@ -201,7 +201,7 @@ export const DnD5eCharacterView: React.FC<DnD5eCharacterViewProps> = ({ characte
 
   // Render tabs
   const renderTabs = () => (
-    <div className="flex space-x-1 border-b-2 border-stone-200 bg-stone-50 px-4">
+    <div className="flex max-w-full gap-1 overflow-x-auto border-b-2 border-stone-200 bg-stone-50 px-2 sm:px-4">
       {TABS.map((tab) => {
         const Icon = tab.icon;
         const isActive = activeTab === tab.id;
@@ -210,7 +210,7 @@ export const DnD5eCharacterView: React.FC<DnD5eCharacterViewProps> = ({ characte
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
             className={`
-              flex items-center space-x-2 px-4 py-3 font-medium transition-colors
+              flex shrink-0 items-center space-x-2 whitespace-nowrap px-3 sm:px-4 py-3 font-medium transition-colors
               ${isActive
                 ? `text-${themeColor.accent} border-b-2 border-${themeColor.accent} -mb-0.5 bg-white`
                 : 'text-stone-600 hover:text-stone-800 hover:bg-stone-100'
@@ -734,10 +734,10 @@ export const DnD5eCharacterView: React.FC<DnD5eCharacterViewProps> = ({ characte
   };
 
   return (
-    <div className="bg-white rounded-lg shadow-lg overflow-hidden">
+    <div className="character-sheet min-w-0 bg-white rounded-lg shadow-lg overflow-hidden">
       {renderHeader()}
       {renderTabs()}
-      <div className="p-6">{renderTabContent()}</div>
+      <div className="min-w-0 p-3 sm:p-6">{renderTabContent()}</div>
 
       {/* Advantage / Disadvantage popup (shown on right-click of any rollable stat) */}
       {rollPopup && (

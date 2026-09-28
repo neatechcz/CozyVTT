@@ -530,13 +530,13 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
       : (shouldUseWhiteText(selectedColor.hex) ? 'text-white' : 'text-stone-900');
 
     const headerClasses = isCustomColor
-      ? `${headerTextColor} p-6 rounded-t-lg relative`
-      : `bg-gradient-to-r ${selectedColor.from} ${selectedColor.to} ${headerTextColor} p-6 rounded-t-lg relative`;
+      ? `${headerTextColor} p-4 sm:p-6 rounded-t-lg relative`
+      : `bg-gradient-to-r ${selectedColor.from} ${selectedColor.to} ${headerTextColor} p-4 sm:p-6 rounded-t-lg relative`;
 
     return (
       <div className={headerClasses} style={headerStyle}>
         {/* Save and Cancel Buttons */}
-        <div className="absolute top-4 right-16 flex items-center space-x-2">
+        <div className="mb-4 flex flex-wrap items-center justify-end gap-2 pr-10 sm:absolute sm:top-4 sm:right-16 sm:mb-0 sm:pr-0">
           <button
             onClick={handleSubmit}
             disabled={isSaving}
@@ -566,7 +566,7 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
 
         {/* Color Picker Dropdown */}
         {showColorPicker && (
-          <div className="absolute top-16 right-4 bg-white text-stone-800 rounded-lg shadow-xl p-4 z-10 border-2 border-stone-200 max-w-md">
+          <div className="absolute top-16 right-2 left-2 sm:left-auto sm:right-4 bg-white text-stone-800 rounded-lg shadow-xl p-4 z-10 border-2 border-stone-200 max-w-md max-h-[70dvh] overflow-y-auto">
             <h4 className="font-semibold mb-3">Theme Color</h4>
 
             {/* Preset Colors */}
@@ -634,8 +634,8 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
           </div>
         )}
 
-      <div className="flex items-start justify-between">
-        <div className="flex items-start space-x-4">
+      <div className="flex min-w-0 flex-col gap-4 sm:flex-row sm:items-start sm:justify-between sm:pt-14">
+        <div className="flex min-w-0 flex-col gap-4 sm:flex-row sm:items-start">
           {/* Token Image Upload */}
           <div className="flex-shrink-0 relative group">
             <input
@@ -653,11 +653,11 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
                 <img
                   src={tokenImagePreview}
                   alt={formData.characterName || 'Character'}
-                  className="w-40 h-40 rounded-full border-4 border-white/20 object-cover"
+                  className="w-24 h-24 sm:w-40 sm:h-40 rounded-full border-4 border-white/20 object-cover"
                 />
               ) : (
-                <div className="w-40 h-40 rounded-full border-4 border-white/20 bg-stone-800 flex items-center justify-center">
-                  <User className="w-20 h-20 text-white/40" />
+                <div className="w-24 h-24 sm:w-40 sm:h-40 rounded-full border-4 border-white/20 bg-stone-800 flex items-center justify-center">
+                  <User className="w-12 h-12 sm:w-20 sm:h-20 text-white/40" />
                 </div>
               )}
               <div className="absolute inset-0 rounded-full bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
@@ -677,13 +677,13 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
           </div>
 
           {/* Character Info */}
-          <div className="space-y-2">
+          <div className="min-w-0 flex-1 space-y-2">
             <input
               type="text"
               value={formData.characterName || ''}
               onChange={(e) => updateField('characterName', e.target.value)}
               placeholder="Character Name"
-              className={`text-3xl font-bold bg-white/10 border-2 ${
+              className={`w-full min-w-0 text-xl sm:text-3xl font-bold bg-white/10 border-2 ${
                 errors.characterName ? 'border-red-300' : 'border-white/20'
               } rounded px-3 py-1 ${headerTextColor} placeholder-current/50 focus:outline-none focus:border-white/40`}
             />
@@ -693,7 +693,7 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
                 value={formData.playerName || ''}
                 onChange={(e) => updateField('playerName', e.target.value)}
                 placeholder="Player Name"
-                className={`bg-white/10 border border-white/20 rounded px-2 py-0.5 text-sm ${headerTextColor} placeholder-current/50 focus:outline-none focus:border-white/40`}
+                className={`max-w-full bg-white/10 border border-white/20 rounded px-2 py-0.5 text-sm ${headerTextColor} placeholder-current/50 focus:outline-none focus:border-white/40`}
               />
             </div>
             <div className={`flex items-center flex-wrap gap-2 opacity-80`}>
@@ -745,7 +745,7 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
 
   // Render tabs
   const renderTabs = () => (
-    <div className="flex space-x-1 border-b-2 border-stone-200 bg-stone-50 px-4">
+      <div className="flex max-w-full gap-1 overflow-x-auto border-b-2 border-stone-200 bg-stone-50 px-2 sm:px-4">
       {TABS.map((tab) => {
         const Icon = tab.icon;
         const isActive = activeTab === tab.id;
@@ -754,7 +754,7 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
             className={`
-              flex items-center space-x-2 px-4 py-3 font-medium transition-colors
+              flex shrink-0 items-center space-x-2 whitespace-nowrap px-3 sm:px-4 py-3 font-medium transition-colors
               ${isActive
                 ? `text-${selectedColor.accent} border-b-2 border-${selectedColor.accent} -mb-0.5 bg-white`
                 : 'text-stone-600 hover:text-stone-800 hover:bg-stone-100'
@@ -1956,13 +1956,13 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
   );
 
   return (
-    <div className="bg-white border-2 border-stone-200 rounded-lg overflow-hidden shadow-lg">
+    <div className="character-sheet min-w-0 bg-white border-2 border-stone-200 rounded-lg overflow-hidden shadow-lg">
       {/* While saving, the form is read-only: nothing typed can be lost when
           the sheet closes or flips to view after the save. */}
       <fieldset disabled={isSaving} className="m-0 min-w-0 border-0 p-0">
         {renderHeader()}
         {renderTabs()}
-        <div className="p-6">
+        <div className="min-w-0 p-3 sm:p-6">
           {activeTab === 'stats' && renderStatsTab()}
           {activeTab === 'combat' && renderCombatTab()}
           {activeTab === 'spells' && renderSpellsTab()}

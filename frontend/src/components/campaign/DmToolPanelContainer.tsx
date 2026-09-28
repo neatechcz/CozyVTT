@@ -64,7 +64,7 @@ export default function DmToolPanelContainer({ children, containerRef }: DmToolP
     : { position: 'absolute', top: '3.5rem', right: '0.5rem', zIndex: 30 };
 
   return (
-    <div ref={panelRef} style={style} className="flex flex-col gap-1.5 max-h-[calc(100vh-5rem)] overflow-y-auto">
+    <div ref={panelRef} style={style} className="flex flex-col gap-1.5 max-h-[calc(100dvh-5rem)] overflow-y-auto max-sm:!top-auto max-sm:!right-2 max-sm:!bottom-2 max-sm:!left-auto max-sm:max-h-[55dvh] max-sm:max-w-[calc(100vw-1rem)]">
       {/* Drag handle */}
       <div
         className="flex items-center justify-center py-0.5 cursor-grab active:cursor-grabbing select-none rounded-t bg-stone-700/60 border border-stone-600/30 hover:bg-stone-700/80 transition-colors"

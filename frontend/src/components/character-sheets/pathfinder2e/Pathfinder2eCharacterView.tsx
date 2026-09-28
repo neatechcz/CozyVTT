@@ -140,8 +140,8 @@ export const Pathfinder2eCharacterView: React.FC<Pathfinder2eCharacterViewProps>
       : 'text-white';
 
     const headerClasses = isCustomColor
-      ? `${headerTextColor} p-6 rounded-t-lg relative`
-      : `bg-gradient-to-r ${selectedColor.from} ${selectedColor.to} ${headerTextColor} p-6 rounded-t-lg relative`;
+      ? `${headerTextColor} p-4 sm:p-6 rounded-t-lg relative`
+      : `bg-gradient-to-r ${selectedColor.from} ${selectedColor.to} ${headerTextColor} p-4 sm:p-6 rounded-t-lg relative`;
 
     return (
       <div className={headerClasses} style={headerStyle}>
@@ -157,8 +157,8 @@ export const Pathfinder2eCharacterView: React.FC<Pathfinder2eCharacterViewProps>
           </button>
         )}
 
-      <div className="flex items-start justify-between pr-24">
-        <div className="flex items-start space-x-4">
+      <div className="flex min-w-0 flex-col gap-4 pt-12 sm:flex-row sm:items-start sm:justify-between sm:pr-24 sm:pt-0">
+        <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-start sm:gap-4">
           {/* Token Image */}
           {character.tokenImageUrl && (
             <img
@@ -169,8 +169,8 @@ export const Pathfinder2eCharacterView: React.FC<Pathfinder2eCharacterViewProps>
           )}
 
           {/* Character Info */}
-          <div>
-            <h2 className="text-3xl font-bold mb-2">{data.characterName}</h2>
+          <div className="min-w-0">
+            <h2 className="break-words text-2xl font-bold mb-2 sm:text-3xl">{data.characterName}</h2>
             <div className="flex items-center flex-wrap gap-2 opacity-90">
               <span className="px-3 py-1 bg-white/20 rounded-full text-sm font-medium">
                 Level {data.level} {data.class}
@@ -190,7 +190,7 @@ export const Pathfinder2eCharacterView: React.FC<Pathfinder2eCharacterViewProps>
           </div>
         </div>
 
-        <div className="text-right">
+        <div className="text-left sm:text-right">
           <div className="text-xs opacity-70 mb-1">Experience Points</div>
           <div className="text-2xl font-bold">{data.experiencePoints || 0}</div>
           {data.heroPoints !== undefined && (
@@ -915,10 +915,10 @@ export const Pathfinder2eCharacterView: React.FC<Pathfinder2eCharacterViewProps>
   );
 
   return (
-    <div className="bg-white border-2 border-stone-200 rounded-lg overflow-hidden shadow-lg">
+    <div className="character-sheet min-w-0 bg-white border-2 border-stone-200 rounded-lg overflow-hidden shadow-lg">
       {renderHeader()}
 
-      <div className="p-6 space-y-6">
+      <div className="min-w-0 space-y-6 p-3 sm:p-6">
         {renderAttributes()}
         {renderSavingThrows()}
         {renderPerception()}

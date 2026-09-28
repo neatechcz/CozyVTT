@@ -30,7 +30,6 @@ interface AssetCardProps {
  */
 function AssetCardInner({ asset, viewMode, onView, onDelete }: AssetCardProps) {
   const { user } = useAuth();
-  const [showActions, setShowActions] = useState(false);
   const [isDeleting, setIsDeleting] = useState(false);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
@@ -122,9 +121,9 @@ function AssetCardInner({ asset, viewMode, onView, onDelete }: AssetCardProps) {
         exit={{ opacity: 0, scale: 0.9 }}
         className="bg-parchment/50 border border-moss-green/20 rounded-lg p-4 hover:shadow-lg transition-all"
       >
-        <div className="flex items-center gap-4">
+        <div className="flex min-w-0 flex-col gap-3 sm:flex-row sm:items-center sm:gap-4">
           {/* Thumbnail */}
-          <div className="flex-shrink-0 w-20 h-20 bg-moss-green/10 rounded-lg overflow-hidden flex items-center justify-center">
+          <div className="flex-shrink-0 w-full h-32 sm:w-20 sm:h-20 bg-moss-green/10 rounded-lg overflow-hidden flex items-center justify-center">
             {asset.type === AssetType.AUDIO ? (
               getAssetIcon()
             ) : (
@@ -147,7 +146,7 @@ function AssetCardInner({ asset, viewMode, onView, onDelete }: AssetCardProps) {
             <h3 className="text-lg font-semibold text-moss-green truncate">
               {asset.name}
             </h3>
-            <div className="flex items-center gap-3 mt-1 text-sm text-stone-gray">
+            <div className="flex flex-wrap items-center gap-2 sm:gap-3 mt-1 text-sm text-stone-gray">
               <span className="flex items-center gap-1">
                 {asset.scope === AssetScope.GLOBAL ? (
                   <Globe className="w-4 h-4" />
@@ -182,11 +181,12 @@ function AssetCardInner({ asset, viewMode, onView, onDelete }: AssetCardProps) {
           </div>
 
           {/* Actions */}
-          <div className="flex items-center gap-2">
+          <div className="flex items-center self-end gap-2 sm:self-auto">
             <button
               onClick={onView}
               className="p-2 rounded-lg bg-moss-green/10 hover:bg-moss-green/20 text-moss-green transition-colors"
               title="View details"
+              aria-label="View details"
             >
               <Eye className="w-5 h-5" />
             </button>
@@ -194,6 +194,7 @@ function AssetCardInner({ asset, viewMode, onView, onDelete }: AssetCardProps) {
               onClick={handleDownload}
               className="p-2 rounded-lg bg-sunset-orange/10 hover:bg-sunset-orange/20 text-sunset-orange transition-colors"
               title="Download"
+              aria-label="Download"
             >
               <Download className="w-5 h-5" />
             </button>
@@ -203,6 +204,7 @@ function AssetCardInner({ asset, viewMode, onView, onDelete }: AssetCardProps) {
                 disabled={isDeleting}
                 className="p-2 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-600 transition-colors disabled:opacity-50"
                 title="Delete"
+                aria-label="Delete"
               >
                 <Trash2 className="w-5 h-5" />
               </button>
@@ -224,8 +226,6 @@ function AssetCardInner({ asset, viewMode, onView, onDelete }: AssetCardProps) {
       exit={{ opacity: 0, scale: 0.9 }}
       whileHover={{ y: -4 }}
       className="bg-parchment/50 border border-moss-green/20 rounded-xl overflow-hidden shadow-md hover:shadow-xl transition-all relative group"
-      onMouseEnter={() => setShowActions(true)}
-      onMouseLeave={() => setShowActions(false)}
     >
       {/* Thumbnail */}
       <div className="relative w-full h-48 bg-moss-green/10 overflow-hidden">
@@ -270,17 +270,13 @@ function AssetCardInner({ asset, viewMode, onView, onDelete }: AssetCardProps) {
           )}
         </div>
 
-        {/* Hover Actions */}
-        {showActions && (
-          <motion.div
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            className="absolute inset-0 bg-black/50 backdrop-blur-sm flex items-center justify-center gap-3"
-          >
+        {/* Keep actions mounted for keyboard and touch input. */}
+        <div className="asset-card-actions absolute inset-0 flex items-center justify-center gap-3 bg-black/50 opacity-0 pointer-events-none backdrop-blur-sm transition-opacity group-hover:opacity-100 group-hover:pointer-events-auto group-focus-within:opacity-100 group-focus-within:pointer-events-auto">
             <button
               onClick={onView}
               className="p-3 bg-paper-white rounded-full hover:bg-white transition-colors"
               title="View details"
+              aria-label="View details"
             >
               <Eye className="w-5 h-5 text-moss-green" />
             </button>
@@ -288,6 +284,7 @@ function AssetCardInner({ asset, viewMode, onView, onDelete }: AssetCardProps) {
               onClick={handleDownload}
               className="p-3 bg-paper-white rounded-full hover:bg-white transition-colors"
               title="Download"
+              aria-label="Download"
             >
               <Download className="w-5 h-5 text-sunset-orange" />
             </button>
@@ -297,12 +294,12 @@ function AssetCardInner({ asset, viewMode, onView, onDelete }: AssetCardProps) {
                 disabled={isDeleting}
                 className="p-3 bg-red-500/90 rounded-full hover:bg-red-600 transition-colors disabled:opacity-50"
                 title="Delete"
+                aria-label="Delete"
               >
                 <Trash2 className="w-5 h-5 text-white" />
               </button>
             )}
-          </motion.div>
-        )}
+        </div>
       </div>
 
       {/* Content */}
