@@ -25,6 +25,7 @@ function makeUser(id: string, platformRole = PlatformRole.USER): User {
     displayName: id,
     platformRole,
     globalAssetManager: false,
+    templateEditor: false,
     mfaEnabled: false,
     avatarUrl: null,
     bio: null,

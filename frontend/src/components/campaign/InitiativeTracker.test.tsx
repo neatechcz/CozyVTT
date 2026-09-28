@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { CombatState } from '@/types';
 import InitiativeTracker from './InitiativeTracker';
+import { useGameStore } from '@/stores/gameStore';
 
 const mocks = vi.hoisted(() => ({
   registerState: vi.fn(),
@@ -14,8 +15,8 @@ vi.mock('@/contexts/CampaignContext', () => ({
   useCampaign: () => ({ userRole: 'DM', currentMap: { id: 'map-1' } }),
 }));
 
-vi.mock('@/stores/gameStore', () => ({
-  useTokenListIgnoringMovement: () => [],
+vi.mock('@/contexts/AuthContext', () => ({
+  useAuth: () => ({ user: { id: 'dm' } }),
 }));
 
 vi.mock('@/contexts/WebSocketContext', () => ({
@@ -48,10 +49,8 @@ describe('InitiativeTracker movement', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
-    sendState = undefined;
-    mocks.registerState.mockImplementation((listener: (state: CombatState) => void) => {
-      sendState = listener;
-    });
+    useGameStore.getState().clearGameState();
+    sendState = (state) => useGameStore.getState().setCombatState(state);
   });
 
   it('shows server movement speed, spent feet, and remaining feet for the active actor', () => {

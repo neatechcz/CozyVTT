@@ -7,6 +7,7 @@ import CharactersPage from './CharactersPage';
 
 const mocks = vi.hoisted(() => ({
   listCampaigns: vi.fn(),
+  getStarterSheet: vi.fn(),
   createCharacter: vi.fn(),
   showToast: vi.fn(),
 }));
@@ -42,6 +43,7 @@ vi.mock('@/services/character.service', () => ({
 vi.mock('@/services/api', () => ({
   default: {
     listCampaigns: mocks.listCampaigns,
+    getStarterSheet: mocks.getStarterSheet,
     createCharacter: mocks.createCharacter,
   },
 }));
@@ -100,6 +102,7 @@ async function openCreateDialogAndSubmitName() {
 describe('CharactersPage character creation', () => {
   beforeEach(() => {
     mocks.listCampaigns.mockResolvedValue({ campaigns: [] });
+    mocks.getStarterSheet.mockResolvedValue({ data: {} });
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
       json: async () => ({ data: {} }),

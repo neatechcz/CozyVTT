@@ -9,7 +9,13 @@ import { Server } from 'socket.io';
 import { AuthenticatedSocket } from '../auth';
 import { prisma } from '../../config/database';
 import { rollDice, parseDiceExpression, DiceParserError } from '../../utils/dice-parser';
+import {
+  resolveCharacterInitiative,
+  resolveStatBlockInitiative,
+  DEFAULT_INITIATIVE_EXPRESSION,
+} from '../../utils/rules/initiative';
 import logger from '../../utils/logger';
+import { dnd5eExhaustionLevel } from '../../utils/dnd5eExhaustion';
 import {
   readCombatState,
   defaultCombatState,
@@ -211,7 +217,7 @@ export function registerInitiativeHandlers(io: Server, socket: AuthenticatedSock
         if (state.combatants.some((entry) => entry.tokenId === tokenId)) return error('Token is already in initiative');
 
         state.mapId = mapId;
-        state.combatants = sortCombatants([...state.combatants, asCombatant(token)]);
+        state.combatants = sortCombatants([...state.combatants, { ...asCombatant(token), initiative: null }]);
         await saveCampaignCombatState(tx, campaign.id, state);
         return { ok: true, value: state } as const;
       });
@@ -220,6 +226,7 @@ export function registerInitiativeHandlers(io: Server, socket: AuthenticatedSock
       logger.debug('initiative.add', { tokenId, campaignId: socket.campaignId });
     } catch (err) {
       logger.error('initiative.add failed', { err });
+
       socket.emit('error', { message: 'Failed to add to initiative' });
     }
   });
@@ -243,7 +250,7 @@ export function registerInitiativeHandlers(io: Server, socket: AuthenticatedSock
         }
 
         if (current.active && current.currentTokenId === tokenId) {
-          const nextIndex = oldCurrentIndex < 0 ? 0 : Math.min(oldCurrentIndex, current.combatants.length - 1);
+          const nextIndex = oldCurrentIndex < 0 || oldCurrentIndex >= current.combatants.length ? 0 : oldCurrentIndex;
           if (oldCurrentIndex >= current.combatants.length) current.round += 1;
           const nextTokenId = current.combatants[nextIndex].tokenId;
           await setActiveTurn(tx, campaign, current, nextTokenId);
@@ -268,6 +275,7 @@ export function registerInitiativeHandlers(io: Server, socket: AuthenticatedSock
       if (!tokenId || !mapId) { socket.emit('error', { message: 'tokenId and mapId required' }); return; }
       if (value !== null && (typeof value !== 'number' || !Number.isFinite(value))) {
         socket.emit('error', { message: 'value must be a finite number or null' }); return;
+
       }
 
       const result = await withCampaignMapRowLock(prisma, socket.campaignId!, mapId, async (tx, campaign, map) => {
@@ -298,19 +306,17 @@ export function registerInitiativeHandlers(io: Server, socket: AuthenticatedSock
     }
   });
 
-  /** DM rolls initiative for a token using a dice expression. */
-  socket.on('initiative.roll', async (data: { tokenId: string; mapId: string; expression: string; characterName?: string }) => {
+  /** Derive system initiative; a DM may supply an explicit adjudicated expression. */
+  socket.on('initiative.roll', async (data: { tokenId: string; mapId: string; expression?: string; characterName?: string }) => {
     try {
-      if (!isDm(socket, 'roll initiative')) return;
+      if (!socket.campaignId) { socket.emit('error', { message: 'Not authenticated to a campaign' }); return; }
       const { tokenId, mapId, expression, characterName } = data;
-      if (!tokenId || !mapId || !expression) { socket.emit('error', { message: 'tokenId, mapId, and expression required' }); return; }
-      try { parseDiceExpression(expression); } catch (err) {
+      if (!tokenId || !mapId) { socket.emit('error', { message: 'tokenId and mapId required' }); return; }
+      try { if (expression !== undefined) parseDiceExpression(expression); } catch (err) {
         if (err instanceof DiceParserError) { socket.emit('error', { message: `Invalid expression: ${err.message}` }); return; }
         throw err;
       }
 
-      const rollResult = rollDice(expression);
-      const rolledValue = rollResult.total;
       const result = await withCampaignMapRowLock(prisma, socket.campaignId!, mapId, async (tx, campaign, map) => {
         const state = readCombatState(campaign.combatState);
         const mapError = validateMapForCombat(state, mapId);
@@ -319,8 +325,51 @@ export function registerInitiativeHandlers(io: Server, socket: AuthenticatedSock
         const tokenIndex = tokens.findIndex((entry) => entry.id === tokenId);
         if (tokenIndex === -1) return error('Token not found');
         const token = tokens[tokenIndex];
-        tokens[tokenIndex] = { ...token, initiative: rolledValue };
         const existingIndex = state.combatants.findIndex((entry) => entry.tokenId === tokenId);
+        if (socket.role !== 'DM') {
+          if (socket.role === 'SPECTATOR') return error('Spectators cannot roll initiative');
+          if (token.controlledBy !== socket.userId) return error('You can only roll initiative for your own token');
+          if (existingIndex === -1) return error('That token is not in the initiative order yet');
+          if (state.active) return error('Combat has started — ask your DM to change your initiative');
+        }
+
+        // Derive initiative from the authoritative sheet while both campaign
+        // and map remain locked. A player's expression never supplies a bonus.
+        let resolution = null as ReturnType<typeof resolveCharacterInitiative>;
+        let exhaustedAbilityCheck = false;
+        if (token.characterId) {
+          const character = await tx.character.findFirst({
+            where: { id: token.characterId, campaignId: campaign.id },
+            select: { gameSystem: true, data: true },
+          });
+          if (character) {
+            resolution = resolveCharacterInitiative(character.gameSystem, character.data);
+            exhaustedAbilityCheck = character.gameSystem === 'DND_5E'
+              && dnd5eExhaustionLevel(character.data as Record<string, unknown>) >= 1;
+          }
+        }
+        if (!resolution && token.statBlock) {
+          resolution = resolveStatBlockInitiative(campaign.gameSystem, token.statBlock);
+        }
+        let usedExpression = '';
+        let rollResult: ReturnType<typeof rollDice> | null = null;
+        let rolledValue: number;
+        // DM expressions are explicit adjudication (including MCP advantage,
+        // disadvantage and situational bonuses); omitted expressions derive defaults.
+        const dmExpression = socket.role === 'DM' ? expression : undefined;
+        if (!dmExpression && resolution?.kind === 'fixed') {
+          rolledValue = resolution.value;
+        } else {
+          usedExpression = dmExpression ?? (resolution?.kind === 'roll' ? resolution.expression : DEFAULT_INITIATIVE_EXPRESSION);
+          if (!dmExpression && exhaustedAbilityCheck) usedExpression = usedExpression.replace(/^1d20/, '2d20kl1');
+          try { parseDiceExpression(usedExpression); } catch {
+            logger.warn('initiative.roll derived an unparseable expression', { usedExpression, campaignId: campaign.id });
+            usedExpression = DEFAULT_INITIATIVE_EXPRESSION;
+          }
+          rollResult = rollDice(usedExpression);
+          rolledValue = rollResult.total;
+        }
+        tokens[tokenIndex] = { ...token, initiative: rolledValue };
         if (existingIndex !== -1) {
           state.combatants[existingIndex] = { ...state.combatants[existingIndex], initiative: rolledValue };
         } else {
@@ -330,17 +379,18 @@ export function registerInitiativeHandlers(io: Server, socket: AuthenticatedSock
         state.combatants = sortCombatants(state.combatants);
         await tx.map.update({ where: { id: mapId }, data: { tokens: tokens as any } });
         await saveCampaignCombatState(tx, campaign.id, state);
-        return { ok: true, value: { state, tokenName: token.name } } as const;
+        return { ok: true, value: { state, tokenName: token.name, rollResult, rolledValue, usedExpression } } as const;
       });
       if (!result.ok) { socket.emit('error', { message: result.message }); return; }
 
       bumpMapVersion(mapId);
+      const { rollResult, rolledValue, usedExpression } = result.value;
       const user = await prisma.user.findUnique({ where: { id: socket.userId }, select: { displayName: true } });
-      io.to(socket.campaignId!).emit('dice.rolled', {
+      if (rollResult) io.to(socket.campaignId!).emit('dice.rolled', {
         userId: socket.userId,
         userName: user?.displayName ?? 'DM',
         characterName: characterName || result.value.tokenName,
-        expression,
+        expression: usedExpression,
         result: rolledValue,
         breakdown: rollResult,
         purpose: `${result.value.tokenName} Initiative`,
@@ -351,6 +401,7 @@ export function registerInitiativeHandlers(io: Server, socket: AuthenticatedSock
       logger.debug('initiative.roll', { expression, result: rolledValue, name: result.value.tokenName, campaignId: socket.campaignId });
     } catch (err) {
       logger.error('initiative.roll failed', { err });
+
       socket.emit('error', { message: 'Failed to roll initiative' });
     }
   });

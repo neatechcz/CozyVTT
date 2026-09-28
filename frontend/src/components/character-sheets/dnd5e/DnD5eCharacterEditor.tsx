@@ -31,7 +31,10 @@ import {
   prepareDnd5eFormForSave,
   saveFormInputsOf,
 } from './dnd5eFormData';
-import { exhaustionEffects } from '../../../utils/dnd5eSurvival';
+import { effectiveMaximumHp, exhaustionEffects, trackedExhaustionLevel } from '../../../utils/dnd5eSurvival';
+import { readFeatureEntriesForEditing } from '@/utils/featureEntries';
+import { DND5E_CONDITIONS } from '@/utils/conditions';
+
 
 interface DnD5eCharacterEditorProps {
   character: Character;
@@ -497,6 +500,10 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
 
   const updateExhaustionLevel = (level: number) => {
     store.editIn(formData, 'survival.exhaustionLevel', level);
+    if (formData.hp && formData.hp.current > effectiveMaximumHp(formData.hp.maximum, level)) {
+      store.editIn(formData, 'hp.current', effectiveMaximumHp(formData.hp.maximum, level));
+    }
+
     if ((formData.survival?.deprivationLockedLevels ?? 0) > level) {
       store.editIn(formData, 'survival.deprivationLockedLevels', level);
     }
@@ -506,6 +513,13 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
       return level > 0 ? [...other, 'exhausted'] : other;
     });
   };
+
+  const updateMaximumHp = (maximum: number) => {
+    store.editIn(formData, 'hp.maximum', maximum);
+    const effective = effectiveMaximumHp(maximum, trackedExhaustionLevel(formData) ?? 0);
+    if (formData.hp && formData.hp.current > effective) store.editIn(formData, 'hp.current', effective);
+  };
+
 
   // Append to an array field (keeps items someone else added meanwhile)
   const appendToArray = (path: string, item: any) => {
@@ -986,12 +1000,6 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
     </div>
   );
 
-  // D&D 5e conditions list
-  const conditions = [
-    'Blinded', 'Charmed', 'Deafened', 'Frightened', 'Grappled',
-    'Incapacitated', 'Invisible', 'Paralyzed', 'Petrified', 'Poisoned',
-    'Prone', 'Restrained', 'Stunned', 'Unconscious'
-  ];
 
   // Render Combat tab
   const renderCombatTab = () => (
@@ -1039,7 +1047,7 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
               type="number"
               min="0"
               value={formData.hp?.maximum || 0}
-              onChange={(e) => updateField('hp.maximum', parseInt(e.target.value) || 0)}
+              onChange={(e) => updateMaximumHp(parseInt(e.target.value) || 0)}
               className="w-full px-3 py-2 border border-stone-300 rounded-lg text-center text-lg font-bold focus:outline-none focus:ring-2 focus:ring-red-500"
             />
           </div>
@@ -1048,8 +1056,10 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
             <input
               type="number"
               min="0"
+              max={effectiveMaximumHp(formData.hp?.maximum ?? 0, trackedExhaustionLevel(formData) ?? 0)}
               value={formData.hp?.current || 0}
-              onChange={(e) => updateField('hp.current', parseInt(e.target.value) || 0)}
+              onChange={(e) => updateField('hp.current', Math.min(parseInt(e.target.value) || 0,
+                effectiveMaximumHp(formData.hp?.maximum ?? 0, trackedExhaustionLevel(formData) ?? 0)))}
               className="w-full px-3 py-2 border border-stone-300 rounded-lg text-center text-lg font-bold text-red-700 focus:outline-none focus:ring-2 focus:ring-red-500"
             />
           </div>
@@ -1174,25 +1184,39 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
         <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
           <label className="text-xs font-semibold text-stone-700">Tracked day (in-game)
             <input type="text" value={formData.survival?.intakeDay ?? ''}
-              onChange={(e) => { if (e.target.value.trim()) updateField('survival.intakeDay', e.target.value); }}
+              onChange={(e) => {
+                const intakeDay = e.target.value;
+                if (!intakeDay.trim()) return;
+                const survival = { ...formData.survival, intakeDay };
+                if (intakeDay.trim() !== formData.survival?.intakeDay?.trim()) {
+                  delete survival.foodTodayPounds;
+                  delete survival.waterTodayGallons;
+                  delete survival.waterRequiredGallons;
+                }
+                updateField('survival', survival);
+              }}
               placeholder="In-game date" className="mt-1 w-full px-2 py-1 border border-stone-300 rounded" />
           </label>
+
           <label className="text-xs font-semibold text-stone-700">Last resolved day
             <input type="text" value={formData.survival?.lastResolvedDay ?? ''}
               onChange={(e) => { if (e.target.value.trim()) updateField('survival.lastResolvedDay', e.target.value); }}
               placeholder="In-game date" className="mt-1 w-full px-2 py-1 border border-stone-300 rounded" />
           </label>
           <label className="text-xs font-semibold text-stone-700">Food on tracked day (lb)
+
             <input type="number" min="0" step="0.5" value={formData.survival?.foodTodayPounds ?? ''}
               onChange={(e) => updateField('survival.foodTodayPounds', Math.max(0, Number(e.target.value)))}
               className="mt-1 w-full px-2 py-1 border border-stone-300 rounded" />
           </label>
           <label className="text-xs font-semibold text-stone-700">Water on tracked day (gallons)
+
             <input type="number" min="0" step="0.5" value={formData.survival?.waterTodayGallons ?? ''}
               onChange={(e) => updateField('survival.waterTodayGallons', Math.max(0, Number(e.target.value)))}
               className="mt-1 w-full px-2 py-1 border border-stone-300 rounded" />
           </label>
           <label className="text-xs font-semibold text-stone-700">Water needed on tracked day (gallons)
+
             <input type="number" min="0.5" step="0.5" value={formData.survival?.waterRequiredGallons ?? ''}
               onChange={(e) => updateField('survival.waterRequiredGallons', Math.max(0.5, Number(e.target.value)))}
               className="mt-1 w-full px-2 py-1 border border-stone-300 rounded" />
@@ -1226,7 +1250,7 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
       <div className="bg-stone-50 border border-stone-200 rounded-lg p-4">
         <h3 className="text-lg font-semibold text-stone-800 mb-3">Conditions</h3>
         <div className="grid grid-cols-3 gap-2">
-          {conditions.map((condition) => (
+          {DND5E_CONDITIONS.map((condition) => (
             <label key={condition} className="flex items-center space-x-2 cursor-pointer hover:bg-stone-100 p-1 rounded">
               <input
                 type="checkbox"
@@ -1690,6 +1714,7 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
   // Render Features tab
   const renderFeaturesTab = () => {
     const profs = getProficienciesByCategory();
+    const featureRows = readFeatureEntriesForEditing(formData.featuresAndTraits);
 
     return (
       <div className="space-y-6">
@@ -1760,17 +1785,75 @@ export const DnD5eCharacterEditor: React.FC<DnD5eCharacterEditorProps> = ({
 
         {/* Features & Traits */}
         <div className="bg-stone-50 border-2 border-stone-300 rounded-lg p-4">
-          <h3 className="text-lg font-semibold text-stone-800 mb-3">Features & Traits</h3>
-          <p className="text-xs text-stone-600 mb-3">Class features, racial traits, and feats (comma-separated)</p>
-          <textarea
-            value={typeof formData.featuresAndTraits === 'string'
-              ? formData.featuresAndTraits
-              : (formData.featuresAndTraits || []).join(', ')}
-            onChange={(e) => updateField('featuresAndTraits', e.target.value)}
-            placeholder="Darkvision, Fey Ancestry, Sneak Attack, Rage, Spellcasting, Action Surge"
-            rows={5}
-            className="w-full px-3 py-2 border border-stone-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500"
-          />
+          <div className="flex items-center justify-between mb-3">
+            <h3 className="text-lg font-semibold text-stone-800">Features &amp; Traits</h3>
+            <button
+              onClick={() =>
+                updateField('featuresAndTraits', [...featureRows, { name: '', description: '' }])
+              }
+              className="px-3 py-1 bg-red-600 text-white rounded hover:bg-red-700 text-sm"
+            >
+              + Add Feature
+            </button>
+          </div>
+          <p className="text-xs text-stone-600 mb-3">
+            Class features, racial traits and feats. A description is optional — leave it blank
+            for anything that is just a name.
+          </p>
+          {featureRows.length === 0 ? (
+            <p className="text-sm text-stone-500 italic">No features added yet</p>
+          ) : (
+            <div className="space-y-3">
+              {featureRows.map((feature, index) => (
+                <div key={index} className="bg-white border border-stone-300 rounded-lg p-3 space-y-2">
+                  <div className="flex items-start justify-between">
+                    <input
+                      type="text"
+                      value={feature.name}
+                      onChange={(e) =>
+                        updateField(
+                          'featuresAndTraits',
+                          featureRows.map((f, i) =>
+                            i === index ? { ...f, name: e.target.value } : f
+                          )
+                        )
+                      }
+                      placeholder="Feature name, e.g. Darkvision"
+                      aria-label={`Feature ${index + 1} name`}
+                      className="flex-1 px-2 py-1 border border-stone-300 rounded font-semibold focus:outline-none focus:ring-2 focus:ring-red-500"
+                    />
+                    <button
+                      onClick={() =>
+                        updateField(
+                          'featuresAndTraits',
+                          featureRows.filter((_, i) => i !== index)
+                        )
+                      }
+                      aria-label={`Remove ${feature.name || 'feature'}`}
+                      className="ml-2 px-2 py-1 text-red-600 hover:text-red-800 font-bold"
+                    >
+                      ×
+                    </button>
+                  </div>
+                  <textarea
+                    value={feature.description}
+                    onChange={(e) =>
+                      updateField(
+                        'featuresAndTraits',
+                        featureRows.map((f, i) =>
+                          i === index ? { ...f, description: e.target.value } : f
+                        )
+                      )
+                    }
+                    placeholder="Description (optional)"
+                    aria-label={`Feature ${index + 1} description`}
+                    rows={2}
+                    className="w-full px-2 py-1 text-sm border border-stone-300 rounded focus:outline-none focus:ring-2 focus:ring-red-500"
+                  />
+                </div>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Additional Features & Traits */}

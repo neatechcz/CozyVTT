@@ -1,13 +1,29 @@
-import { useState, useEffect, useMemo, useRef, FormEvent, KeyboardEvent } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo, FormEvent, KeyboardEvent } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Dices, Send, AlertCircle, RotateCcw, ChevronLeft, ChevronRight, Trash2, EyeOff, X } from 'lucide-react';
+import { Dices, Send, AlertCircle, RotateCcw, Trash2, EyeOff, Eye, X, Plus } from 'lucide-react';
 import { useWebSocket } from '@/contexts/WebSocketContext';
 import { useAuth } from '@/contexts/AuthContext';
 import { useCampaign } from '@/contexts/CampaignContext';
-import type { DiceRolledEvent, DiceRolledSecretEvent, DiceRollDetail } from '@/types';
+import { getDiceRolls } from '@/services/dice.service';
+import api from '@/services/api';
+import { mayDisplayRoll, visibleRolls } from '@/utils/secretRolls';
+import type { DiceRolledEvent, DiceRolledSecretEvent, DiceRollDetail, DiceMacro } from '@/types';
 import { CampaignStatus } from '@/types';
 import DiceResult from './DiceResult';
 import ConfirmDialog from '@/components/common/ConfirmDialog';
+import DiceMacroManager from './DiceMacroManager';
+
+/**
+ * Stable identity for a roll, used to dedupe the live socket stream against
+ * history replayed from the server.
+ *
+ * Stored rolls carry their database id. A roll made while the session is paused
+ * never reaches the server and has none, so it falls back to the roller and
+ * timestamp — which is what the whole list keyed on before rolls had ids at all.
+ */
+function rollKey(roll: DiceRolledEvent): string {
+  return roll.id ?? `${roll.userId}-${roll.timestamp}`;
+}
 
 // ============================================
 // Local (offline) dice evaluator
@@ -101,13 +117,13 @@ function evaluateLocalRoll(
 
 // Quick roll button configurations with whimsical forest colors
 const QUICK_ROLLS = [
-  { label: 'd4', expression: '1d4', color: 'bg-amber-100/80 dark:bg-amber-900/30 border-amber-300/50 hover:bg-amber-200/80 dark:hover:bg-amber-900/40' },
-  { label: 'd6', expression: '1d6', color: 'bg-green-100/80 dark:bg-green-900/30 border-green-300/50 hover:bg-green-200/80 dark:hover:bg-green-900/40' },
-  { label: 'd8', expression: '1d8', color: 'bg-purple-100/80 dark:bg-purple-900/30 border-purple-300/50 hover:bg-purple-200/80 dark:hover:bg-purple-900/40' },
-  { label: 'd10', expression: '1d10', color: 'bg-orange-100/80 dark:bg-orange-900/30 border-orange-300/50 hover:bg-orange-200/80 dark:hover:bg-orange-900/40' },
+  { label: 'd4', expression: '1d4', color: 'bg-warning/15 dark:bg-warning/30 border-warning/50 hover:bg-warning/80 dark:hover:bg-warning/40' },
+  { label: 'd6', expression: '1d6', color: 'bg-success/15 dark:bg-success/30 border-success/50 hover:bg-success/80 dark:hover:bg-success/40' },
+  { label: 'd8', expression: '1d8', color: 'bg-spirit/15 dark:bg-spirit/30 border-spirit/50 hover:bg-spirit/80 dark:hover:bg-spirit/40' },
+  { label: 'd10', expression: '1d10', color: 'bg-warning/15 dark:bg-warning/30 border-warning/50 hover:bg-warning/80 dark:hover:bg-warning/40' },
   { label: 'd12', expression: '1d12', color: 'bg-teal-100/80 dark:bg-teal-900/30 border-teal-300/50 hover:bg-teal-200/80 dark:hover:bg-teal-900/40' },
-  { label: 'd20', expression: '1d20', color: 'bg-rose-100/80 dark:bg-rose-900/30 border-rose-300/50 hover:bg-rose-200/80 dark:hover:bg-rose-900/40' },
-  { label: 'd100', expression: '1d100', color: 'bg-indigo-100/80 dark:bg-indigo-900/30 border-indigo-300/50 hover:bg-indigo-200/80 dark:hover:bg-indigo-900/40' },
+  { label: 'd20', expression: '1d20', color: 'bg-danger/15 dark:bg-danger/30 border-danger/50 hover:bg-danger/80 dark:hover:bg-danger/40' },
+  { label: 'd100', expression: '1d100', color: 'bg-info/15 dark:bg-info/30 border-info/50 hover:bg-info/80 dark:hover:bg-info/40' },
 ];
 
 const SPECIAL_ROLLS = [
@@ -120,50 +136,111 @@ const SPECIAL_ROLLS = [
  * Dice roller component with carousel navigation and secret rolls
  */
 export default function DiceRoller() {
-  const { socket } = useWebSocket();
+  const { socket, reconnectCount, status } = useWebSocket();
   const { user } = useAuth();
   const { userRole, campaign } = useCampaign();
   const isPaused = campaign?.status === CampaignStatus.PAUSED && userRole !== 'DM';
+
+  /**
+   * Which campaign members are DMs, so a roll made on someone else's behalf can
+   * say so. Taken from the campaign's membership list rather than sent with the
+   * roll — the roller does not get to assert their own role.
+   */
+  const dmUserIds = useMemo(
+    () => new Set((campaign?.memberships ?? []).filter((m) => m.role === 'DM').map((m) => m.userId)),
+    [campaign?.memberships]
+  );
 
   // Form state
   const [expression, setExpression] = useState('');
   const [characterName, setCharacterName] = useState('');
   const [selectedCharacterId, setSelectedCharacterId] = useState('');
+  const playerCharacters = useMemo(() => {
+    if (userRole !== 'PLAYER' || !campaign || !user) return [];
+    const membership = campaign.memberships?.find((member) =>
+      member.userId === user.id && member.role === 'PLAYER',
+    );
+    const assignedIds = new Set(membership?.characterIds ?? []);
+    return (campaign.characters ?? []).filter((character) =>
+      character.campaignId === campaign.id &&
+      (character.userId === user.id || assignedIds.has(character.id)),
+    );
+  }, [campaign, user, userRole]);
+  const selectedCharacter = playerCharacters.find((character) => character.id === selectedCharacterId);
+
+  useEffect(() => {
+    if (selectedCharacterId && !selectedCharacter) setSelectedCharacterId('');
+  }, [selectedCharacterId, selectedCharacter]);
   const [purpose, setPurpose] = useState('');
   const [isSecret, setIsSecret] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   // Roll history state
   const [rolls, setRolls] = useState<DiceRolledEvent[]>([]);
-  const [currentRollIndex, setCurrentRollIndex] = useState(0);
   const [isRolling, setIsRolling] = useState(false);
+
+  /**
+   * Whether this viewer wants their own secret rolls in the list.
+   *
+   * A preference, not a permission — it only hides rolls this viewer is already
+   * entitled to see, and turning it on cannot reveal anybody else's. Local to
+   * the browser and to this person: nothing about it is sent anywhere or
+   * affects what another player sees.
+   */
+  const [showSecretRolls, setShowSecretRolls] = useState(true);
+
+  /** Scroll anchor, so a new roll brings the list to the bottom. */
+  const rollsEndRef = useRef<HTMLDivElement>(null);
+  const rollsContainerRef = useRef<HTMLDivElement>(null);
+  const wasAtBottomRef = useRef(true);
+
+  /**
+   * Safety net for the "Rolling…" state.
+   *
+   * A roll is only ever ended by a message coming back from the server, so
+   * anything that loses that message leaves the button disabled until the user
+   * reloads. The listener bug that caused this in practice is fixed in the
+   * socket client, but a roll can still be lost if the connection drops between
+   * the emit and the reply — and a control that can wedge with no way out
+   * should always have one.
+   */
+  const rollTimeoutRef = useRef<number | null>(null);
+  const ROLL_TIMEOUT_MS = 10000;
+
+  const clearPendingRoll = useCallback(() => {
+    if (rollTimeoutRef.current !== null) {
+      clearTimeout(rollTimeoutRef.current);
+      rollTimeoutRef.current = null;
+    }
+    setIsRolling(false);
+  }, []);
+
+  // A pending roll cannot be answered while the socket is down, and drop the
+  // timer on unmount so it cannot fire against a gone component.
+  useEffect(() => {
+    if (status !== 'connected') clearPendingRoll();
+  }, [status, clearPendingRoll]);
+
+  useEffect(() => () => {
+    if (rollTimeoutRef.current !== null) clearTimeout(rollTimeoutRef.current);
+  }, []);
 
   // Confirm clear history
   const [confirmClear, setConfirmClear] = useState(false);
 
+  /**
+   * Saved rolls, shown as a third row of buttons.
+   *
+   * Held in the order the server returns them — oldest first — because that is
+   * the order of the buttons, and people aim at these without looking. Loaded
+   * once when the campaign is known; the dice tab stays mounted, so this does
+   * not refetch on tab switches.
+   */
+  const [macros, setMacros] = useState<DiceMacro[]>([]);
+  const [isMacroManagerOpen, setIsMacroManagerOpen] = useState(false);
+
   // Secret roll popup state
   const [secretRollResult, setSecretRollResult] = useState<DiceRolledEvent | null>(null);
-
-  const playerCharacters = useMemo(() => {
-    if (userRole !== 'PLAYER' || !campaign || !user) return [];
-
-    const playerMembership = campaign.memberships?.find(
-      (membership) => membership.userId === user.id && membership.role === 'PLAYER',
-    );
-    const assignedCharacterIds = new Set(playerMembership?.characterIds ?? []);
-
-    return (campaign.characters ?? []).filter((character) =>
-      character.campaignId === campaign.id &&
-      (character.userId === user.id || assignedCharacterIds.has(character.id)),
-    );
-  }, [campaign, user, userRole]);
-  const selectedCharacter = playerCharacters.find((character) => character.id === selectedCharacterId);
-
-  useEffect(() => {
-    if (selectedCharacterId && !selectedCharacter) {
-      setSelectedCharacterId('');
-    }
-  }, [selectedCharacter, selectedCharacterId]);
 
   // Rate limit state
   const [rateLimitCooldown, setRateLimitCooldown] = useState(0);
@@ -173,6 +250,69 @@ export default function DiceRoller() {
   // WebSocket Event Handlers
   // ============================================
 
+  /**
+   * Load roll history from the server on mount, and again after a reconnect.
+   *
+   * Rolls have always been stored server-side; nothing read them back, so this
+   * panel started empty after every refresh even though the rolls still
+   * existed. Mirrors ChatPanel's load-then-resync pattern.
+   *
+   * Secret rolls are kept: the server has already scoped them — a DM gets every
+   * one, anyone else gets only their own — so a roll that arrives here is one
+   * this viewer is entitled to. `mayDisplayRoll` re-checks rather than trusting
+   * that blindly, because a display bug here would be indistinguishable from a
+   * leak. They used to be dropped for everyone but the DM, which meant a player
+   * lost sight of their own secret rolls the moment they refreshed.
+   */
+  useEffect(() => {
+    if (!campaign?.id) return;
+    let cancelled = false;
+
+    const loadHistory = async () => {
+      try {
+        const fetched = await getDiceRolls(campaign.id, 50);
+        if (cancelled) return;
+        const visible = fetched.filter((r) => mayDisplayRoll(r, user?.id, userRole === 'DM'));
+
+        setRolls((prev) => {
+          // Merge rather than replace: a roll can land live between mount and
+          // this response, and it must not be lost or duplicated.
+          const seen = new Set(prev.map(rollKey));
+          const merged = [...prev, ...visible.filter((r) => !seen.has(rollKey(r)))];
+          merged.sort(
+            (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+          );
+          return merged.slice(0, 50);
+        });
+      } catch (err) {
+        console.error('[DiceRoller] Failed to load roll history:', err);
+        // Non-fatal — live rolls still arrive over the socket.
+      }
+    };
+
+    loadHistory();
+    return () => { cancelled = true; };
+  }, [campaign?.id, userRole, reconnectCount]);
+
+  // Saved rolls for this campaign. Failure is quiet on purpose: macros are a
+  // convenience on top of a dice panel that works without them, and an error
+  // banner over the roll history would be louder than the problem.
+  useEffect(() => {
+    if (!campaign?.id) return;
+    let cancelled = false;
+    api
+      .listDiceMacros(campaign.id)
+      .then(({ macros: fetched }) => {
+        if (!cancelled) setMacros(fetched);
+      })
+      .catch(() => {
+        /* leave the row empty; the manager reports the error when opened */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [campaign?.id]);
+
   useEffect(() => {
     if (!socket) return;
 
@@ -181,36 +321,34 @@ export default function DiceRoller() {
     const handleDiceRolled = (data: DiceRolledEvent) => {
       console.log('[DiceRoller] Received dice.rolled event:', data);
 
-      // Secret rolls only visible to the roller
-      if (data.secret && user && data.userId !== user.id) {
-        console.log('[DiceRoller] Secret roll from another user, ignoring');
-        return;
+      const isMine = !!user && data.userId === user.id;
+
+      // Any reply to my own roll ends the pending state, whatever kind of roll
+      // it was. Deciding this once up front closes a hole in the old branching:
+      // a secret roll arriving while `user` was momentarily unset matched none
+      // of the three branches, so the flag was never cleared and the button
+      // stayed on "Rolling…".
+      if (isMine) {
+        clearPendingRoll();
       }
 
-      // Handle secret rolls - show in popup, don't add to history
-      if (data.secret && user && data.userId === user.id) {
+      // My own secret roll still gets its popup — a secret roll is deliberately
+      // undramatic in the shared list, and the popup is the confirmation that it
+      // landed. It now also joins the list, so it survives being dismissed.
+      if (data.secret && isMine) {
         setSecretRollResult(data);
-        setIsRolling(false);
-        return;
       }
 
-      // Add normal rolls to FRONT of array (newest first)
-      if (!data.secret) {
-        setRolls((prev) => {
-          const updated = [data, ...prev];
-          // Keep only last 50 rolls
-          if (updated.length > 50) {
-            return updated.slice(0, 50);
-          }
-          return updated;
-        });
+      // Someone else's secret roll is not mine to see. The server does not send
+      // them, so reaching this is already wrong; drop it rather than draw it.
+      if (!mayDisplayRoll(data, user?.id, userRole === 'DM')) return;
 
-        // Stop rolling animation and jump to latest roll (index 0)
-        if (user && data.userId === user.id) {
-          setIsRolling(false);
-          setCurrentRollIndex(0);
-        }
-      }
+      // Newest first in state; the list renders oldest-first, chat style.
+      setRolls((prev) => {
+        const updated = [data, ...prev];
+        // Keep only last 50 rolls
+        return updated.length > 50 ? updated.slice(0, 50) : updated;
+      });
     };
 
     socket.onDiceRolled(handleDiceRolled);
@@ -263,7 +401,7 @@ export default function DiceRoller() {
       // Check if it's a rate limit error
       if (data.message.includes('Rate limit exceeded')) {
         setError(data.message);
-        setIsRolling(false);
+        clearPendingRoll();
         // Only set cooldown if not already in cooldown (prevent reset)
         if (!isInCooldown.current) {
           isInCooldown.current = true;
@@ -271,7 +409,7 @@ export default function DiceRoller() {
         }
       } else {
         setError(data.message);
-        setIsRolling(false);
+        clearPendingRoll();
       }
     };
 
@@ -310,7 +448,6 @@ export default function DiceRoller() {
     const handleHistoryCleared = () => {
       console.log('[DiceRoller] Dice history cleared by DM');
       setRolls([]);
-      setCurrentRollIndex(0);
     };
 
     socket.onDiceHistoryCleared(handleHistoryCleared);
@@ -368,17 +505,13 @@ export default function DiceRoller() {
       if (validationError) { setError(validationError); return; }
       setError(null);
       setIsRolling(true);
-      // Paused campaigns are offline for players; the player selector is backed by
-      // the same owned/assigned character list as online rolls.
-      const localCharacterName = selectedCharacter?.name ?? '';
-      const localResult = evaluateLocalRoll(expr, user, localCharacterName, purpose.trim());
+      const localResult = evaluateLocalRoll(expr, user, selectedCharacter?.name ?? '', purpose.trim());
       if (localResult) {
         setRolls((prev) => [localResult, ...prev]);
-        setCurrentRollIndex(0);
       } else {
         setError('Could not evaluate expression locally');
       }
-      setIsRolling(false);
+      clearPendingRoll();
       return;
     }
 
@@ -401,15 +534,23 @@ export default function DiceRoller() {
     setError(null);
     setIsRolling(true);
 
-    console.log('[DiceRoller] Rolling dice:', expr, 'secret:', isSecret);
+    // The roll is fire-and-forget, so nothing but a reply ends this state. If
+    // the connection drops in between, release the button rather than leaving
+    // it disabled until the user works out that a reload is the only way on.
+    if (rollTimeoutRef.current !== null) clearTimeout(rollTimeoutRef.current);
+    rollTimeoutRef.current = window.setTimeout(() => {
+      rollTimeoutRef.current = null;
+      setIsRolling(false);
+      setError("That roll didn't come back — check your connection and try again.");
+    }, ROLL_TIMEOUT_MS);
 
-    const characterAttribution = userRole === 'DM'
-      ? { characterName: characterName.trim() || undefined }
-      : selectedCharacter ? { characterId: selectedCharacter.id } : {};
+    console.log('[DiceRoller] Rolling dice:', expr, 'secret:', isSecret);
 
     socket.emitDiceRoll({
       expression: expr.trim(),
-      ...characterAttribution,
+      ...(userRole === 'DM'
+        ? { characterName: characterName.trim() || undefined }
+        : selectedCharacter ? { characterId: selectedCharacter.id } : {}),
       purpose: purpose.trim() || undefined,
       secret: isSecret,
     });
@@ -445,14 +586,37 @@ export default function DiceRoller() {
     setError(null);
   };
 
-  const handlePrevRoll = () => {
-    // Left arrow = go to older rolls (higher index)
-    setCurrentRollIndex((prev) => Math.min(prev + 1, rolls.length - 1));
-  };
+  /**
+   * The rolls actually drawn: what this viewer is entitled to, minus anything
+   * their own "show secret rolls" preference hides.
+   */
+  const shownRolls = visibleRolls(rolls, user?.id, userRole === 'DM', showSecretRolls);
 
-  const handleNextRoll = () => {
-    // Right arrow = go to newer rolls (lower index)
-    setCurrentRollIndex((prev) => Math.max(prev - 1, 0));
+  /** Any secret roll this viewer could see — decides whether to offer the toggle. */
+  const hasSecretRolls = rolls.some(
+    (roll) => roll.secret && mayDisplayRoll(roll, user?.id, userRole === 'DM')
+  );
+
+  /**
+   * Follow new rolls to the bottom, unless the reader has scrolled up to look
+   * at something. Scrolls the container rather than using scrollIntoView, which
+   * would drag the whole sidebar with it — same reason the chat panel does.
+   */
+  useEffect(() => {
+    const container = rollsContainerRef.current;
+    if (!container || !wasAtBottomRef.current) return;
+    if (typeof container.scrollTo === 'function') {
+      container.scrollTo({ top: container.scrollHeight, behavior: 'smooth' });
+    } else {
+      container.scrollTop = container.scrollHeight;
+    }
+  }, [shownRolls.length]);
+
+  const handleRollsScroll = () => {
+    const container = rollsContainerRef.current;
+    if (!container) return;
+    wasAtBottomRef.current =
+      container.scrollHeight - container.scrollTop - container.clientHeight < 50;
   };
 
   const handleClearHistory = () => {
@@ -468,11 +632,18 @@ export default function DiceRoller() {
   // Render
   // ============================================
 
-  // Get current roll for carousel
-  const currentRoll = rolls.length > 0 ? rolls[currentRollIndex] : null;
-
   return (
     <>
+    {campaign?.id && (
+      <DiceMacroManager
+        isOpen={isMacroManagerOpen}
+        onClose={() => setIsMacroManagerOpen(false)}
+        campaignId={campaign.id}
+        initialExpression={expression}
+        onMacrosChanged={setMacros}
+      />
+    )}
+
     <ConfirmDialog
       isOpen={confirmClear}
       title="Clear Roll History"
@@ -487,27 +658,54 @@ export default function DiceRoller() {
       <div className="flex-shrink-0 p-3 border-b border-ink-muted/20">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
-            <Dices className="w-4 h-4 text-moss-green dark:text-moss-green" />
+            <Dices className="w-4 h-4 text-brand-ink dark:text-brand-ink" />
             <h2 className="text-base font-semibold text-ink">
               Dice Roller
             </h2>
           </div>
+          <div className="flex items-center gap-1.5">
+          {/* Only worth offering once there is a secret roll to hide. Purely a
+              view preference over rolls this person may already see. */}
+          {hasSecretRolls && (
+            <button
+              onClick={() => setShowSecretRolls((show) => !show)}
+              aria-pressed={showSecretRolls}
+              className={`flex items-center gap-1 px-2 py-1 text-xs rounded-md border transition-all ${
+                showSecretRolls
+                  ? 'border-ink-muted/30 bg-paper/50 text-ink hover:bg-paper/70'
+                  : 'border-warm-amber/40 bg-warm-amber/10 text-warm-amber'
+              }`}
+              title={
+                showSecretRolls
+                  ? 'Hide secret rolls in this list (only affects your view)'
+                  : 'Show secret rolls in this list (only affects your view)'
+              }
+            >
+              {showSecretRolls ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
+              <span>Secret</span>
+            </button>
+          )}
           {/* DM Only: Clear History Button */}
           {userRole === 'DM' && rolls.length > 0 && (
             <button
               onClick={handleClearHistory}
-              className="flex items-center gap-1 px-2 py-1 text-xs rounded-md border border-red-500/30 bg-red-50/50 dark:bg-red-900/20 text-red-600 dark:text-red-400 hover:bg-red-100/50 dark:hover:bg-red-900/30 transition-all"
+              className="flex items-center gap-1 px-2 py-1 text-xs rounded-md border border-danger/30 bg-danger/10 dark:bg-danger/20 text-danger-ink dark:text-danger-ink hover:bg-danger/15 dark:hover:bg-danger/30 transition-all"
               title="Clear all roll history"
             >
               <Trash2 className="w-3 h-3" />
               <span>Clear</span>
             </button>
           )}
+          </div>
         </div>
       </div>
 
-      {/* Roll History Carousel */}
-      <div className="flex-1 overflow-y-auto p-3 min-h-0">
+      {/* Roll list — a running log, oldest first, like the chat beside it */}
+      <div
+        ref={rollsContainerRef}
+        onScroll={handleRollsScroll}
+        className="flex-1 overflow-y-auto p-3 min-h-0"
+      >
         {rolls.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-center p-4">
             <Dices className="w-10 h-10 text-ink-muted/40 mb-2" />
@@ -516,42 +714,24 @@ export default function DiceRoller() {
             </p>
           </div>
         ) : (
-          <div className="h-full flex flex-col">
-            {/* Carousel Navigation */}
-            <div className="flex items-center justify-between mb-2">
-              <button
-                onClick={handlePrevRoll}
-                disabled={currentRollIndex >= rolls.length - 1}
-                className="p-1 rounded-md border border-ink-muted/30 bg-paper/50 hover:bg-paper/70 text-ink disabled:opacity-30 disabled:cursor-not-allowed transition-all"
-                title="Older rolls"
-              >
-                <ChevronLeft className="w-4 h-4" />
-              </button>
-              <span className="text-xs text-ink-secondary">
-                Roll {rolls.length - currentRollIndex} of {rolls.length}
-              </span>
-              <button
-                onClick={handleNextRoll}
-                disabled={currentRollIndex <= 0}
-                className="p-1 rounded-md border border-ink-muted/30 bg-paper/50 hover:bg-paper/70 text-ink disabled:opacity-30 disabled:cursor-not-allowed transition-all"
-                title="Newer rolls"
-              >
-                <ChevronRight className="w-4 h-4" />
-              </button>
-            </div>
-
-            {/* Current Roll Display */}
-            <div className="flex-1 overflow-y-auto">
-              <AnimatePresence mode="wait">
-                {currentRoll && (
-                  <DiceResult
-                    key={`${currentRoll.userId}-${currentRoll.timestamp}`}
-                    roll={currentRoll}
-                    isCurrentUser={user?.id === currentRoll.userId}
-                  />
-                )}
-              </AnimatePresence>
-            </div>
+          // Oldest at the top, newest at the bottom, like the chat panel beside
+          // it. `shownRolls` is newest-first in state, so this reverses a copy
+          // rather than mutating it.
+          <div className="space-y-2">
+            {[...shownRolls].reverse().map((roll) => (
+              <DiceResult
+                key={rollKey(roll)}
+                roll={roll}
+                isCurrentUser={user?.id === roll.userId}
+                rollerIsDM={dmUserIds.has(roll.userId)}
+              />
+            ))}
+            {shownRolls.length === 0 && (
+              <p className="text-xs text-ink-secondary text-center py-6">
+                Secret rolls are hidden. Use the eye button to show them.
+              </p>
+            )}
+            <div ref={rollsEndRef} />
           </div>
         )}
       </div>
@@ -571,7 +751,7 @@ export default function DiceRoller() {
               initial={{ opacity: 0, height: 0 }}
               animate={{ opacity: 1, height: 'auto' }}
               exit={{ opacity: 0, height: 0 }}
-              className="mb-2 flex items-center gap-2 text-red-600 dark:text-red-400 text-xs"
+              className="mb-2 flex items-center gap-2 text-danger-ink dark:text-danger-ink text-xs"
             >
               <AlertCircle className="w-3 h-3 flex-shrink-0" />
               <span>{error}</span>
@@ -617,6 +797,41 @@ export default function DiceRoller() {
                 {btn.label}
               </button>
             ))}
+          </div>
+
+          {/* Saved rolls — the player's own, in the order they were saved so a
+              button does not move when one is edited. The row wraps; the panel
+              is a 300px rail at its narrowest and this block never scrolls. */}
+          <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
+            {macros.map((macro) => (
+              <button
+                key={macro.id}
+                onClick={() => handleQuickRoll(macro.expression)}
+                disabled={isRolling}
+                title={`${macro.name} — ${macro.expression}`}
+                className="
+                  px-2 py-1 rounded-md border border-spirit-purple/30 text-xs font-medium
+                  bg-spirit-purple/10 hover:bg-spirit-purple/20 transition-all
+                  disabled:opacity-50 disabled:cursor-not-allowed
+                  text-ink max-w-[10rem] truncate
+                "
+              >
+                {macro.name}
+              </button>
+            ))}
+            <button
+              onClick={() => setIsMacroManagerOpen(true)}
+              title="Saved rolls — add, edit or delete"
+              aria-label="Manage saved rolls"
+              className="
+                px-2 py-1 rounded-md border border-dashed border-ink-muted/40 text-xs
+                hover:bg-surface transition-all text-ink-secondary
+                flex items-center gap-1
+              "
+            >
+              <Plus className="w-3 h-3" />
+              Saved
+            </button>
           </div>
         </div>
 
@@ -682,14 +897,17 @@ export default function DiceRoller() {
               checked={isSecret}
               onChange={(e) => setIsSecret(e.target.checked)}
               disabled={isRolling}
-              className="w-3 h-3 rounded border-ink-muted/30 text-moss-green focus:ring-brand/50 disabled:opacity-50 disabled:cursor-not-allowed"
+              className="w-3 h-3 rounded border-ink-muted/30 text-brand-ink focus:ring-brand/50 disabled:opacity-50 disabled:cursor-not-allowed"
             />
             <label
               htmlFor="secretRoll"
               className="flex items-center gap-1 text-xs text-ink-secondary cursor-pointer"
             >
               <EyeOff className="w-3 h-3" />
-              <span>Secret Roll (only you can see)</span>
+              {/* Not "only you": the server sends every secret roll to the DM
+                  as well, deliberately, for audit and dispute resolution.
+                  Saying otherwise promises a privacy the app does not provide. */}
+              <span>Secret Roll (hidden from other players)</span>
             </label>
           </div>
 
@@ -700,10 +918,10 @@ export default function DiceRoller() {
               disabled={isRolling || !expression.trim() || rateLimitCooldown > 0}
               className="
                 flex-1 flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md
-                bg-green-700 hover:bg-green-600 text-white font-semibold text-xs shadow-sm
+                bg-success hover:bg-success text-white font-semibold text-xs shadow-sm
                 disabled:opacity-50 disabled:cursor-not-allowed
                 transition-all duration-200
-                focus:outline-none focus:ring-2 focus:ring-green-500/50
+                focus:outline-none focus:ring-2 focus:ring-success/50
               "
             >
               {isRolling ? (
@@ -745,7 +963,7 @@ export default function DiceRoller() {
 
         {/* Hint / Rate Limit Countdown */}
         {rateLimitCooldown > 0 ? (
-          <div className="mt-1.5 text-xs text-red-600 dark:text-red-400 text-center font-medium">
+          <div className="mt-1.5 text-xs text-danger-ink dark:text-danger-ink text-center font-medium">
             You may roll again in: {rateLimitCooldown} second{rateLimitCooldown !== 1 ? 's' : ''}
           </div>
         ) : (
@@ -784,13 +1002,13 @@ export default function DiceRoller() {
               {/* Header */}
               <div className="p-4 border-b border-ink/10">
                 <div className="flex items-center gap-2">
-                  <EyeOff className="w-5 h-5 text-brand" />
+                  <EyeOff className="w-5 h-5 text-brand-ink" />
                   <h3 className="text-lg font-semibold text-ink">
                     Secret Roll
                   </h3>
                 </div>
                 <p className="text-xs text-ink-muted mt-1">
-                  Only you can see this result
+                  Hidden from other players — your DM can still see it
                 </p>
               </div>
 

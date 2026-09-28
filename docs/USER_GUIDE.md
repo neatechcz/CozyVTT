@@ -13,10 +13,11 @@ This guide covers everything you need to get started, from the setup wizard to a
 3. [Campaign Management](#campaign-management)
 4. [Character Management](#character-management)
 5. [The Asset Library](#the-asset-library)
-6. [Running Sessions](#running-sessions)
-7. [Advanced Features](#advanced-features)
-8. [Your Profile](#your-profile)
-9. [Troubleshooting & FAQ](#troubleshooting--faq)
+6. [Documents](#documents)
+7. [Running Sessions](#running-sessions)
+8. [Advanced Features](#advanced-features)
+9. [Your Profile](#your-profile)
+10. [Troubleshooting & FAQ](#troubleshooting--faq)
 
 ---
 
@@ -63,7 +64,9 @@ Navigate to your CozyVTT URL and enter your email and password. If Multi-Factor 
 
 *GIF pending — Login flow with MFA step.*
 
-**Forgot your password?** Contact your platform administrator — they can generate a temporary password from the Admin Panel.
+**Forgot your password?** If your instance has email configured, use **Forgot password** on the login page. Otherwise contact your platform administrator, who can email you a reset link or generate a temporary password from the Admin Panel.
+
+**First time signing in?** An account someone else created for you always ends its first sign-in with you choosing your own password. Until you do, the temporary password you were given won't open anything else — so nobody, including the admin who created the account, keeps a way in.
 
 ---
 
@@ -98,7 +101,7 @@ After logging in, the **Dashboard** is your home base. From here you can see eve
 
 *Screenshot pending — Campaign card grid with status indicators.*
 
-**Quick Access** — Cards for your Character Library and Asset Library so you can navigate there in one click.
+**Quick Access** — Cards for your Character Library, Asset Library and Documents so you can navigate there in one click.
 
 ### Creating a New Campaign
 
@@ -160,6 +163,13 @@ To invite someone:
 3. Enter the email address of the user on your platform
 4. They'll see a pending invitation on their dashboard
 
+**Handing the campaign to someone else.** A campaign has one DM, and that seat
+can be passed to another member — useful when you are handing off to a co-DM or
+stepping back from a game that carries on without you. It does not change who
+*owns* the campaign, so if you created it you can still delete it and can take
+the seat back later. See
+[Handing the game to someone else](DM_GUIDE.md#handing-the-game-to-someone-else).
+
 ---
 
 ### Tokens
@@ -178,7 +188,7 @@ Each token has:
 - **Size** — How many grid squares the token occupies (default 1×1)
 - **Display Mode** — **Pog** (circular), **Top-Down** (overhead art), or **Full-Art** (full rectangular image)
 - **Disposition** — Hostile (red), Friendly (green), or Neutral (blue) — affects the placeholder color
-- **Conditions** — Visual badge indicators for status effects (poisoned, stunned, etc.)
+- **Conditions** — Two-letter amber badges above the token for status effects (**PO**isoned, **ST**unned, and so on). Hover any token to read its conditions in full
 - **Spirit Layer Visibility** — Whether the token appears in the spirit layer view
 - **Stat Block** — NPC tokens can carry a stat block with AC, HP, speed, attacks, and abilities
 
@@ -200,7 +210,8 @@ The **Characters** page (accessible from the top nav or dashboard) shows all the
 
 From here you can:
 - **Create a new character**
-- **Edit** an existing character
+- **Click a character** to read its sheet — **Edit** is on the sheet when you want to change something
+- **Edit** an existing character directly, skipping the reading step
 - **Copy** a character (great for variants or backup sheets)
 - **Export** a character to JSON (for backups or sharing)
 - **Import** a character from a JSON file
@@ -221,13 +232,41 @@ The Character Editor is where you fill in every detail about your character — 
 
 *Screenshot pending — Character editor with D&D 5e sheet open.*
 
-Click **Save** (or use the keyboard shortcut) to save your progress. A timestamp in the header shows when your character was last saved. An unsaved changes indicator appears if you've made changes you haven't saved yet — don't close the tab without saving!
+Click **Save** to save your progress. A timestamp in the header shows when your character was last saved. If you try to leave with changes you haven't saved, you'll be asked to confirm first — that covers the back arrow and closing or reloading the browser tab. After a save, leaving is silent.
 
 You can also **Export to JSON** from the editor header at any time to grab a backup copy.
 
+### Character Templates
+
+A template is a starter sheet somebody has already filled in and shared. If you're new to a system — or your DM has prepared something for you — starting from one saves you a blank page.
+
+Open **Character Templates** from the dashboard. Every template on the instance is listed; filter by game system, search by name, or tick **Only mine** to see just your own.
+
+**Using one.** Click **Use** on any template. That creates a character that belongs entirely to you — you can rename it and change anything you like, and the original template is untouched. Whoever published it has no control over your character.
+
+**Publishing one.** There are four ways:
+
+- **New Template** on the templates page, which starts from a blank sheet for the system you pick
+- **Save as Template** in the character editor, which publishes the sheet you're looking at
+- while creating a character, if you want to keep the character and share it at the same time
+- **Import** on the templates page, which publishes a character JSON file as a template
+
+Templates you publish are visible to everyone on your instance. You can edit or delete your own at any time.
+
+**Importing from another instance.** The **Import** button accepts any character JSON — one you exported from this instance, one you wrote yourself, or one exported from a *different* CozyVTT server. That last case is the useful one: export a character from wherever you built it, bring the file to a new instance, and publish it there for that group to copy. Character exports and templates hold the same thing — a sheet plus a game system — so no conversion is involved. You'll see a preview before anything is published, and you can set the name and description at that point.
+
+> **A note on template images.** A template's picture has to be a **global** asset, because everyone who can see the template needs to be able to load it — a personal asset would show as broken for everyone but you. If you don't have permission to upload global assets, pick an existing global one or leave the image blank.
+
+> **Template editors.** Admins can grant a user the **template editor** permission, which lets them tidy up or correct anyone's template. Nobody has it by default. If someone edits a template you published, that's why.
+
 ### Assigning a Character to a Campaign
 
-Characters need to be assigned to a campaign before they show up in that campaign's roster. From the Characters page, click the **Assign** option on any character card and pick the campaign.
+A character has to belong to a campaign before it shows up in that campaign's roster. There are two ways:
+
+- **When you create it** — pick the campaign in the new character dialog. The character joins the roster straight away.
+- **Afterwards** — click **Assign** on any character card on the Characters page and pick the campaign.
+
+You can only choose a campaign you are already a member of.
 
 *GIF pending — Assigning a character to a campaign.*
 
@@ -307,6 +346,8 @@ The Asset Library is where all your campaign media lives — maps, token images,
 | **Audio** | Ambient soundscapes, background music |
 | **Avatar** | Your personal profile picture |
 
+Rulebooks and handouts are not here. They have their own **Documents** section, described below, so a PDF never sits among your map thumbnails.
+
 ### Uploading Assets
 
 Click the **Upload** button to add a new asset. You'll choose:
@@ -329,6 +370,50 @@ Use the **search bar** to find assets by name or tag. Filter by scope (Global, P
 Click any asset card to open its **detail panel** on the right. From there you can see full metadata, edit tags, or delete the asset.
 
 *Screenshot pending — Asset detail panel.*
+
+---
+
+## Documents
+
+Rulebooks, house rules, handouts: the things a table reads rather than looks at. **Documents** on your dashboard keeps them apart from maps and tokens, and lets you read them without leaving CozyVTT.
+
+### What you can keep here
+
+| Format | How it gets here | Editable later? |
+|--------|------------------|-----------------|
+| **PDF** | Upload | No, it is a file; upload a new one to replace it |
+| **Plain text** (`.txt`) | Upload, or **Write one** | Yes, by whoever uploaded or wrote it |
+| **Markdown** (`.md`) | Upload, or **Write one** | Yes, by whoever uploaded or wrote it |
+
+Markdown documents render headings, lists, emphasis, tables, task lists and links. A single press of Enter starts a new line, the way it does in a chat message, so notes read the way you typed them.
+
+The size limit is set by whoever runs your instance; the default is 50 MB, enough for most rulebook PDFs. Written documents are limited to about 900 KB of text, which is a very long document, and anything bigger is a file to upload.
+
+### Who can read a document
+
+This is decided by where you put it when you upload or write it:
+
+| Scope | Who can read it |
+|-------|-----------------|
+| **Personal** | You alone, until a DM shares it with a campaign (see below). |
+| **Campaign** | Every member of that campaign, immediately. Only the campaign's DM can put a document here. |
+| **Global** | Everyone on the instance. Only an administrator or a global asset manager can put a document here. |
+
+A DM can share their own documents, and Global ones, with their campaign from inside it, and stop sharing later. A document someone else shared with a table you play at is yours to read there, not to share on. Sharing does not copy the file; the campaign's members read the same document you have, and if you edit it they see the new text next time they open it.
+
+### Reading
+
+Click a document's name or its **Read** button to open it in a full-screen reader over whatever page you are on. **Open in a new tab** does what it says, for reading on a second screen while play continues. A PDF is shown by your browser's own PDF viewer.
+
+### Editing
+
+Open a text or Markdown document you uploaded or wrote and press **Edit**. What you type is saved exactly as typed. If a save is refused, your text stays in the box and the reason is shown.
+
+### Safety
+
+Uploads are checked rather than trusted. A PDF must really be a PDF, and a text or Markdown file must really be text; a program renamed to `.md` is refused. Documents are always shown as text or as a PDF, never as a web page, so a file that contains HTML or a script is displayed as-is and nothing in it can run. There is no need to avoid typing `<` or `>` in a document; they show as typed.
+
+Pictures in a Markdown document or note only load from your own CozyVTT. An image that points at another website would make every reader's browser contact that site, revealing who opened the document; instead its description is shown and nothing is fetched. To show a picture, upload it to your asset library and link to it from there.
 
 ---
 
@@ -356,7 +441,14 @@ Type your message in the input field and press **Enter** to send. Messages show 
 
 The **Dice Roller** is right below chat. Click a die face to roll it, or type a custom expression.
 
-*GIF pending — Rolling dice and seeing result in chat.*
+*GIF pending — Rolling dice and seeing the result in the Dice panel.*
+
+**Saving a roll you use often.** Press **Saved** below the dice buttons to keep a
+named roll — a house rule, a homebrew subsystem, `4d6kh3` for rolling up a
+character. It becomes a one-click button beside the dice. Saved rolls are private
+to you and belong to the one campaign, and the same button is where you rename,
+edit or delete them. See the
+[Player Guide](PLAYER_GUIDE.md#the-dice-roller) for the full description.
 
 **Supported dice notation:**
 - `d20` — Roll a single d20
@@ -365,7 +457,42 @@ The **Dice Roller** is right below chat. Click a die face to roll it, or type a 
 - `1d20+5` — Roll a d20 and add 5
 - `2d6-1` — Roll 2d6 and subtract 1
 
-Dice results are posted to chat so everyone can see them. DMs can also roll **secretly** — the result is only visible to them.
+Dice results go to the **Dice** panel, where everyone can see them. It keeps a
+running list of the rolls, oldest at the top and newest at the bottom, and it
+follows along as they come in unless you have scrolled up to read something
+earlier. The list survives a refresh.
+
+**Secret rolls.** Tick **Secret Roll** before rolling and the other players
+never see it. Your DM does — deliberately, so they can settle an argument about
+what was really rolled — and the checkbox says so. Your own secret rolls stay in
+your list marked **🔒 Secret**, so you can look back at them; the **Secret**
+button at the top of the panel hides them from your own view if you would rather
+keep the list to open rolls, which changes nothing for anyone else.
+
+### Your Own Notes
+
+The **Notes** tab is yours alone. Keep as many as you like for each campaign — a
+plan for next session, what the party has worked out about the villain, a
+running list of who owes whom money.
+
+Notes are written in **Markdown**, so headings, lists, bold, quotes and links
+all work, and the eye button switches to a laid-out preview. Pick between them
+from the dropdown, and **+** starts a new one. They save themselves a moment
+after you stop typing; the line underneath tells you whether everything is
+saved.
+
+**These are private.** Nobody else can read them — your DM included. That is
+enforced by the server, not just hidden in the page. A single note can run to
+100,000 characters, roughly fifty printed pages.
+
+### Past Sessions
+
+The **Session** tab has a **Past Sessions** list: every finished session,
+newest first, with its date, how long you played, and whatever the DM wrote
+about it when they ended it. It is the thing to read before the next game.
+
+Everyone in the campaign sees the same list. A session the DM wrote nothing for
+still appears, marked as having no notes.
 
 ### Moving Your Token
 
@@ -393,6 +520,8 @@ When combat starts, the **Initiative Tracker** appears (or is revealed by the DM
 
 During your turn, you'll see your name highlighted. Use your token to move and the chat to narrate your actions!
 
+Whoever's turn it is also gets a pulsing gold ring around their token on the map, so it's clear which creature is acting even when several look alike. Hovering a name in the tracker outlines that token on the map, and hovering a token on the map tints its row in the list.
+
 ---
 
 ## Advanced Features
@@ -411,13 +540,17 @@ A campaign can have multiple maps loaded at once. The DM can switch the active m
 
 ### The Spirit Layer
 
-The Spirit Layer is a special visual overlay primarily used for Shadowrun and similar games where some characters can perceive things others can't. The DM can toggle the spirit layer on or off per-token, and choose the visual style.
+The Spirit Layer is a second plane for the map, used for games where some characters can perceive things others can't — astral space, the ethereal plane, the spirit world. It is a separate plane rather than a see-through overlay: a player viewing the spirit realm sees the tokens on that plane instead of the ordinary ones, including instead of their own. The DM chooses which tokens live on it, who can see it, and the visual style.
+
+If you are a player and the map has gone dark or your token has vanished, ask your DM whether the Spirit Layer is switched on — see [The Spirit Layer](DM_GUIDE.md#the-spirit-layer) in the DM guide.
 
 *Screenshot pending — Map with spirit layer overlay.*
 
 ### Ambient Atmosphere
 
 DMs can set ambient audio tracks and visual atmosphere effects from the Atmosphere panel. Six visual overlays are available — rain, mist, leaves, sparkles, snow, and wind. Players hear the audio and see the visual effects automatically when connected to an active session.
+
+The track your DM chooses is fetched by your own browser from the instance, which is why you can hear a track that lives in the DM's personal library. That access lasts as long as the track is playing and covers only that one track.
 
 *Screenshot pending — Atmosphere controls panel.*
 
@@ -429,6 +562,13 @@ When a DM enables dynamic lighting on a map, players only see what their token c
 - **Dim radius** — reduced visibility with a fainter glow (e.g. the outer 20 ft of a torch)
 
 Where two dim light zones overlap, the area is treated as bright light. This matches the light rules in D&D 5e, Pathfinder 2e, and most other TTRPG systems.
+
+**Light does not see for you.** A lit area is only visible to you if your token
+could actually see it — walls block sight as well as light, so a lamp burning
+inside a closed room shows you nothing from outside it, and the creatures in
+there stay hidden until you can see in. Your token's **sight radius** governs how
+far you make things out in the dark; it does not stop you noticing a lit room
+across a courtyard once you have a clear line to it.
 
 *Screenshot pending — Map with dynamic lighting and bright/dim zones.*
 
@@ -442,10 +582,21 @@ CozyVTT theming works in two layers:
 
 - **Default theme** — 16 built-in themes spanning warm, cool, dark, neutral, and vibrant palettes
 - **Default font** — 8 open-source font families (Quicksand + Inter default, plus medieval, elegant, handwritten, etc.)
-- **Custom theme builder** — primary, accent, background, and text colors; complementary shades derived automatically
-- **Custom branding** — logo, mascot, and favicon shown on the login page and across the instance (always system-wide regardless of user theme)
-
+- **Custom theme builder** — primary, accent, background, and text colors; complementary shades derived automatically. The picker shows a live **Readability** check with the contrast ratio of each key text/background pair, flagging anything below the 4.5:1 minimum, and CozyVTT adjusts text shades automatically where it can
 Changes preview live as you configure them.
+
+**Custom branding (logo, mascot, favicon)** is not part of the Appearance panel yet. The instance
+already honours custom images — they appear on the login page and across the app, system-wide
+regardless of each user's theme — but there is no upload screen, so a self-hoster sets them by
+**replacing the default images** in `frontend/public/` (`default-logo.png`, `default-mascot.png`,
+`favicon-32.png`, `favicon-192.png`) and rebuilding.
+
+The branding settings on `PUT /api/admin/settings` name a path this instance serves, such as
+`/default-logo.png`. An address on another website is refused: it would have every visitor's
+browser contact that site before they have even signed in, and the app only displays images it
+serves itself.
+
+An admin upload UI is on the roadmap — see [Future Features](FUTURE_FEATURES.md).
 
 ---
 
@@ -467,6 +618,12 @@ Click on your current avatar (or the placeholder) to open the avatar uploader. C
 ### Changing Your Password
 
 In the **Security** section, enter your current password and your new password (twice, to confirm), then click **Save**.
+
+**Changing your password signs you out everywhere else.** Any other browser or
+device still signed in to your account is signed out straight away; the one you
+are using stays where it is. If you ever think somebody else has got into your
+account, changing your password is what removes them. Turning off MFA does the
+same thing.
 
 ### Multi-Factor Authentication (MFA)
 
@@ -515,9 +672,9 @@ CozyVTT will automatically try to reconnect if you lose connection briefly. Your
 
 Only you (the character owner) and the DM of an assigned campaign can edit a character. If you think someone else has access they shouldn't, contact your platform administrator.
 
-### My dice rolls aren't showing in chat
+### My dice rolls aren't showing up
 
-Make sure the session is active (you see the "Live" indicator). Dice rolls require an active WebSocket connection to the campaign. If you're not in the campaign page, navigate there first.
+Rolls appear in the **Dice** panel, the tab beside Chat — not in the conversation itself. If the panel is empty, make sure the session is active (you see the "Live" indicator): rolls need a live connection to the campaign. If you're not on the campaign page, navigate there first.
 
 ### How do I change my email address?
 

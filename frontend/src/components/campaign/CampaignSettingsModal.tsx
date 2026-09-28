@@ -73,6 +73,7 @@ export default function CampaignSettingsModal({
   // ── Members ──────────────────────────────────
   const [removingMemberId, setRemovingMemberId] = useState<string | null>(null);
   const [changingMemberId, setChangingMemberId] = useState<string | null>(null);
+  const [transferringDmId, setTransferringDmId] = useState<string | null>(null);
   const [memberToRemove, setMemberToRemove] = useState<CampaignMembership | null>(null);
   const [showInviteModal, setShowInviteModal] = useState(false);
 
@@ -93,9 +94,9 @@ export default function CampaignSettingsModal({
       setChatCooldownEnabled(campaign.chatCooldownEnabled);
       setChatCooldownSeconds(campaign.chatCooldownSeconds);
       setDeleteConfirmName('');
-      setActiveTab('general');
+      setActiveTab(user && isCampaignDm(campaign, user.id) ? 'general' : 'members');
     }
-  }, [isOpen, campaign]);
+  }, [isOpen, campaign, user]);
 
   if (!campaign) return null;
 
@@ -160,6 +161,19 @@ export default function CampaignSettingsModal({
     }
   };
 
+  const handleTransferDm = async (membership: CampaignMembership) => {
+    setTransferringDmId(membership.userId);
+    try {
+      await api.transferDM(campaign.id, membership.userId);
+      await refreshCampaign();
+      showToast('DM role transferred', 'success');
+    } catch (err: any) {
+      showToast(err.response?.data?.message ?? 'Failed to transfer DM role', 'error');
+    } finally {
+      setTransferringDmId(null);
+    }
+  };
+
   const handleConfirmRemoveMember = async () => {
     if (!memberToRemove) return;
     setRemovingMemberId(memberToRemove.userId);
@@ -214,8 +228,7 @@ export default function CampaignSettingsModal({
   const actorCanDeleteCampaign = !!user && canDeleteCampaign(campaign, user);
   const deleteNameMatches = deleteConfirmName.trim() === campaign.name;
   const settingsTabs: { id: SettingsTab; label: string }[] = [
-    { id: 'general', label: 'General' },
-    { id: 'chat', label: 'Chat' },
+    ...(actorIsDm ? [{ id: 'general' as const, label: 'General' }, { id: 'chat' as const, label: 'Chat' }] : []),
     { id: 'members', label: 'Members' },
     ...(actorCanDeleteCampaign
       ? [{ id: 'danger' as const, label: 'Danger Zone' }]
@@ -271,7 +284,7 @@ export default function CampaignSettingsModal({
                       className={`px-3 py-1.5 text-sm font-medium rounded-lg transition-colors ${
                         activeTab === tab.id
                           ? tab.id === 'danger'
-                            ? 'bg-red-500/10 text-red-600 border border-red-500/20'
+                            ? 'bg-danger/10 text-danger-ink border border-danger/20'
                             : 'bg-moss-green/15 text-moss-green border border-moss-green/20'
                           : 'text-stone-gray hover:bg-warm-gray/10'
                       }`}
@@ -293,7 +306,7 @@ export default function CampaignSettingsModal({
                         htmlFor="cs-name"
                         className="block text-sm font-semibold text-stone-gray mb-1.5"
                       >
-                        Campaign Name <span className="text-red-500">*</span>
+                        Campaign Name <span className="text-danger-ink">*</span>
                       </label>
                       <input
                         id="cs-name"
@@ -502,14 +515,14 @@ export default function CampaignSettingsModal({
                         <Users className="w-4 h-4" />
                         <span>{memberships.length} member{memberships.length !== 1 ? 's' : ''}</span>
                       </div>
-                      <Button
+                      {actorIsDm && <Button
                         type="button"
                         onClick={() => setShowInviteModal(true)}
                         variant="secondary" className="flex items-center gap-2 text-sm"
                       >
                         <UserPlus className="w-4 h-4" />
                         Invite Player
-                      </Button>
+                      </Button>}
                     </div>
 
                     {/* Member list */}
@@ -518,16 +531,24 @@ export default function CampaignSettingsModal({
                         const isSelf = membership.userId === user?.id;
                         const isOwner = membership.userId === campaign.ownerId;
                         const isDm = membership.role === 'DM';
+                        const isProtectedDm = isDm && membership.isProtectedDm === true;
                         const isRemoving = removingMemberId === membership.userId;
                         const isChanging = changingMemberId === membership.userId;
                         const canChangeRole =
                           !isOwner &&
+                          !isProtectedDm &&
                           (isDm
                             ? actorCanManageDmRoles
                             : actorIsDm || actorCanManageDmRoles);
                         const canRemove =
                           !!user &&
+                          !isProtectedDm &&
                           canRemoveCampaignMember(campaign, user, membership);
+                        const soleDm = memberships.filter((member) => member.role === 'DM');
+                        const protectedDm = soleDm.some((member) => member.isProtectedDm);
+                        const canTransferDm =
+                          !isDm && soleDm.length === 1 && !protectedDm &&
+                          (actorIsDm || actorCanManageDmRoles);
 
                         return (
                           <div
@@ -554,6 +575,17 @@ export default function CampaignSettingsModal({
                             </div>
 
                             <div className="flex items-center gap-2 flex-shrink-0">
+                              {canTransferDm && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleTransferDm(membership)}
+                                  disabled={transferringDmId === membership.userId}
+                                  className="px-2 py-1 rounded-lg text-xs text-spirit-purple hover:bg-spirit-purple/10 disabled:opacity-40"
+                                  aria-label={`Transfer DM role to ${membership.user?.displayName ?? 'member'}`}
+                                >
+                                  {transferringDmId === membership.userId ? 'Transferring…' : 'Transfer DM'}
+                                </button>
+                              )}
                               {canChangeRole ? (
                                 <select
                                   aria-label={`Role for ${membership.user?.displayName ?? 'member'}`}
@@ -604,7 +636,7 @@ export default function CampaignSettingsModal({
                                   type="button"
                                   onClick={() => handleRemoveMemberClick(membership)}
                                   disabled={isRemoving}
-                                  className="p-1.5 rounded-lg text-red-400 hover:text-red-600 hover:bg-red-50 transition-colors disabled:opacity-40"
+                                  className="p-1.5 rounded-lg text-danger-ink hover:text-danger-ink hover:bg-danger/10 transition-colors disabled:opacity-40"
                                   aria-label={`Remove ${membership.user?.displayName} from campaign`}
                                 >
                                   {isRemoving ? (
@@ -625,17 +657,17 @@ export default function CampaignSettingsModal({
                 {/* ════ DANGER ZONE TAB ════ */}
                 {actorCanDeleteCampaign && activeTab === 'danger' && (
                   <div className="space-y-4">
-                    <div className="p-4 rounded-lg bg-red-50 border border-red-200">
+                    <div className="p-4 rounded-lg bg-danger/10 border border-danger/30">
                       <div className="flex items-start gap-3 mb-4">
-                        <AlertTriangle className="w-5 h-5 text-red-600 flex-shrink-0 mt-0.5" />
+                        <AlertTriangle className="w-5 h-5 text-danger-ink flex-shrink-0 mt-0.5" />
                         <div>
-                          <h3 className="text-sm font-bold text-red-800 mb-1">Delete Campaign</h3>
-                          <p className="text-sm text-red-700">
+                          <h3 className="text-sm font-bold text-danger-ink mb-1">Delete Campaign</h3>
+                          <p className="text-sm text-danger-ink">
                             Permanently deletes this campaign and all associated maps, tokens, chat
                             history, and session records. Characters and uploaded assets are{' '}
                             <strong>not</strong> deleted — they remain in your library.
                           </p>
-                          <p className="text-sm text-red-700 mt-2">
+                          <p className="text-sm text-danger-ink mt-2">
                             This action <strong>cannot be undone</strong>.
                           </p>
                         </div>
@@ -645,16 +677,16 @@ export default function CampaignSettingsModal({
                         <div>
                           <label
                             htmlFor="cs-delete-confirm"
-                            className="block text-sm font-semibold text-red-800 mb-1.5"
+                            className="block text-sm font-semibold text-danger-ink mb-1.5"
                           >
-                            Type <span className="font-mono bg-red-100 px-1 rounded">{campaign.name}</span> to confirm:
+                            Type <span className="font-mono bg-danger/10 px-1 rounded">{campaign.name}</span> to confirm:
                           </label>
                           <input
                             id="cs-delete-confirm"
                             type="text"
                             value={deleteConfirmName}
                             onChange={(e) => setDeleteConfirmName(e.target.value)}
-                            className="input-cozy w-full border-red-300 focus:border-red-500 focus:ring-red-500/20"
+                            className="input-cozy w-full border-danger/30 focus:border-danger focus:ring-danger/20"
                             placeholder={campaign.name}
                             autoComplete="off"
                           />

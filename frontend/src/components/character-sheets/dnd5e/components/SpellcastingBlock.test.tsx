@@ -19,7 +19,17 @@ vi.mock('../../../../services/api', () => ({
 
 const spellcasting = {
   class: 'Wizard', ability: 'INT', spellSaveDC: 13, spellAttackBonus: 5,
-  cantrips: ['Light'], slots: { '1': { total: 2, expended: 0 } } as any,
+  cantrips: ['Light'], slots: {
+    '1': { total: 2, expended: 0 },
+    '2': { total: 0, expended: 0 },
+    '3': { total: 0, expended: 0 },
+    '4': { total: 0, expended: 0 },
+    '5': { total: 0, expended: 0 },
+    '6': { total: 0, expended: 0 },
+    '7': { total: 0, expended: 0 },
+    '8': { total: 0, expended: 0 },
+    '9': { total: 0, expended: 0 },
+  },
   spells: [{ level: 1, name: 'Magic Missile', prepared: true, ritual: false, concentration: false }],
 };
 

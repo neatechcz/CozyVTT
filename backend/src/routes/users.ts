@@ -1,9 +1,12 @@
 import { Router, Request, Response } from 'express';
 import { requireAuth, requireAdmin } from '../middleware/auth';
 import { prisma } from '../config/database';
+import type { Prisma } from '@prisma/client';
+import { toJson } from '../utils/prisma-json';
 import { sanitizeUser, hashPassword } from '../services/auth';
 import { validateEmail, sanitizeInput } from '../utils/validation';
 import { isSmtpConfigured, sendPasswordResetEmail } from '../services/email';
+import { destroyUserLoginSessions } from '../services/sessionStore';
 import { UpdateUserPreferencesSchema, type UserPreferences } from '../validators/userPreferences';
 import crypto from 'crypto';
 import logger from '../utils/logger';
@@ -91,7 +94,15 @@ router.put('/:id', requireAuth, async (req: Request, res: Response) => {
     const { id } = req.params;
     const requestingUserId = req.session.userId;
     const isAdmin = req.session.platformRole === 'ADMIN';
-    const { displayName, email, avatarUrl, platformRole, bio, globalAssetManager } = req.body;
+    const {
+      displayName,
+      email,
+      avatarUrl,
+      platformRole,
+      bio,
+      globalAssetManager,
+      templateEditor,
+    } = req.body;
 
     // Check authorization: user can only update their own profile unless admin
     if (id !== requestingUserId && !isAdmin) {
@@ -114,7 +125,7 @@ router.put('/:id', requireAuth, async (req: Request, res: Response) => {
     }
 
     // Build update data
-    const updateData: any = {};
+    const updateData: Prisma.UserUpdateInput = {};
 
     if (displayName !== undefined) {
       updateData.displayName = sanitizeInput(displayName);
@@ -195,11 +206,42 @@ router.put('/:id', requireAuth, async (req: Request, res: Response) => {
       updateData.globalAssetManager = globalAssetManager;
     }
 
+    // Only admins can grant/revoke templateEditor
+    if (templateEditor !== undefined) {
+      if (!isAdmin) {
+        return res.status(403).json({
+          error: 'Forbidden',
+          message: 'Only admins can update the template editor permission',
+        });
+      }
+
+      if (typeof templateEditor !== 'boolean') {
+        return res.status(400).json({
+          error: 'Bad Request',
+          message: 'templateEditor must be a boolean',
+        });
+      }
+
+      updateData.templateEditor = templateEditor;
+    }
+
     // Perform update
     const updatedUser = await prisma.user.update({
       where: { id },
       data: updateData,
     });
+
+    // The session carries platformRole from the moment it was created and
+    // nothing re-reads it, so a demotion would otherwise leave the person
+    // holding admin until they signed out. Compared against what was stored, so
+    // setting the role to what it already was signs nobody out.
+    //
+    // globalAssetManager and templateEditor are deliberately not session fields
+    // and are read from the database where they are used, so changing one
+    // already takes effect on the next request and needs no sign-out.
+    if (updateData.platformRole !== undefined && updateData.platformRole !== existingUser.platformRole) {
+      await destroyUserLoginSessions(id);
+    }
 
     return res.status(200).json({
       message: 'User updated successfully',
@@ -305,7 +347,7 @@ router.put('/:id/preferences', requireAuth, async (req: Request, res: Response) 
 
     const updated = await prisma.user.update({
       where: { id },
-      data: { preferences: merged as any },
+      data: { preferences: toJson(merged) },
       select: { id: true, preferences: true },
     });
 
@@ -364,6 +406,10 @@ router.delete('/:id', requireAuth, requireAdmin, async (req: Request, res: Respo
       where: { id },
     });
 
+    // The session outlives the row it refers to, and the guards read the
+    // session, so it has to go too.
+    await destroyUserLoginSessions(id);
+
     return res.status(200).json({
       message: 'User deleted successfully',
       deletedUserAssetCount: userAssetCount,
@@ -414,11 +460,16 @@ router.post('/:id/reset-password', requireAuth, requireAdmin, async (req: Reques
       },
     });
 
+    // End any sessions the user already has open — otherwise they keep full
+    // access on the old session and the forced-change gate would only take
+    // effect at their next login
+    await destroyUserLoginSessions(id);
+
     return res.status(200).json({
       message: 'Password reset successfully',
       temporaryPassword,
       mustChangePassword: true,
-      notice: 'This temporary password will only be displayed once. The user will be required to change it on next login.',
+      notice: 'This temporary password will only be displayed once. The user will be required to change it on next login, and any active sessions have been signed out.',
     });
   } catch (error) {
     logger.error('Error resetting password', { err: error });

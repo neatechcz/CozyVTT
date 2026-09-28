@@ -5,38 +5,81 @@ import type { DiceRolledEvent } from '@/types';
 interface DiceResultProps {
   roll: DiceRolledEvent;
   isCurrentUser: boolean;
+  /**
+   * Whether the person who rolled is a DM of this campaign. Read from the
+   * campaign's own membership list rather than sent with the roll, so it
+   * cannot be claimed by whoever is rolling.
+   */
+  rollerIsDM?: boolean;
 }
 
 /**
  * Display a single dice roll result with breakdown and animations
  */
-export default function DiceResult({ roll, isCurrentUser }: DiceResultProps) {
+export default function DiceResult({ roll, isCurrentUser, rollerIsDM }: DiceResultProps) {
   const { userName, characterName, expression, result, breakdown, purpose, timestamp, secret } = roll;
 
+  /**
+   * A roll is about a character or a creature; the person who pressed the
+   * button is context for it. Heading every entry with the roller meant a DM
+   * covering for an absent player, or working through a room of NPCs, produced
+   * a list that read as though the DM had rolled for themselves throughout.
+   *
+   * Whoever rolled is still named — the point is to show both, in the order
+   * that answers "who is this roll for?" first.
+   */
+  const subject = characterName || userName;
+  const attribution = characterName
+    // Once the heading is a character, "(You)" would read as *being* them, so
+    // the tag names the action instead: who pressed the button, not who it is.
+    ? isCurrentUser
+      ? '(you rolled)'
+      : rollerIsDM
+        ? '(DM rolled)'
+        : `(rolled by ${userName})`
+    // A plain dice-panel roll still heads with the person, where "(You)" is
+    // about identity and reads correctly.
+    : isCurrentUser
+      ? '(You)'
+      : null;
+
+  /**
+   * `breakdown` is a JSON column, so its type is a promise rather than a
+   * guarantee — it is erased before the value is ever read. A row written by an
+   * older version, restored from another instance, or imported can arrive
+   * without `rolls`, and this component used to throw on it. Because the error
+   * boundary sits at the page level, one such row took down the whole campaign:
+   * no map, no roster, no chat.
+   *
+   * A roll that cannot be drawn in full still shows its expression and total,
+   * which is the part anyone actually reads.
+   */
+  const detail = Array.isArray(breakdown?.rolls) ? breakdown.rolls : [];
+
   // Determine if critical success or fail (for d20 rolls)
-  const isCriticalSuccess = breakdown.rolls.some(
+  const isCriticalSuccess = detail.some(
     (r) => r.notation === '1d20' && r.results?.includes(20)
   );
-  const isCriticalFail = breakdown.rolls.some(
+  const isCriticalFail = detail.some(
     (r) => r.notation === '1d20' && r.results?.includes(1)
   );
 
   // Color scheme based on result type
   const getResultColor = () => {
-    if (isCriticalSuccess) return 'text-green-700 dark:text-green-600';
-    if (isCriticalFail) return 'text-red-600 dark:text-red-400';
+    if (isCriticalSuccess) return 'text-success-ink dark:text-success-ink';
+    if (isCriticalFail) return 'text-danger-ink dark:text-danger-ink';
     return 'text-ink';
   };
 
   const getBorderColor = () => {
-    if (isCriticalSuccess) return 'border-green-500/30';
-    if (isCriticalFail) return 'border-red-500/30';
+    if (isCriticalSuccess) return 'border-success/30';
+    if (isCriticalFail) return 'border-danger/30';
     return 'border-ink-muted/20';
   };
 
   const getBgColor = () => {
-    if (isCriticalSuccess) return 'bg-green-50/50 dark:bg-green-900/20';
-    if (isCriticalFail) return 'bg-red-50/50 dark:bg-red-900/20';
+    if (isCriticalSuccess) return 'bg-success/10 dark:bg-success/20';
+    if (isCriticalFail) return 'bg-danger/10 dark:bg-danger/20';
     return isCurrentUser
       ? 'bg-moss-green/10'
       : 'bg-surface/30';
@@ -69,17 +112,31 @@ export default function DiceResult({ roll, isCurrentUser }: DiceResultProps) {
           <div className="flex items-center gap-2 mb-1">
             <User className="w-4 h-4 flex-shrink-0 text-ink-secondary" />
             <span className="font-medium text-sm text-ink truncate">
-              {userName}
-              {isCurrentUser && <span className="ml-1 text-xs opacity-60">(You)</span>}
-              {secret && !isCurrentUser && (
-                <span className="ml-2 text-xs bg-ink/10 text-ink-muted px-2 py-0.5 rounded">
-                  🔒 Secret (DM View)
+              {subject}
+              {/* Every secret roll in the list is labelled, whoever is looking.
+                  It used to be marked only on someone *else's* roll — the DM's
+                  audit view — which left your own secret rolls indistinguishable
+                  from open ones now that they appear in the list at all.
+
+                  The wording differs because the two cases mean different
+                  things: yours is hidden from the other players, and the one
+                  you are reading as DM is somebody else's. */}
+              {secret && (
+                <span
+                  className="ml-2 text-xs bg-ink/10 text-ink-muted px-2 py-0.5 rounded"
+                  title={
+                    isCurrentUser
+                      ? 'Hidden from the other players — your DM can still see it'
+                      : 'A player rolled this secretly; you see it as DM'
+                  }
+                >
+                  🔒 {isCurrentUser ? 'Secret' : 'Secret (DM view)'}
                 </span>
               )}
             </span>
-            {characterName && (
-              <span className="text-xs text-ink-secondary truncate">
-                as {characterName}
+            {attribution && (
+              <span className="text-xs text-ink-secondary truncate opacity-70">
+                {attribution}
               </span>
             )}
           </div>
@@ -100,7 +157,7 @@ export default function DiceResult({ roll, isCurrentUser }: DiceResultProps) {
       {/* Expression and Result */}
       <div className="flex items-center gap-3 mb-2">
         <div className="flex items-center gap-2">
-          <Dices className="w-5 h-5 text-moss-green" />
+          <Dices className="w-5 h-5 text-brand-ink" />
           <span className="text-sm font-mono text-ink/90">
             {expression}
           </span>
@@ -122,14 +179,16 @@ export default function DiceResult({ roll, isCurrentUser }: DiceResultProps) {
       <div className="mt-2 pt-2 border-t border-current/10">
         <div className="text-xs text-ink-secondary space-y-1">
           {/* Formula */}
-          <div className="font-mono">
-            <span className="opacity-60">Formula: </span>
-            {breakdown.formula}
-          </div>
+          {breakdown?.formula && (
+            <div className="font-mono">
+              <span className="opacity-60">Formula: </span>
+              {breakdown.formula}
+            </div>
+          )}
 
           {/* Individual dice rolls */}
           <div className="flex flex-wrap gap-2 mt-2">
-            {breakdown.rolls.map((roll, idx) => (
+            {detail.map((roll, idx) => (
               <div key={idx} className="flex items-center gap-1">
                 {roll.type === 'dice' && roll.notation && (
                   <div className="inline-flex items-center gap-1 bg-ink/5 px-2 py-1 rounded">
@@ -146,8 +205,8 @@ export default function DiceResult({ roll, isCurrentUser }: DiceResultProps) {
                             className={`
                               font-mono text-xs px-1 rounded
                               ${!isKept ? 'line-through opacity-40' : ''}
-                              ${isCrit20 ? 'bg-green-500/20 text-green-800 dark:text-green-500 font-bold' : ''}
-                              ${isCrit1 ? 'bg-red-500/20 text-red-700 dark:text-red-300 font-bold' : ''}
+                              ${isCrit20 ? 'bg-success/20 text-success-ink dark:text-success-ink font-bold' : ''}
+                              ${isCrit1 ? 'bg-danger/20 text-danger-ink dark:text-danger-ink font-bold' : ''}
                             `}
                           >
                             {r}
@@ -184,8 +243,8 @@ export default function DiceResult({ roll, isCurrentUser }: DiceResultProps) {
           transition={{ duration: 0.3, delay: 0.2 }}
           className={`
             mt-2 pt-2 border-t text-center text-sm font-bold
-            ${isCriticalSuccess ? 'text-green-700 dark:text-green-600 border-green-500/20' : ''}
-            ${isCriticalFail ? 'text-red-600 dark:text-red-400 border-red-500/20' : ''}
+            ${isCriticalSuccess ? 'text-success-ink dark:text-success-ink border-success/20' : ''}
+            ${isCriticalFail ? 'text-danger-ink dark:text-danger-ink border-danger/20' : ''}
           `}
         >
           {isCriticalSuccess && '🎉 CRITICAL SUCCESS!'}

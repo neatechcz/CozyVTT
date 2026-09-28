@@ -1,6 +1,10 @@
 /// <reference path="../types/express.d.ts" />
 import { Router, Request, Response } from 'express';
-import { isSetupCompleted, markSetupCompleted, hasUsers } from '../services/systemSettings';
+import {
+  isSetupCompleted,
+  markSetupCompleted,
+  hasUsers,
+} from '../services/systemSettings';
 import { registerUser, sanitizeUser } from '../services/auth';
 import { sanitizeInput, validateEmail, validatePasswordStrength } from '../utils/validation';
 import logger from '../utils/logger';

@@ -7,42 +7,31 @@
 import { useState, useEffect } from 'react';
 import { useCampaign } from '@/contexts/CampaignContext';
 import { useWebSocket } from '@/contexts/WebSocketContext';
+import { useGameStore } from '@/stores/gameStore';
+import { characterTokenDrag, characterTokenRequest } from '@/utils/characterTokenDrag';
 import { useAuth } from '@/contexts/AuthContext';
 import { api } from '@/services/api';
-import { canEditCharacter, canRollAsCharacter, canViewCharacter } from '@/services/permissions';
-import { Users, Crown, Gamepad2, Eye, Edit, UserPlus, X, Minus, Plus, Dices } from 'lucide-react';
+import { canRollAsCharacter } from '@/services/permissions';
+import { Users, Crown, Gamepad2, Eye, Edit, X, Minus, Plus, Dices, MapPin } from 'lucide-react';
+import type { LucideIcon } from 'lucide-react';
 import type { CharacterHpInfo } from '@/utils/characterHp';
 import CharacterSheetViewerModal from '../character/CharacterSheetViewerModal';
 import CharacterSheetEditorModal from '../character/CharacterSheetEditorModal';
 import CharacterContextMenu from './CharacterContextMenu';
 import CharacterRollPicker from './CharacterRollPicker';
-import CharacterControllerModal from './CharacterControllerModal';
 import Toast, { useToast } from '@/components/Toast';
 import ConfirmDialog from '@/components/common/ConfirmDialog';
-import type { CampaignRole, GameSystem, Character } from '@/types';
-
-interface RosterMember {
-  userId: string;
-  userName: string;
-  userAvatar: string | null;
-  role: CampaignRole;
-  joinedAt: string;
-  characters: {
-    id: string;
-    name: string;
-    tokenImageUrl: string | null;
-    gameSystem: GameSystem | null;
-    userId: string;
-    hp: CharacterHpInfo | null;
-  }[];
-}
+import type { CampaignRole, GameSystem, Character, RosterMember } from '@/types';
+import { TokenLayer } from '@/types';
 
 export default function CampaignRoster() {
-  const { campaign, userRole, characterHpCache, seedCharacterHpCache, refreshCampaign } = useCampaign();
+  const { campaign, currentMap, userRole, characterHpCache, seedCharacterHpCache } = useCampaign();
   const { socket } = useWebSocket();
   const { user } = useAuth();
   const { toast, showToast, hideToast } = useToast();
   const [roster, setRoster] = useState<RosterMember[]>([]);
+  // User IDs with at least one live connection to this campaign.
+  const [onlineUserIds, setOnlineUserIds] = useState<Set<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [selectedCharacter, setSelectedCharacter] = useState<Character | null>(null);
   const [editorCharacter, setEditorCharacter] = useState<Character | null>(null);
@@ -50,8 +39,6 @@ export default function CampaignRoster() {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; characterId: string; characterUserId: string } | null>(null);
   const [rollPicker, setRollPicker] = useState<{ x: number; y: number; characterId: string } | null>(null);
   const [confirmRemove, setConfirmRemove] = useState(false);
-  const [assigningCharacter, setAssigningCharacter] = useState<{ id: string; name: string } | null>(null);
-  const [savingController, setSavingController] = useState(false);
 
   // Fetch roster data
   const fetchRoster = async () => {
@@ -63,7 +50,7 @@ export default function CampaignRoster() {
       setRoster(response.roster);
 
       // Seed the HP cache in CampaignContext so MapCanvas can render player HP bars
-      const hpEntries = response.roster.flatMap((m: RosterMember) =>
+      const hpEntries = response.roster.flatMap((m) =>
         m.characters.map((c) => ({ id: c.id, hp: c.hp }))
       );
       seedCharacterHpCache(hpEntries);
@@ -85,7 +72,6 @@ export default function CampaignRoster() {
     const handleRosterUpdate = () => {
       console.log('Roster updated - refetching...');
       fetchRoster();
-      void refreshCampaign();
     };
 
     socket.on('roster.updated', handleRosterUpdate);
@@ -93,7 +79,32 @@ export default function CampaignRoster() {
     return () => {
       socket.off('roster.updated', handleRosterUpdate);
     };
-  }, [socket, campaign?.id, refreshCampaign]);
+  }, [socket, campaign?.id]);
+
+  // Who is connected right now, shown as a dot beside each member. This is what
+  // replaced the "X has joined / has left" chat messages.
+  //
+  // The server sends the whole set on every join and leave rather than deltas,
+  // so this cannot drift out of step after a missed event — and a user with two
+  // tabs open appears once and stays online until the last one closes.
+  useEffect(() => {
+    if (!socket || !campaign?.id) return;
+
+    const handlePresence = (data: { campaignId: string; onlineUserIds: string[] }) => {
+      if (data?.campaignId !== campaign.id) return;
+      setOnlineUserIds(new Set(data.onlineUserIds ?? []));
+    };
+
+    socket.onPresenceState(handlePresence);
+    // Ask for the current set: the push that accompanied our own connection may
+    // have happened before this component mounted, which would otherwise leave
+    // every member showing offline until somebody joined or left.
+    socket.requestPresence();
+
+    return () => {
+      socket.off('presence.state', handlePresence);
+    };
+  }, [socket, campaign?.id]);
 
   // Handle character click - fetch full character and open viewer
   const handleCharacterClick = async (characterId: string) => {
@@ -166,25 +177,48 @@ export default function CampaignRoster() {
     socket?.emitCharacterHpUpdate({ characterId, delta });
   };
 
-  const handleReassignCharacter = () => {
-    if (!contextMenu) return;
-    const character = roster.flatMap((member) => member.characters).find((item) => item.id === contextMenu.characterId);
-    if (character) setAssigningCharacter({ id: character.id, name: character.name });
-  };
+  /**
+   * Put a character on the map from the roster.
+   *
+   * The drag works too, but only if you can see both the roster and the map at
+   * once — and it is the only way there was, so a DM with the roster open over
+   * the map had no way to place anyone. Placed at the centre of the map, the
+   * same as the creature library, because a menu click has no cursor position.
+   */
+  const handleAddTokenToMap = async () => {
+    if (!contextMenu || !campaign || !currentMap) return;
+    const character = roster
+      .flatMap((member) => member.characters)
+      .find((c) => c.id === contextMenu.characterId);
+    handleCloseContextMenu();
+    if (!character) return;
 
-  const handleSaveController = async (userId: string | null) => {
-    if (!campaign || !assigningCharacter) return;
-    setSavingController(true);
+    const position = {
+      x: Math.floor(currentMap.width / 2),
+      y: Math.floor(currentMap.height / 2),
+    };
+
     try {
-      await api.setCharacterController(campaign.id, assigningCharacter.id, userId);
-      await Promise.all([fetchRoster(), refreshCampaign()]);
-      setAssigningCharacter(null);
-      showToast('Character access updated', 'success');
+      const result = await api.addToken(
+        campaign.id,
+        currentMap.id,
+        characterTokenRequest(
+          characterTokenDrag({
+            id: character.id,
+            name: character.name,
+            tokenImageUrl: character.tokenImageUrl,
+            userId: character.userId,
+          }),
+          position,
+          TokenLayer.TOKEN,
+        ),
+      );
+      useGameStore.getState().addToken(result.token);
+      socket?.emitMapChange(currentMap.id);
+      showToast(`${character.name} placed on the map`, 'success');
     } catch (error) {
-      console.error('Failed to assign character controller:', error);
-      showToast('Could not update character access', 'error');
-    } finally {
-      setSavingController(false);
+      console.error('Failed to place character on map:', error);
+      showToast('Could not place that character on the map', 'error');
     }
   };
 
@@ -223,13 +257,13 @@ export default function CampaignRoster() {
   const getSystemBadgeColor = (gameSystem: GameSystem | null) => {
     switch (gameSystem) {
       case 'DND_5E':
-        return 'bg-red-100 text-red-700';
+        return 'bg-danger/10 text-danger-ink';
       case 'PATHFINDER_2E':
-        return 'bg-blue-100 text-blue-700';
+        return 'bg-info/10 text-info-ink';
       case 'SHADOWRUN_6E':
-        return 'bg-purple-100 text-purple-700';
+        return 'bg-spirit/10 text-spirit-ink';
       case 'CALL_OF_CTHULHU_7E':
-        return 'bg-green-100 text-green-700';
+        return 'bg-success/10 text-success-ink';
       default:
         return 'bg-ink/10 text-ink';
     }
@@ -263,8 +297,8 @@ export default function CampaignRoster() {
     <div className="glass-panel p-4 space-y-4">
       {/* Header */}
       <div className="flex items-center gap-2 pb-2 border-b border-moss-green/20">
-        <Users className="w-5 h-5 text-moss-green" />
-        <h3 className="text-lg font-semibold text-moss-green">Campaign Roster</h3>
+        <Users className="w-5 h-5 text-brand-ink" />
+        <h3 className="text-lg font-semibold text-brand-ink">Campaign Roster</h3>
       </div>
 
       {loading ? (
@@ -280,12 +314,12 @@ export default function CampaignRoster() {
           {/* DM Section */}
           {groupedRoster.DM.length > 0 && (
             <div>
-              <h4 className="text-xs font-semibold text-moss-green/60 uppercase tracking-wider mb-2">
+              <h4 className="text-xs font-semibold text-brand-ink/60 uppercase tracking-wider mb-2">
                 Dungeon Master
               </h4>
               <div className="space-y-2">
                 {groupedRoster.DM.map((member) => (
-                  <MemberCard key={member.userId} member={member} getRoleIcon={getRoleIcon} getSystemBadgeColor={getSystemBadgeColor} getSystemShortName={getSystemShortName} onCharacterClick={handleCharacterClick} onCharacterRightClick={handleCharacterRightClick} isDM={userRole === 'DM'} currentUserId={user?.id ?? ''} characterHpCache={characterHpCache} onHpDelta={handleHpDelta} />
+                  <MemberCard key={member.userId} member={member} getRoleIcon={getRoleIcon} getSystemBadgeColor={getSystemBadgeColor} getSystemShortName={getSystemShortName} onCharacterClick={handleCharacterClick} onCharacterRightClick={handleCharacterRightClick} isDM={userRole === 'DM'} currentUserId={user?.id ?? ''} characterHpCache={characterHpCache} onHpDelta={handleHpDelta} isOnline={onlineUserIds.has(member.userId)} />
                 ))}
               </div>
             </div>
@@ -294,12 +328,12 @@ export default function CampaignRoster() {
           {/* Players Section */}
           {groupedRoster.PLAYER.length > 0 && (
             <div>
-              <h4 className="text-xs font-semibold text-moss-green/60 uppercase tracking-wider mb-2">
+              <h4 className="text-xs font-semibold text-brand-ink/60 uppercase tracking-wider mb-2">
                 Players
               </h4>
               <div className="space-y-2">
                 {groupedRoster.PLAYER.map((member) => (
-                  <MemberCard key={member.userId} member={member} getRoleIcon={getRoleIcon} getSystemBadgeColor={getSystemBadgeColor} getSystemShortName={getSystemShortName} onCharacterClick={handleCharacterClick} onCharacterRightClick={handleCharacterRightClick} isDM={userRole === 'DM'} currentUserId={user?.id ?? ''} characterHpCache={characterHpCache} onHpDelta={handleHpDelta} />
+                  <MemberCard key={member.userId} member={member} getRoleIcon={getRoleIcon} getSystemBadgeColor={getSystemBadgeColor} getSystemShortName={getSystemShortName} onCharacterClick={handleCharacterClick} onCharacterRightClick={handleCharacterRightClick} isDM={userRole === 'DM'} currentUserId={user?.id ?? ''} characterHpCache={characterHpCache} onHpDelta={handleHpDelta} isOnline={onlineUserIds.has(member.userId)} />
                 ))}
               </div>
             </div>
@@ -308,12 +342,12 @@ export default function CampaignRoster() {
           {/* Spectators Section */}
           {groupedRoster.SPECTATOR.length > 0 && (
             <div>
-              <h4 className="text-xs font-semibold text-moss-green/60 uppercase tracking-wider mb-2">
+              <h4 className="text-xs font-semibold text-brand-ink/60 uppercase tracking-wider mb-2">
                 Spectators
               </h4>
               <div className="space-y-2">
                 {groupedRoster.SPECTATOR.map((member) => (
-                  <MemberCard key={member.userId} member={member} getRoleIcon={getRoleIcon} getSystemBadgeColor={getSystemBadgeColor} getSystemShortName={getSystemShortName} onCharacterClick={handleCharacterClick} onCharacterRightClick={handleCharacterRightClick} isDM={userRole === 'DM'} currentUserId={user?.id ?? ''} characterHpCache={characterHpCache} onHpDelta={handleHpDelta} />
+                  <MemberCard key={member.userId} member={member} getRoleIcon={getRoleIcon} getSystemBadgeColor={getSystemBadgeColor} getSystemShortName={getSystemShortName} onCharacterClick={handleCharacterClick} onCharacterRightClick={handleCharacterRightClick} isDM={userRole === 'DM'} currentUserId={user?.id ?? ''} characterHpCache={characterHpCache} onHpDelta={handleHpDelta} isOnline={onlineUserIds.has(member.userId)} />
                 ))}
               </div>
             </div>
@@ -342,7 +376,7 @@ export default function CampaignRoster() {
               icon: Eye,
               label: 'View Character Sheet',
               onClick: handleViewCharacterSheet,
-              visible: canViewCharacter(user, { id: contextMenu.characterId, userId: contextMenu.characterUserId }, userMembership),
+              visible: true,
             },
             {
               icon: Dices,
@@ -351,40 +385,37 @@ export default function CampaignRoster() {
                 setRollPicker({ x: contextMenu.x, y: contextMenu.y, characterId: contextMenu.characterId });
                 handleCloseContextMenu();
               },
+              // Rolling uses the sheet's modifiers, so it follows character
+              // ownership the same way Edit below does — not `true`, which let
+              // any member roll anyone's character.
               visible: canRollAsCharacter(user, { id: contextMenu.characterId, userId: contextMenu.characterUserId }, userMembership),
             },
             {
               icon: Edit,
               label: 'Edit Character Sheet',
               onClick: handleEditCharacterSheet,
-              visible: canEditCharacter(user, { id: contextMenu.characterId, userId: contextMenu.characterUserId }, userMembership),
+              visible: user.id === contextMenu.characterUserId || userMembership.role === 'DM',
             },
             {
-              icon: UserPlus,
-              label: 'Assign to Player',
-              onClick: handleReassignCharacter,
-              visible: userMembership.role === 'DM',
+              icon: MapPin,
+              label: 'Add to Map',
+              onClick: handleAddTokenToMap,
+              visible: userMembership.role === 'DM' && !!currentMap,
             },
+            // "Reassign to Player" used to sit here. It never did anything —
+            // it popped "not yet available" — and there is no endpoint behind
+            // it either: /characters/:id/assign moves a character between
+            // *campaigns*, not between owners. Better absent than advertised.
+            // It comes back when the endpoint does.
             {
               icon: X,
               label: 'Remove from Campaign',
               onClick: handleRemoveFromCampaign,
               visible: user.id === contextMenu.characterUserId || userMembership.role === 'DM',
-              className: 'text-red-600 hover:bg-red-50',
+              className: 'text-danger-ink hover:bg-danger/10',
             },
           ]}
           onClose={handleCloseContextMenu}
-        />
-      )}
-
-      {assigningCharacter && (
-        <CharacterControllerModal
-          characterName={assigningCharacter.name}
-          players={roster.filter((member) => member.role === 'PLAYER').map((member) => ({ userId: member.userId, displayName: member.userName }))}
-          selectedUserId={roster.find((member) => member.role === 'PLAYER' && member.characters.some((char) => char.id === assigningCharacter.id))?.userId ?? null}
-          saving={savingController}
-          onSave={handleSaveController}
-          onClose={() => setAssigningCharacter(null)}
         />
       )}
 
@@ -392,10 +423,13 @@ export default function CampaignRoster() {
       {rollPicker && (
         <CharacterRollPicker
           characterId={rollPicker.characterId}
+          onSpendHitDie={(index) =>
+            socket?.emitHitDiceSpend({ characterId: rollPicker.characterId, index })
+          }
           anchorX={rollPicker.x}
           anchorY={rollPicker.y}
-          onRoll={(expression, purpose) => {
-            socket?.emitDiceRoll({ characterId: rollPicker.characterId, expression, purpose });
+          onRoll={(expression, purpose, characterName) => {
+            socket?.emitDiceRoll({ expression, purpose, characterName });
           }}
           onClose={() => setRollPicker(null)}
         />
@@ -427,7 +461,7 @@ export default function CampaignRoster() {
 
 interface MemberCardProps {
   member: RosterMember;
-  getRoleIcon: (role: CampaignRole) => any;
+  getRoleIcon: (role: CampaignRole) => LucideIcon;
   getSystemBadgeColor: (gameSystem: GameSystem | null) => string;
   getSystemShortName: (gameSystem: GameSystem | null) => string;
   onCharacterClick: (characterId: string) => void;
@@ -436,23 +470,43 @@ interface MemberCardProps {
   currentUserId: string;
   characterHpCache: Record<string, CharacterHpInfo>;
   onHpDelta: (characterId: string, delta: number) => void;
+  /** Has at least one live connection to this campaign right now. */
+  isOnline: boolean;
 }
 
-function MemberCard({ member, getRoleIcon, getSystemBadgeColor, getSystemShortName, onCharacterClick, onCharacterRightClick, isDM, currentUserId, characterHpCache, onHpDelta }: MemberCardProps) {
+function MemberCard({ member, getRoleIcon, getSystemBadgeColor, getSystemShortName, onCharacterClick, onCharacterRightClick, isDM, currentUserId, characterHpCache, onHpDelta, isOnline }: MemberCardProps) {
   const RoleIcon = getRoleIcon(member.role);
 
   return (
     <div className="p-2 rounded-lg bg-parchment/50 hover:bg-parchment transition-colors">
       {/* Member Info */}
       <div className="flex items-center gap-2 mb-2">
-        <div
-          className={`p-1.5 rounded-full ${
-            member.role === 'DM' ? 'bg-moss-green/20' : 'bg-spirit-purple/20'
-          }`}
-        >
-          <RoleIcon
-            className={`w-4 h-4 ${
-              member.role === 'DM' ? 'text-moss-green' : 'text-spirit-purple'
+        {/* Presence badge on the role icon. This replaces the "X has joined /
+            left the campaign" chat messages, which fired on every refresh and
+            every brief disconnect.
+
+            The dot is the ONLY thing carrying this meaning here — unlike the
+            header indicators, which sit next to the words "Live"/"Connected" —
+            so colour alone would fail WCAG 1.4.1. Hence the label. No pulse
+            either: a roster can show many of these at once. */}
+        <div className="relative flex-shrink-0">
+          <div
+            className={`p-1.5 rounded-full ${
+              member.role === 'DM' ? 'bg-moss-green/20' : 'bg-spirit-purple/20'
+            }`}
+          >
+            <RoleIcon
+              className={`w-4 h-4 ${
+                member.role === 'DM' ? 'text-brand-ink' : 'text-spirit-purple'
+              }`}
+            />
+          </div>
+          <span
+            role="img"
+            aria-label={`${member.userName} is ${isOnline ? 'in session' : 'not in session'}`}
+            title={isOnline ? 'In session' : 'Not in session'}
+            className={`absolute -bottom-0.5 -right-0.5 w-2.5 h-2.5 rounded-full border border-parchment ${
+              isOnline ? 'bg-success' : 'bg-stone-gray/50'
             }`}
           />
         </div>
@@ -472,7 +526,12 @@ function MemberCard({ member, getRoleIcon, getSystemBadgeColor, getSystemShortNa
       {member.characters.length > 0 && (
         <div className="ml-9 space-y-1">
           {member.characters.map((character) => {
-            const canDrag = isDM && !!character.tokenImageUrl;
+            // The DM may place any character. This used to also require a token
+            // picture, which meant the handle only existed on characters that
+            // had one — and the handle was the picture, so a character without
+            // one could not be dragged at all. The canvas draws an imageless
+            // token as a lettered circle, so there is nothing to gate on.
+            const canDrag = isDM;
             return (
             <div
               key={character.id}
@@ -481,31 +540,30 @@ function MemberCard({ member, getRoleIcon, getSystemBadgeColor, getSystemShortNa
               <div
                 onClick={() => onCharacterClick(character.id)}
                 onContextMenu={(e) => onCharacterRightClick(e, character.id, character.userId)}
-                className="flex items-center gap-2 p-1.5 cursor-pointer"
+                draggable={canDrag}
+                onDragStart={canDrag ? (e) => {
+                  e.dataTransfer.effectAllowed = 'copy';
+                  e.dataTransfer.setData('text/plain', JSON.stringify(characterTokenDrag({
+                    id: character.id,
+                    name: character.name,
+                    tokenImageUrl: character.tokenImageUrl,
+                    userId: character.userId,
+                  })));
+                } : undefined}
+                title={canDrag ? `Drag ${character.name} onto the map` : undefined}
+                className={`flex items-center gap-2 p-1.5 cursor-pointer ${canDrag ? 'active:cursor-grabbing' : ''}`}
               >
               {/* Character Token — draggable by DM onto map */}
               {character.tokenImageUrl ? (
                 <img
                   src={character.tokenImageUrl}
                   alt={character.name}
-                  draggable={canDrag}
-                  onDragStart={canDrag ? (e) => {
-                    e.stopPropagation();
-                    e.dataTransfer.effectAllowed = 'copy';
-                    e.dataTransfer.setData('text/plain', JSON.stringify({
-                      type: 'character-token',
-                      characterId: character.id,
-                      name: character.name,
-                      imageUrl: character.tokenImageUrl,
-                      userId: character.userId,
-                    }));
-                  } : undefined}
-                  className={`w-6 h-6 rounded-full object-cover border border-moss-green/20 ${canDrag ? 'cursor-grab active:cursor-grabbing' : ''}`}
-                  title={canDrag ? `Drag ${character.name} onto the map` : character.name}
+                  className="w-6 h-6 rounded-full object-cover border border-moss-green/20"
+                  title={character.name}
                 />
               ) : (
                 <div className="w-6 h-6 rounded-full bg-moss-green/10 border border-moss-green/20 flex items-center justify-center">
-                  <span className="text-xs text-moss-green font-semibold">
+                  <span className="text-xs text-brand-ink font-semibold">
                     {character.name.charAt(0).toUpperCase()}
                   </span>
                 </div>
@@ -531,14 +589,13 @@ function MemberCard({ member, getRoleIcon, getSystemBadgeColor, getSystemShortNa
             {/* HP bar + controls — shown when character has HP data and user can edit */}
             {(() => {
               const hp = characterHpCache[character.id] ?? character.hp;
-              const canAdjust = isDM || character.userId === currentUserId ||
-                (member.role === 'PLAYER' && member.userId === currentUserId);
+              const canAdjust = isDM || character.userId === currentUserId;
               if (!hp || hp.max === 0) return null;
               const pct = Math.max(0, Math.min(1, hp.current / hp.max));
-              const barColor = pct >= 0.75 ? 'bg-green-500'
+              const barColor = pct >= 0.75 ? 'bg-success'
                             : pct >= 0.50 ? 'bg-lime-500'
-                            : pct >= 0.25 ? 'bg-amber-500'
-                            :               'bg-red-500';
+                            : pct >= 0.25 ? 'bg-warning'
+                            :               'bg-danger';
               return (
                 <div className="mt-1 space-y-1" onClick={(e) => e.stopPropagation()}>
                   {/* HP progress bar */}
@@ -549,7 +606,7 @@ function MemberCard({ member, getRoleIcon, getSystemBadgeColor, getSystemShortNa
                     />
                     {hp.temp > 0 && (
                       <div
-                        className="h-full rounded-full bg-blue-300/75 -mt-1.5 ml-auto"
+                        className="h-full rounded-full bg-info/75 -mt-1.5 ml-auto"
                         style={{ width: `${Math.min(1, hp.temp / hp.max) * 100}%` }}
                       />
                     )}
@@ -559,26 +616,26 @@ function MemberCard({ member, getRoleIcon, getSystemBadgeColor, getSystemShortNa
                     <div className="flex items-center gap-1">
                       <button
                         onClick={() => onHpDelta(character.id, -5)}
-                        className="flex items-center justify-center w-5 h-5 rounded text-xs font-bold text-stone-gray bg-black/10 hover:bg-red-100 hover:text-red-600 transition-colors"
+                        className="flex items-center justify-center w-5 h-5 rounded text-xs font-bold text-stone-gray bg-black/10 hover:bg-danger/10 hover:text-danger-ink transition-colors"
                         title="−5 HP"
                       >−5</button>
                       <button
                         onClick={() => onHpDelta(character.id, -1)}
-                        className="flex items-center justify-center w-5 h-5 rounded text-stone-gray bg-black/10 hover:bg-red-100 hover:text-red-600 transition-colors"
+                        className="flex items-center justify-center w-5 h-5 rounded text-stone-gray bg-black/10 hover:bg-danger/10 hover:text-danger-ink transition-colors"
                         title="−1 HP"
                       ><Minus className="w-3 h-3" /></button>
                       <span className="flex-1 text-center text-xs font-semibold text-stone-gray">
                         {hp.current}<span className="font-normal text-warm-gray">/{hp.max}</span>
-                        {hp.temp > 0 && <span className="text-blue-500 ml-0.5">+{hp.temp}</span>}
+                        {hp.temp > 0 && <span className="text-info-ink ml-0.5">+{hp.temp}</span>}
                       </span>
                       <button
                         onClick={() => onHpDelta(character.id, 1)}
-                        className="flex items-center justify-center w-5 h-5 rounded text-stone-gray bg-black/10 hover:bg-green-100 hover:text-green-600 transition-colors"
+                        className="flex items-center justify-center w-5 h-5 rounded text-stone-gray bg-black/10 hover:bg-success/10 hover:text-success-ink transition-colors"
                         title="+1 HP"
                       ><Plus className="w-3 h-3" /></button>
                       <button
                         onClick={() => onHpDelta(character.id, 5)}
-                        className="flex items-center justify-center w-5 h-5 rounded text-xs font-bold text-stone-gray bg-black/10 hover:bg-green-100 hover:text-green-600 transition-colors"
+                        className="flex items-center justify-center w-5 h-5 rounded text-xs font-bold text-stone-gray bg-black/10 hover:bg-success/10 hover:text-success-ink transition-colors"
                         title="+5 HP"
                       >+5</button>
                     </div>
@@ -587,7 +644,7 @@ function MemberCard({ member, getRoleIcon, getSystemBadgeColor, getSystemShortNa
                   {!canAdjust && (
                     <p className="text-center text-xs font-semibold text-stone-gray">
                       {hp.current}<span className="font-normal text-warm-gray">/{hp.max}</span>
-                      {hp.temp > 0 && <span className="text-blue-500 ml-0.5">+{hp.temp}</span>}
+                      {hp.temp > 0 && <span className="text-info-ink ml-0.5">+{hp.temp}</span>}
                     </p>
                   )}
                 </div>

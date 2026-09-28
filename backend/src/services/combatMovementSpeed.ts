@@ -155,7 +155,7 @@ function explicitExhaustionLevel(value: unknown): number | null | 'invalid' {
 
 function pcExhaustionLevel(data: Record<string, unknown>): number | null | 'invalid' {
   const survival = isRecord(data.survival) ? data.survival : undefined;
-  return explicitExhaustionLevel(survival?.exhaustionLevel);
+  return explicitExhaustionLevel(survival?.exhaustionLevel ?? data.exhaustionLevel);
 }
 
 function npcExhaustionLevel(actor: Extract<MovementSpeedActor, { kind: 'npc' }>): number | null | 'invalid' {

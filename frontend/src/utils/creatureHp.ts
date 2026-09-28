@@ -19,7 +19,9 @@ export function isPositiveNumber(value: unknown): value is number {
  */
 export function tokenHpForCreature(statBlock: NpcStatBlock | null | undefined): TokenHp {
   const average = statBlock?.hp?.average;
-  const hp = isPositiveNumber(average) ? average : DEFAULT_CREATURE_HP;
+  const hp = isPositiveNumber(average)
+    ? average
+    : isPositiveNumber(statBlock?.hpMax) ? statBlock.hpMax : DEFAULT_CREATURE_HP;
   return { current: hp, max: hp, temp: 0 };
 }
 

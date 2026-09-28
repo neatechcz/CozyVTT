@@ -1,14 +1,16 @@
 /**
  * npcRolls.ts
- * Extracts rollable dice expressions from an NPC token's stat block.
+ * Builds the rollable options offered for an NPC token's stat block.
  *
  * NPC actions are stored as { name, description } pairs — dice formulas live
- * inside the description text. This utility parses those descriptions to
- * surface attack rolls and damage rolls in the same RollOption format used
- * by player characters (see characterRolls.ts).
+ * inside the description text — so attacks and damage are parsed out of that
+ * prose. Abilities, saves and skills come from the structured fields.
  *
- * D&D 5e is fully supported. For other systems or tokens without stat blocks,
- * callers should fall back to a free-form custom roll input.
+ * Dispatches on game system. This previously applied D&D 5e maths to every
+ * system, so a Call of Cthulhu NPC was offered 1d20 + ability modifier rolls
+ * for a game that has neither d20s nor ability modifiers. Systems without a
+ * derived model now return no options and the caller falls back to the
+ * free-form custom roll input, which is honest rather than confidently wrong.
  */
 
 import {
@@ -17,19 +19,22 @@ import {
   isValidDiceExpression,
 } from './characterRolls';
 import type { NpcStatBlock } from '@/types';
+import { isFullNpcStatBlock, type TokenStatBlock } from './npcStatBlock';
+import {
+  ABILITY_KEYS,
+  ABILITY_LABELS,
+  abilityModifier,
+  findSkill,
+  formatModifier,
+  skillLabel,
+} from './rules/dnd5e';
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-function fmt(mod: number): string {
-  return mod >= 0 ? `+${mod}` : `${mod}`;
-}
+// A creature's stat block carries a `hitDice` string for working out its hit
+// points, not a pool it spends on a short rest, so there is nothing to offer.
+const EMPTY_ROLLS: CharacterRolls = { abilities: [], skills: [], savingThrows: [], combat: [], hitDice: [] };
 
 /** D&D 5e ability modifier: floor((score - 10) / 2). */
-export function abilityMod(score: number): number {
-  return Math.floor((score - 10) / 2);
-}
+export { abilityModifier as abilityMod };
 
 /**
  * Extract the first attack bonus ("+N to hit" or "-N to hit") from an
@@ -56,48 +61,7 @@ export function extractDiceExpressions(description: string): string[] {
 }
 
 // ---------------------------------------------------------------------------
-// 5e ability + skill scaffolding
-// ---------------------------------------------------------------------------
-
-const ABILITY_LABELS: Array<[keyof NpcStatBlock['abilities'], string]> = [
-  ['str', 'Strength'],
-  ['dex', 'Dexterity'],
-  ['con', 'Constitution'],
-  ['int', 'Intelligence'],
-  ['wis', 'Wisdom'],
-  ['cha', 'Charisma'],
-];
-
-/** Default ability associated with each named 5e skill. */
-const SKILL_ABILITY: Record<string, keyof NpcStatBlock['abilities']> = {
-  acrobatics: 'dex',
-  'animal handling': 'wis',
-  animalHandling: 'wis',
-  arcana: 'int',
-  athletics: 'str',
-  deception: 'cha',
-  history: 'int',
-  insight: 'wis',
-  intimidation: 'cha',
-  investigation: 'int',
-  medicine: 'wis',
-  nature: 'int',
-  perception: 'wis',
-  performance: 'cha',
-  persuasion: 'cha',
-  religion: 'int',
-  'sleight of hand': 'dex',
-  sleightOfHand: 'dex',
-  stealth: 'dex',
-  survival: 'wis',
-};
-
-function titleCase(s: string): string {
-  return s.replace(/(^|\s|-)\w/g, (c) => c.toUpperCase());
-}
-
-// ---------------------------------------------------------------------------
-// Combat extraction (5e)
+// Combat extraction — shared by the d20 systems
 // ---------------------------------------------------------------------------
 
 type ActionEntry = { name: string; description: string };
@@ -123,8 +87,8 @@ function buildCombatRolls(statBlock: NpcStatBlock): RollOption[] {
       const atkBonus = extractAttackBonus(description);
       if (atkBonus !== null) {
         combat.push({
-          label:             `${name} (Attack ${fmt(atkBonus)})`,
-          expression:        `1d20${fmt(atkBonus)}`,
+          label:             `${name} (Attack ${formatModifier(atkBonus)})`,
+          expression:        `1d20${formatModifier(atkBonus)}`,
           purpose:           `${name} Attack`,
           supportsAdvantage: true,
         });
@@ -153,69 +117,176 @@ function buildCombatRolls(statBlock: NpcStatBlock): RollOption[] {
 }
 
 // ---------------------------------------------------------------------------
-// Public API
+// D&D 5e
 // ---------------------------------------------------------------------------
 
-/**
- * Build the full set of rollable options for an NPC stat block.
- * Currently models 5e ability/save/skill math; works as a sensible default
- * for any d20-style system.
- */
-export function buildNpcRolls(statBlock: NpcStatBlock | null | undefined): CharacterRolls {
-  if (!statBlock) {
-    return { abilities: [], skills: [], savingThrows: [], combat: [] };
-  }
-
+function buildDnd5eRolls(statBlock: NpcStatBlock): CharacterRolls {
   const abilities:    RollOption[] = [];
   const skills:       RollOption[] = [];
   const savingThrows: RollOption[] = [];
 
-  // Ability checks
-  for (const [key, name] of ABILITY_LABELS) {
-    const score = statBlock.abilities?.[key] ?? 10;
-    const mod = abilityMod(score);
+  const proficientSaves = statBlock.proficiencies?.saves ?? {};
+  const proficientSkills = statBlock.proficiencies?.skills ?? {};
+
+  // Ability checks — always all six.
+  for (const ability of ABILITY_KEYS) {
+    const mod = abilityModifier(statBlock.abilities?.[ability] ?? 10);
     abilities.push({
-      label:             `${key.toUpperCase()} ${fmt(mod)}`,
-      expression:        `1d20${fmt(mod)}`,
-      purpose:           `${name} Check`,
+      label:             `${ability.toUpperCase()} ${formatModifier(mod)}`,
+      expression:        `1d20${formatModifier(mod)}`,
+      purpose:           `${ABILITY_LABELS[ability]} Check`,
       supportsAdvantage: true,
     });
   }
 
-  // Saving throws — explicit overrides, falling back to ability modifier
-  // for the six core abilities so the DM always has all six available.
-  const saveOverrides = statBlock.savingThrows || {};
-  for (const [key, name] of ABILITY_LABELS) {
-    const override = saveOverrides[key];
-    const bonus = typeof override === 'number'
-      ? override
-      : abilityMod(statBlock.abilities?.[key] ?? 10);
-    const isProficient = typeof override === 'number';
+  // Saving throws — all six, using the stored total where the creature is
+  // proficient and the bare ability modifier otherwise, so the DM always has
+  // every save available.
+  const storedSaves = statBlock.savingThrows ?? {};
+  for (const ability of ABILITY_KEYS) {
+    const stored = storedSaves[ability];
+    const hasBonus = typeof stored === 'number';
+    const bonus = hasBonus ? stored : abilityModifier(statBlock.abilities?.[ability] ?? 10);
+    const level = proficientSaves[ability];
+    const marker = level === 'expertise' ? ' ◆' : hasBonus ? ' ●' : '';
+
     savingThrows.push({
-      label:             `${name} Save ${fmt(bonus)}${isProficient ? ' ●' : ''}`,
-      expression:        `1d20${fmt(bonus)}`,
-      purpose:           `${name} Saving Throw`,
+      label:             `${ABILITY_LABELS[ability]} Save ${formatModifier(bonus)}${marker}`,
+      expression:        `1d20${formatModifier(bonus)}`,
+      purpose:           `${ABILITY_LABELS[ability]} Saving Throw`,
       supportsAdvantage: true,
     });
   }
 
-  // Skills — only the skills the DM has explicitly added bonuses for.
-  if (statBlock.skills) {
-    for (const [rawKey, bonus] of Object.entries(statBlock.skills)) {
-      if (typeof bonus !== 'number') continue;
-      const key = rawKey.trim();
-      const ability = SKILL_ABILITY[key.toLowerCase()] || SKILL_ABILITY[key];
-      const display = titleCase(key.replace(/([A-Z])/g, ' $1').trim());
-      skills.push({
-        label:             `${display} ${fmt(bonus)}${ability ? ` (${ability.toUpperCase()})` : ''}`,
-        expression:        `1d20${fmt(bonus)}`,
-        purpose:           `${display} Check`,
-        supportsAdvantage: true,
-      });
-    }
+  // Skills the stat block records a bonus for, the way a printed stat block
+  // lists only the skills a creature is actually trained in. Everything else is
+  // covered by the ability checks above.
+  for (const [rawKey, bonus] of Object.entries(statBlock.skills ?? {})) {
+    if (typeof bonus !== 'number') continue;
+    const definition = findSkill(rawKey);
+    const display = skillLabel(rawKey);
+    const level = proficientSkills[rawKey];
+    const marker = level === 'expertise' ? ' ◆' : '';
+    const abilitySuffix = definition ? ` (${definition.ability.toUpperCase()})` : '';
+
+    skills.push({
+      label:             `${display} ${formatModifier(bonus)}${abilitySuffix}${marker}`,
+      expression:        `1d20${formatModifier(bonus)}`,
+      purpose:           `${display} Check`,
+      supportsAdvantage: true,
+    });
   }
 
-  const combat = buildCombatRolls(statBlock);
+  return { abilities, skills, savingThrows, combat: buildCombatRolls(statBlock), hitDice: [] };
+}
 
-  return { abilities, skills, savingThrows, combat };
+// ---------------------------------------------------------------------------
+// Pathfinder 2e
+// ---------------------------------------------------------------------------
+
+/**
+ * Pathfinder 2e creature stat blocks print final modifiers rather than the
+ * components behind them — Paizo builds creatures from level benchmark tables,
+ * not from "level + proficiency rank + attribute". So nothing is derived here:
+ * whatever the stat block records is what gets rolled.
+ *
+ * Saves are Fortitude/Reflex/Will rather than six ability saves, and only
+ * trained-or-better skills appear, both of which the stat block already
+ * represents as plain keyed records.
+ */
+const PF2E_SAVE_LABELS: Record<string, string> = {
+  fortitude: 'Fortitude',
+  reflex: 'Reflex',
+  will: 'Will',
+};
+
+function buildPf2eRolls(statBlock: NpcStatBlock): CharacterRolls {
+  const abilities:    RollOption[] = [];
+  const skills:       RollOption[] = [];
+  const savingThrows: RollOption[] = [];
+
+  // PF2e stat blocks list attribute modifiers directly. Where a creature was
+  // entered with 5e-style scores instead, fall back to deriving the modifier so
+  // the option is still offered rather than silently dropped.
+  for (const ability of ABILITY_KEYS) {
+    const stored = statBlock.attributeModifiers?.[ability];
+    const mod =
+      typeof stored === 'number'
+        ? stored
+        : abilityModifier(statBlock.abilities?.[ability] ?? 10);
+
+    abilities.push({
+      label:             `${ability.toUpperCase()} ${formatModifier(mod)}`,
+      expression:        `1d20${formatModifier(mod)}`,
+      purpose:           `${ABILITY_LABELS[ability]} Check`,
+      supportsAdvantage: true, // Fortune / Misfortune
+    });
+  }
+
+  for (const [key, bonus] of Object.entries(statBlock.savingThrows ?? {})) {
+    if (typeof bonus !== 'number') continue;
+    const label = PF2E_SAVE_LABELS[key.toLowerCase()] ?? key;
+    savingThrows.push({
+      label:             `${label} ${formatModifier(bonus)}`,
+      expression:        `1d20${formatModifier(bonus)}`,
+      purpose:           `${label} Save`,
+      supportsAdvantage: true,
+    });
+  }
+
+  for (const [key, bonus] of Object.entries(statBlock.skills ?? {})) {
+    if (typeof bonus !== 'number') continue;
+    const label = key.charAt(0).toUpperCase() + key.slice(1);
+    skills.push({
+      label:             `${label} ${formatModifier(bonus)}`,
+      expression:        `1d20${formatModifier(bonus)}`,
+      purpose:           `${label} Check`,
+      supportsAdvantage: true,
+    });
+  }
+
+  return { abilities, skills, savingThrows, combat: buildCombatRolls(statBlock), hitDice: [] };
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/** Game systems for which NPC stat blocks have a modelled roll structure. */
+export function systemSupportsNpcRolls(gameSystem: string | null | undefined): boolean {
+  return gameSystem === 'DND_5E' || gameSystem === 'PATHFINDER_2E';
+}
+
+/**
+ * Build the rollable options for an NPC stat block.
+ *
+ * @param statBlock  The token's stat block, if it has one.
+ * @param gameSystem The campaign's game system. Defaults to D&D 5e, which is
+ *                   what the stat block structure was designed around and what
+ *                   the only seeded content uses.
+ *
+ * Call of Cthulhu 7e and Shadowrun 6e return no options: they use d100 and dice
+ * pools respectively, with no ability-modifier or proficiency concept, so there
+ * is nothing correct to offer from this data. Callers fall back to the custom
+ * roll input.
+ */
+export function buildNpcRolls(
+  statBlock: TokenStatBlock | null | undefined,
+  gameSystem: string | null = 'DND_5E'
+): CharacterRolls {
+  if (!isFullNpcStatBlock(statBlock)) return EMPTY_ROLLS;
+
+  switch (gameSystem) {
+    case 'PATHFINDER_2E':
+      return buildPf2eRolls(statBlock);
+    case 'DND_5E':
+      return buildDnd5eRolls(statBlock);
+    case 'CALL_OF_CTHULHU_7E':
+    case 'SHADOWRUN_6E':
+      return EMPTY_ROLLS;
+    default:
+      // Unknown or unset system: the stat block shape is 5e's, so treat it as
+      // 5e rather than offering nothing at all.
+      return buildDnd5eRolls(statBlock);
+  }
 }

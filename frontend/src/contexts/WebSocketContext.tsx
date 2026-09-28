@@ -17,6 +17,7 @@ import { useParams } from 'react-router-dom';
 import type { Socket } from 'socket.io-client';
 import socketClient from '@/services/socket';
 import api from '@/services/api';
+import { errorMessage } from '@/utils/errors';
 
 // ============================================
 // Types
@@ -241,11 +242,11 @@ export function WebSocketProvider({ children }: WebSocketProviderProps) {
 
       const cleanup = socketClient.startHeartbeat(30000); // 30 second interval
       heartbeatCleanupRef.current = cleanup || null;
-    } catch (err: any) {
+    } catch (err) {
       console.error('[WebSocket] Connection failed:', err);
       if (isMountedRef.current) {
         setStatus('error');
-        setError(err.message || 'Failed to connect to campaign');
+        setError(errorMessage(err) || 'Failed to connect to campaign');
         connectedCampaignRef.current = null;
       }
     }
@@ -452,4 +453,17 @@ export function useWebSocket() {
   }
 
   return context;
+}
+
+/**
+ * The websocket context if there is one, otherwise undefined.
+ *
+ * The provider only wraps the campaign screens, so a component that can also be
+ * rendered outside one — the character sheet viewer, which opens both from the
+ * campaign roster and from the character gallery — cannot use `useWebSocket`
+ * without crashing in the second case. Live updates are a bonus there, not a
+ * requirement, so this lets such a component degrade instead of throwing.
+ */
+export function useOptionalWebSocket() {
+  return useContext(WebSocketContext);
 }

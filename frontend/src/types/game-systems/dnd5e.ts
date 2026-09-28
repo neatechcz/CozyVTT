@@ -3,6 +3,9 @@
  * Mirrors backend types from backend/src/game-systems/dnd5e.ts
  */
 
+import type { FeatureEntry } from '@/utils/featureEntries';
+import type { Dnd5eCustomSkill } from '@/utils/rules/dnd5e';
+
 /**
  * Ability score with modifier
  */
@@ -53,6 +56,15 @@ export interface DnD5eSkill {
 }
 
 /**
+ * A check the eighteen skills do not cover — a tool proficiency, or anything a
+ * table invented.
+ *
+ * Re-exported from the shared rules module so the sheet type and the maths that
+ * derives the bonus cannot describe different shapes.
+ */
+export type DnD5eCustomSkill = Dnd5eCustomSkill;
+
+/**
  * All D&D 5e skills
  */
 export interface DnD5eSkills {
@@ -88,6 +100,7 @@ export interface DnD5eHitPoints {
 /** Daily survival ledger and numeric 2014 exhaustion. Missing fields are not assumed to be zero. */
 export interface DnD5eSurvival {
   intakeDay?: string;
+
   lastResolvedDay?: string;
   daysWithoutFood?: number;
   foodTodayPounds?: number;
@@ -102,7 +115,15 @@ export interface DnD5eSurvival {
  */
 export interface DnD5eHitDice {
   class: string;
-  total: string;
+  /**
+   * The older pool string, e.g. "5d10" — count and die packed together. Read
+   * so existing sheets keep working; never written any more. `die` wins.
+   */
+  total?: string;
+  /** One hit die's roll: "d10", or "2d6" / "1d10+1" for a homebrew pool. */
+  die?: string;
+  /** How many dice the pool holds at full. */
+  maximum?: number;
   remaining: number;
 }
 
@@ -112,6 +133,24 @@ export interface DnD5eHitDice {
 export interface DnD5eDeathSaves {
   successes: number;
   failures: number;
+}
+
+/**
+ * A further way the same weapon or spell deals damage.
+ *
+ * The rules attach a second die to a weapon often enough that one damage line
+ * cannot describe it: a spear is "1d6 piercing" in one hand and "1d8" in two,
+ * printed as "versatile (1d8)" in the Weapons table (Basic Rules p. 48). The
+ * built-in Longsword template used to record its two-handed die in the free-text
+ * note, where it read as prose and could not be rolled.
+ *
+ * `label` is what the sheet calls this line — "Two-handed", "At 5th level",
+ * "Radiant rider" — and is free text, because the reasons are not enumerable.
+ */
+export interface DnD5eAdditionalDamage {
+  label: string;
+  damageRoll: string;
+  damageType?: string;
 }
 
 /**
@@ -125,6 +164,8 @@ export interface DnD5eAttack {
   range: number;
   properties: string[];
   notes: string;
+  /** Extra damage lines beyond the primary one. Absent on most attacks. */
+  additionalDamage?: DnD5eAdditionalDamage[];
 }
 
 /**
@@ -193,8 +234,13 @@ export interface DnD5eSpell {
 export interface DnD5eSpellcasting {
   class: string;
   ability: string;
+  /** Derived: 8 + proficiency bonus + ability modifier + spellSaveDCOtherBonus. */
   spellSaveDC: number;
+  /** Derived: proficiency bonus + ability modifier + spellAttackOtherBonus. */
   spellAttackBonus: number;
+  /** Adjustments from items and features; separate, since some raise only one. */
+  spellSaveDCOtherBonus?: number;
+  spellAttackOtherBonus?: number;
   cantrips: string[];
   slots: DnD5eSpellSlots;
   spells: DnD5eSpell[];
@@ -256,20 +302,57 @@ export interface DnD5eCharacterData {
   inspiration?: boolean;
   savingThrows?: DnD5eSavingThrows;
   skills?: DnD5eSkills;
+  /**
+   * Checks the eighteen skills do not cover — tool proficiencies above all.
+   *
+   * The bonus is derived by `dnd5eCustomSkillBonus`, not stored, so it follows
+   * the character's ability scores and level without anyone re-entering it.
+   */
+  customSkills?: DnD5eCustomSkill[];
+  /** Total passive Perception: 10 + Perception bonus + `passivePerceptionBonus`. */
   passivePerception?: number;
+  /** Non-skill additions to passive Perception (Observant, items). */
+  passivePerceptionBonus?: number;
   armorClass?: number;
+  /** Total initiative modifier: Dexterity modifier plus `initiativeBonus`. */
   initiative?: number;
+  /** Non-Dexterity initiative bonuses (Alert, Jack of All Trades, subclasses). */
+  initiativeBonus?: number;
   speed?: number;
   hp?: DnD5eHitPoints;
   survival?: DnD5eSurvival;
   conditions?: string[];
+  /** Exhaustion 0-6; six cumulative levels, not a yes/no condition. */
+  exhaustionLevel?: number;
   hitDice?: DnD5eHitDice[];
   deathSaves?: DnD5eDeathSaves;
   attacks?: DnD5eAttack[];
   currency?: DnD5eCurrency;
   inventory?: DnD5eInventoryItem[];
+  /**
+   * The four proficiency boxes as the player typed them, each free text.
+   *
+   * `proficienciesAndLanguages` below is the same four flattened into one list,
+   * kept for exports and for sheets written before this existed. It cannot
+   * replace this: flattening loses which box an entry came from, and guessing
+   * it back put anything unrecognised — Thieves' Cant, Druidic — under weapons.
+   */
+  proficiencies?: {
+    armor?: string;
+    weapons?: string;
+    tools?: string;
+    languages?: string;
+  };
   proficienciesAndLanguages?: string[];
-  featuresAndTraits?: string[];
+  /**
+   * Features and traits: a name plus an optional description.
+   *
+   * Strings are still read, because every sheet saved before descriptions
+   * existed holds them and so does any exported JSON. They mean a feature with
+   * no description, and are never split apart to invent one — see
+   * utils/featureEntries.
+   */
+  featuresAndTraits?: Array<string | FeatureEntry>;
   spellcasting?: DnD5eSpellcasting;
   appearance?: DnD5eAppearance;
   personality?: DnD5ePersonality;

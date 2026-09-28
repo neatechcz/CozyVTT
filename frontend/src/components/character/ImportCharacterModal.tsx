@@ -11,18 +11,39 @@ import { readJSONFile, validateImportedCharacter } from '@/utils/character-expor
 import GameSystemBadge from '@/components/common/GameSystemBadge';
 import type { GameSystem } from '@/types';
 import { Button, Modal } from '@/components/ui';
+import { apiErrorMessage, errorMessage } from '@/utils/errors';
+import type { CharacterData } from '@/types';
 
 interface ImportCharacterModalProps {
   onClose: () => void;
-  onImport: (data: { name: string; gameSystem: string | null; data: any }) => Promise<void>;
+  onImport: (data: {
+    name: string;
+    gameSystem: string | null;
+    data: CharacterData;
+    description?: string;
+  }) => Promise<void>;
   existingCharacterNames: string[];
+  /**
+   * What the JSON is being imported as.
+   *
+   * The file format is identical either way — a character export *is* a sheet
+   * plus a game system, which is exactly what a template holds. This only
+   * changes the wording and, for templates, offers a description field. It
+   * means a sheet exported from one instance can be published as a template on
+   * another.
+   */
+  mode?: 'character' | 'template';
 }
 
 export default function ImportCharacterModal({
   onClose,
   onImport,
   existingCharacterNames,
+  mode = 'character',
 }: ImportCharacterModalProps) {
+  const isTemplate = mode === 'template';
+  const noun = isTemplate ? 'Template' : 'Character';
+
   const [file, setFile] = useState<File | null>(null);
   const [isDragging, setIsDragging] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
@@ -30,10 +51,11 @@ export default function ImportCharacterModal({
   const [previewData, setPreviewData] = useState<{
     name: string;
     gameSystem: string | null;
-    data: any;
+    data: CharacterData;
   } | null>(null);
   const [nameConflict, setNameConflict] = useState(false);
   const [importName, setImportName] = useState('');
+  const [importDescription, setImportDescription] = useState('');
 
   // Handle file selection
   const handleFileSelect = async (selectedFile: File) => {
@@ -64,8 +86,8 @@ export default function ImportCharacterModal({
           setImportName(characterName);
         }
       }
-    } catch (err: any) {
-      setError(err.message || 'Failed to read file');
+    } catch (err: unknown) {
+      setError(errorMessage(err) || 'Failed to read file');
     } finally {
       setIsLoading(false);
     }
@@ -112,18 +134,39 @@ export default function ImportCharacterModal({
         name: importName,
         gameSystem: previewData.gameSystem,
         data: previewData.data,
+        ...(isTemplate && importDescription.trim()
+          ? { description: importDescription.trim() }
+          : {}),
       });
 
       onClose();
-    } catch (err: any) {
-      setError(err.response?.data?.message || err.message || 'Failed to import character');
+    } catch (err: unknown) {
+      setError(
+        apiErrorMessage(err) ||
+          errorMessage(err) ||
+          `Failed to import ${noun.toLowerCase()}`
+      );
     } finally {
       setIsLoading(false);
     }
   };
 
   return (
-    <Modal open onClose={onClose} title="Import Character" icon={Upload} size="lg" closeDisabled={isLoading}>
+    <Modal
+      open
+      onClose={onClose}
+      title={isTemplate ? 'Import Template' : 'Import Character'}
+      icon={Upload}
+      size="lg"
+      closeDisabled={isLoading}
+    >
+        {isTemplate && !previewData && (
+          <p className="text-sm text-ink-secondary mb-4">
+            Any character JSON works here, including one exported from another CozyVTT
+            instance. Publishing it as a template makes it available for everyone here to
+            copy — the original character is not affected.
+          </p>
+        )}
         {/* File Upload Area */}
         {!previewData && (
           <div
@@ -135,10 +178,13 @@ export default function ImportCharacterModal({
               ${isDragging ? 'border-moss-green bg-moss-green/10' : 'border-moss-green/30 hover:border-moss-green/50'}
             `}
           >
-            <Upload className="w-16 h-16 text-moss-green mx-auto mb-4" />
+            <Upload className="w-16 h-16 text-brand-ink mx-auto mb-4" />
             <h3 className="text-lg font-semibold text-ink mb-2">
               {isDragging ? 'Drop file here' : 'Upload Character JSON'}
             </h3>
+            <p className="sr-only">
+              {isTemplate ? 'The file will be published as a template.' : ''}
+            </p>
             <p className="text-sm text-ink mb-4">
               Drag and drop a JSON file, or click to browse
             </p>
@@ -185,10 +231,16 @@ export default function ImportCharacterModal({
           <div className="space-y-6">
             <div className="bg-moss-green/10 border border-moss-green/30 rounded-lg p-4">
               <div className="flex items-start gap-3 mb-4">
-                <CheckCircle className="w-5 h-5 text-moss-green flex-shrink-0 mt-0.5" />
+                <CheckCircle className="w-5 h-5 text-brand-ink flex-shrink-0 mt-0.5" />
                 <div>
-                  <h4 className="font-semibold text-moss-green mb-1">Character Loaded Successfully</h4>
-                  <p className="text-sm text-ink">Review the character details below before importing.</p>
+                  <h4 className="font-semibold text-brand-ink mb-1">
+                    {isTemplate ? 'Sheet Loaded Successfully' : 'Character Loaded Successfully'}
+                  </h4>
+                  <p className="text-sm text-ink">
+                    {isTemplate
+                      ? 'Review the details below, then publish it as a template.'
+                      : 'Review the character details below before importing.'}
+                  </p>
                 </div>
               </div>
             </div>
@@ -201,8 +253,9 @@ export default function ImportCharacterModal({
                   <div>
                     <h4 className="font-semibold text-sunset-orange mb-1">Name Conflict</h4>
                     <p className="text-sm text-ink">
-                      A character named "{previewData.name}" already exists. The imported character will be
-                      renamed to "{importName}".
+                      {isTemplate
+                        ? `A template named "${previewData.name}" already exists. This one will be named "${importName}" — edit it below if you'd rather use something else.`
+                        : `A character named "${previewData.name}" already exists. The imported character will be renamed to "${importName}".`}
                     </p>
                   </div>
                 </div>
@@ -211,25 +264,46 @@ export default function ImportCharacterModal({
 
             {/* Character Preview */}
             <div className="bg-parchment rounded-lg border border-moss-green/20 p-6">
-              <h3 className="text-lg font-semibold text-moss-green mb-4 flex items-center gap-2">
+              <h3 className="text-lg font-semibold text-brand-ink mb-4 flex items-center gap-2">
                 <FileText className="w-5 h-5" />
-                Character Preview
+                {isTemplate ? 'Template Preview' : 'Character Preview'}
               </h3>
 
               <div className="space-y-4">
                 {/* Name */}
                 <div>
-                  <label className="block text-sm font-medium text-ink mb-1">
-                    Character Name
+                  <label htmlFor="import-name" className="block text-sm font-medium text-ink mb-1">
+                    {isTemplate ? 'Template Name' : 'Character Name'}
                   </label>
                   <input
+                    id="import-name"
                     type="text"
                     value={importName}
                     onChange={(e) => setImportName(e.target.value)}
+                    maxLength={200}
                     className="w-full px-3 py-2 rounded-lg border border-moss-green/30 bg-paper text-ink
                              focus:outline-none focus:ring-2 focus:ring-moss-green/50"
                   />
                 </div>
+
+                {/* Description — templates only; characters have no such field */}
+                {isTemplate && (
+                  <div>
+                    <label htmlFor="import-description" className="block text-sm font-medium text-ink mb-1">
+                      Description <span className="text-ink-muted font-normal">(optional)</span>
+                    </label>
+                    <textarea
+                      id="import-description"
+                      value={importDescription}
+                      onChange={(e) => setImportDescription(e.target.value)}
+                      rows={2}
+                      maxLength={2000}
+                      placeholder="What this template is for, and who it suits."
+                      className="w-full px-3 py-2 rounded-lg border border-moss-green/30 bg-paper text-ink
+                               focus:outline-none focus:ring-2 focus:ring-moss-green/50 resize-none"
+                    />
+                  </div>
+                )}
 
                 {/* Game System */}
                 <div>
@@ -246,7 +320,7 @@ export default function ImportCharacterModal({
                 {/* Data Preview */}
                 <div>
                   <label className="block text-sm font-medium text-ink mb-2">
-                    Character Data
+                    {isTemplate ? 'Sheet Data' : 'Character Data'}
                   </label>
                   <div className="bg-paper rounded border border-moss-green/20 p-3 max-h-48 overflow-y-auto">
                     <pre className="text-xs text-ink-muted whitespace-pre-wrap">
@@ -279,7 +353,7 @@ export default function ImportCharacterModal({
                 ) : (
                   <>
                     <Upload className="w-4 h-4" />
-                    Import Character
+                    {isTemplate ? 'Publish as Template' : 'Import Character'}
                   </>
                 )}
               </Button>

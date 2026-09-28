@@ -1,13 +1,22 @@
 # Prisma Schema Verification Checklist
 
-## ✅ Schema Validation Complete
-
-**Generated:** February 10, 2026
-**Verified Against:** docs/STATEMENT_OF_WORK.md Section 4.1
+> **A historical record, not a current picture.** This captures the schema
+> verification done for the v1.0.0 release on 10 February 2026, against a
+> statement of work that is not in this repository. The schema has grown a lot
+> since: **20 models and 9 enums today**, against the 10 and 7 recorded below.
+>
+> Models added since and *not* covered here: `PasswordResetToken`,
+> `CampaignInvitation`, `CharacterTemplate`, `CreatureTemplate`,
+> `CreatureFavorite`, `TokenTemplate`, `SystemSettings`, `PersonalNote`,
+> `DiceMacro`, `CampaignDocument`.
+>
+> Treat `backend/prisma/schema.prisma` as the source of truth. Kept because the
+> field-level and relationship checks below still describe the original models
+> accurately and are useful when changing them.
 
 ---
 
-## Models (10/10)
+## Models (10/10, as verified in February 2026)
 
 - ✅ User
 - ✅ Campaign
@@ -20,7 +29,7 @@
 - ✅ DiceRoll
 - ✅ SystemLog
 
-## Enums (7/7)
+## Enums (7/7, as verified in February 2026)
 
 - ✅ PlatformRole (ADMIN, USER)
 - ✅ CampaignStatus (PREPARATION, ACTIVE, PAUSED, COMPLETED, ARCHIVED)

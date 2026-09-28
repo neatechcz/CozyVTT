@@ -9,6 +9,7 @@ import campaignService from '@/services/campaign.service';
 import type { Campaign, GameSystem } from '@/types';
 import { GAME_SYSTEM_OPTIONS } from '@/constants/game-systems';
 import { Button, Modal, Field, Input, Textarea, Select } from '@/components/ui';
+import { apiErrorMessage } from '@/utils/errors';
 
 interface CreateCampaignModalProps {
   isOpen: boolean;
@@ -71,8 +72,8 @@ export default function CreateCampaignModal({
 
       // Close modal
       onClose();
-    } catch (err: any) {
-      setError(err.response?.data?.message || 'Failed to create campaign');
+    } catch (err) {
+      setError(apiErrorMessage(err) || 'Failed to create campaign');
     } finally {
       setLoading(false);
     }
@@ -141,7 +142,7 @@ export default function CreateCampaignModal({
         {/* Info Box */}
         <div className="rounded-lg p-4 bg-brand/10 border border-brand/30">
           <p className="text-sm text-ink">
-            <strong className="text-brand">Note:</strong> You will be automatically assigned
+            <strong className="text-brand-ink">Note:</strong> You will be automatically assigned
             as the Dungeon Master (DM) for this campaign. You can invite players from the campaign
             settings page.
           </p>

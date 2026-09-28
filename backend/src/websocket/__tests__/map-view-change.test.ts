@@ -197,25 +197,25 @@ describe('walls', () => {
 });
 
 describe('lights', () => {
-  it('reveals the tokens a new light shines on', async () => {
+  it('does not reveal tokens through a wall when a new light is added', async () => {
     await dm.handlers['light:add']({ mapId: MAP_ID, light: TORCH });
 
-    expect(tokenEvents(alice)).toEqual([['token.added', 'goblin']]);
+    expect(tokenEvents(alice)).toEqual([]);
     expect(tokenEvents(dm)).toEqual([]);
   });
 
-  it('hides them again when the light is removed, disabled or replaced', async () => {
+  it('does not leak walled-off tokens when a light is removed, disabled or replaced', async () => {
     stored.lights = [TORCH];
     await dm.handlers['light:update']({ mapId: MAP_ID, light: { ...TORCH, enabled: false } });
-    expect(tokenEvents(alice)).toEqual([['token.removed', 'goblin']]);
+    expect(tokenEvents(alice)).toEqual([]);
 
     alice.emit.mockClear();
     await dm.handlers['lights:replace']({ mapId: MAP_ID, lights: [TORCH] });
-    expect(tokenEvents(alice)).toEqual([['token.added', 'goblin']]);
+    expect(tokenEvents(alice)).toEqual([]);
 
     alice.emit.mockClear();
     await dm.handlers['light:remove']({ mapId: MAP_ID, lightId: '22222222-2222-4222-8222-222222222222' });
-    expect(tokenEvents(alice)).toEqual([['token.removed', 'goblin']]);
+    expect(tokenEvents(alice)).toEqual([]);
   });
 });
 

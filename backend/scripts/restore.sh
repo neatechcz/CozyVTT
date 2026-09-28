@@ -28,6 +28,74 @@ if [[ ! -f "$BACKUP_FILE" ]]; then
   exit 1
 fi
 
+# Check the archive is whole before anything is dropped. Restoring runs a dump
+# that deletes every table before recreating it, so a truncated or corrupted
+# file used to destroy the database and then fail to refill it. This catches a
+# damaged archive; a complete archive holding bad SQL is caught later by
+# ON_ERROR_STOP, after the load has been wrapped in a transaction.
+if ! gzip -t "$BACKUP_FILE" 2>/dev/null; then
+  echo "❌ $BACKUP_FILE is not a complete gzip archive. Nothing was changed."
+  echo "   The file is truncated or corrupted. Try another backup."
+  exit 1
+fi
+
+# ------------------------------------------------------------------
+# Docker deployments: run psql inside the database container.
+#
+# Same reason as backup.sh — a Docker install has no postgresql-client on the
+# host and the database port is deliberately not published, so the direct
+# connection below had nothing to reach. Setting DATABASE_URL skips this.
+# ------------------------------------------------------------------
+if [[ -z "${DATABASE_URL:-}" ]] && command -v docker >/dev/null 2>&1; then
+  DB_SERVICE="${DB_SERVICE:-database}"
+  if docker compose ps --status running --services 2>/dev/null | grep -qx "$DB_SERVICE"; then
+    DB_USER="${DATABASE_USER:-cozyvtt}"
+    DB_NAME="${DATABASE_NAME:-cozyvtt}"
+
+    echo "================================================"
+    echo "CozyVTT Database Restore"
+    echo "================================================"
+    echo "  Target: docker compose service '$DB_SERVICE'"
+    echo "  DB:     $DB_NAME"
+    echo "  User:   $DB_USER"
+    echo "  Source: $BACKUP_FILE"
+    echo ""
+    echo "⚠️  WARNING: This will DESTROY all existing data in '$DB_NAME'."
+    echo "   Make sure you have a current backup before proceeding."
+    echo ""
+    if [[ "${RESTORE_ASSUME_YES:-}" != "yes" ]]; then
+      read -r -p "Type 'yes' to confirm: " CONFIRM
+      [[ "$CONFIRM" == "yes" ]] || { echo "Aborted."; exit 0; }
+    fi
+
+    echo ""
+    echo "🔄 Dropping and recreating database '$DB_NAME'..."
+    # Sessions hold connections open, and DROP DATABASE fails while any remain.
+    docker compose exec -T "$DB_SERVICE" psql -U "$DB_USER" -d postgres \
+      -c "SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+          WHERE datname = '$DB_NAME' AND pid <> pg_backend_pid();" >/dev/null
+    docker compose exec -T "$DB_SERVICE" psql -U "$DB_USER" -d postgres \
+      -c "DROP DATABASE IF EXISTS \"$DB_NAME\";" \
+      -c "CREATE DATABASE \"$DB_NAME\" OWNER \"$DB_USER\";"
+
+    echo "🔄 Restoring from $BACKUP_FILE..."
+    if gunzip -c "$BACKUP_FILE" | docker compose exec -T "$DB_SERVICE" \
+        psql -U "$DB_USER" -d "$DB_NAME" -q \
+        -v ON_ERROR_STOP=1 --single-transaction; then
+      echo "✅ Restore complete."
+      echo ""
+      echo "Next steps:"
+      echo "  - Restart the backend:  docker compose restart backend"
+      echo "  - Verify the app:       curl http://localhost/health"
+      exit 0
+    else
+      echo "❌ Restore failed. The database may be in a partial state."
+      echo "   Re-run migrations manually: docker compose exec backend npx prisma migrate deploy"
+      exit 1
+    fi
+  fi
+fi
+
 # Parse DATABASE_URL if set, otherwise fall back to individual vars
 if [[ -n "${DATABASE_URL:-}" ]]; then
   DB_USER=$(echo "$DATABASE_URL" | sed -E 's|.*://([^:]+):.*|\1|')
@@ -79,7 +147,9 @@ if gunzip -c "$BACKUP_FILE" | psql \
     -U "$DB_USER" \
     -d "$DB_NAME" \
     --no-password \
-    -q; then
+    -q \
+    -v ON_ERROR_STOP=1 \
+    --single-transaction; then
   echo "✅ Restore complete."
   echo ""
   echo "Next steps:"

@@ -279,8 +279,8 @@ describe('broadcastTokenEvent on a lighting-enabled map', () => {
     expect(sent).toContain('goblin');
   });
 
-  it('counts enabled light sources as sight, like map.changed', async () => {
-    // A torch east of the wall lights the goblin even though Alice cannot see past the wall.
+  it('does not treat a light behind a wall as the player’s sight', async () => {
+    // A torch east of the wall lights the goblin but Alice cannot see past the wall.
     const light = { id: 'torch', x: 750, y: 450, brightRadius: 2, dimRadius: 3, color: '#ffcc66', enabled: true };
     const before = token('goblin', 7, 5);
     const after = token('goblin', 7, 5, { name: 'Goblin chief' });
@@ -288,7 +288,7 @@ describe('broadcastTokenEvent on a lighting-enabled map', () => {
 
     await broadcastTokenEvent(CAMPAIGN_ID, MAP_ID, before, after);
 
-    expect(received(alice)).toEqual([['token.updated', { mapId: MAP_ID, token: playerView(after) }]]);
+    expect(received(alice)).toEqual([]);
   });
 
   it('computes every socket of the same user the same way', async () => {

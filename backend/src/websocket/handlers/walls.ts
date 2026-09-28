@@ -12,6 +12,7 @@ import type { WallSegment } from '../../types/walls';
 import logger from '../../utils/logger';
 import { mapEditLimiter } from '../shared';
 import { broadcastMapViewChange } from '../utils';
+import { toJson } from '../../utils/prisma-json';
 
 export function registerWallHandlers(io: Server, socket: AuthenticatedSocket): void {
   /**
@@ -47,7 +48,7 @@ export function registerWallHandlers(io: Server, socket: AuthenticatedSocket): v
         return;
       }
 
-      await prisma.map.update({ where: { id: mapId }, data: { wallSegments: [...existing, parsed.data] as any } });
+      await prisma.map.update({ where: { id: mapId }, data: { wallSegments: toJson([...existing, parsed.data]) } });
 
       io.to(socket.campaignId).emit('wall:added', {
         mapId,
@@ -87,7 +88,7 @@ export function registerWallHandlers(io: Server, socket: AuthenticatedSocket): v
       const existing = (Array.isArray(map.wallSegments) ? map.wallSegments : []) as unknown as WallSegment[];
       const filtered = existing.filter((s) => s.id !== segmentId);
 
-      await prisma.map.update({ where: { id: mapId }, data: { wallSegments: filtered as any } });
+      await prisma.map.update({ where: { id: mapId }, data: { wallSegments: toJson(filtered) } });
 
       io.to(socket.campaignId).emit('wall:removed', {
         mapId,
@@ -156,7 +157,7 @@ export function registerWallHandlers(io: Server, socket: AuthenticatedSocket): v
 
       const previous = [...existing];
       existing[idx] = parsed.data;
-      await prisma.map.update({ where: { id: mapId }, data: { wallSegments: existing as any } });
+      await prisma.map.update({ where: { id: mapId }, data: { wallSegments: toJson(existing) } });
 
       io.to(socket.campaignId).emit('wall:updated', {
         mapId,
@@ -199,7 +200,7 @@ export function registerWallHandlers(io: Server, socket: AuthenticatedSocket): v
         return;
       }
 
-      await prisma.map.update({ where: { id: mapId }, data: { wallSegments: parsed.data as any } });
+      await prisma.map.update({ where: { id: mapId }, data: { wallSegments: toJson(parsed.data) } });
 
       io.to(socket.campaignId).emit('walls:replaced', {
         mapId,

@@ -45,6 +45,18 @@ function makeMinimalInvestigator(skills?: unknown): Character {
 }
 
 describe('CallOfCthulhu7eCharacterEditor', () => {
+  it('reports a real edit as dirty and clears the flag after saving', async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const onDirtyChange = vi.fn();
+    render(<CallOfCthulhu7eCharacterEditor character={makeMinimalInvestigator()} onSave={onSave} onCancel={vi.fn()} onDirtyChange={onDirtyChange} />);
+    expect(onDirtyChange).not.toHaveBeenCalledWith(true);
+    fireEvent.change(screen.getByDisplayValue('Dr. Sarah Chen'), { target: { value: 'Dr. Sarah Vale' } });
+    await waitFor(() => expect(onDirtyChange).toHaveBeenCalledWith(true));
+    fireEvent.click(screen.getByRole('button', { name: /save/i }));
+    await waitFor(() => expect(onSave).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onDirtyChange).toHaveBeenLastCalledWith(false));
+  });
+
   it.each([
     { label: 'missing', character: makeMinimalInvestigator() },
     { label: 'null', character: makeMinimalInvestigator(null) },

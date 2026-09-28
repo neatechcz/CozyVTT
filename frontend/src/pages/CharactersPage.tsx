@@ -17,9 +17,12 @@ import NewCharacterModal from '@/components/character/NewCharacterModal';
 import DeleteCharacterModal from '@/components/character/DeleteCharacterModal';
 import AssignCharacterModal from '@/components/character/AssignCharacterModal';
 import ImportCharacterModal from '@/components/character/ImportCharacterModal';
+import CharacterSheetViewerModal from '@/components/character/CharacterSheetViewerModal';
 import EmptyState from '@/components/common/EmptyState';
 import type { Character, Campaign } from '@/types';
 import Button from '@/components/ui/Button';
+import { apiErrorMessage } from '@/utils/errors';
+import type { CharacterData } from '@/types';
 
 export default function CharactersPage() {
   const { logout, user } = useAuth();
@@ -44,7 +47,7 @@ export default function CharactersPage() {
   const loading = charactersQuery.isPending || campaignsQuery.isPending;
   const queryError = charactersQuery.error || campaignsQuery.error;
   const error = queryError
-    ? ((queryError as any).response?.data?.message || 'Failed to load characters')
+    ? (apiErrorMessage(queryError) || 'Failed to load characters')
     : '';
 
   const loadData = () => {
@@ -63,6 +66,16 @@ export default function CharactersPage() {
     navigate(`/characters/${newCharacter.id}/edit`);
   };
 
+  const [viewingCharacter, setViewingCharacter] = useState<Character | null>(null);
+
+  // Clicking a card opens the sheet to READ. Editing is a deliberate second
+  // step from the Edit button on the sheet — the same shape as opening a
+  // character from the campaign roster, and it means glancing at your own
+  // character can no longer drop you into a form you have to back out of.
+  const handleView = (character: Character) => {
+    setViewingCharacter(character);
+  };
+
   const handleEdit = (character: Character) => {
     navigate(`/characters/${character.id}/edit`);
   };
@@ -72,8 +85,8 @@ export default function CharactersPage() {
       const copiedCharacter = await characterService.copyCharacter(character.id);
       setCharactersData((prev) => [copiedCharacter, ...prev]);
       showSuccess(`${character.name} copied successfully`);
-    } catch (err: any) {
-      showToast(err.response?.data?.message || 'Failed to copy character', 'error');
+    } catch (err) {
+      showToast(apiErrorMessage(err) || 'Failed to copy character', 'error');
     }
   };
 
@@ -123,7 +136,7 @@ export default function CharactersPage() {
     showSuccess(`Exported ${character.name}`);
   };
 
-  const handleImport = async (data: { name: string; gameSystem: string | null; data: any }) => {
+  const handleImport = async (data: { name: string; gameSystem: string | null; data: CharacterData }) => {
     // Errors propagate to the modal, which handles the display
     const importedCharacter = await characterService.createCharacter({
       name: data.name,
@@ -154,17 +167,17 @@ export default function CharactersPage() {
       {/* Header */}
       <header className="bg-moss-green/10 border-b border-moss-green/20 shadow-sm">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-          <div className="flex flex-col gap-4 py-4 sm:flex-row sm:items-center sm:justify-between sm:py-6">
+          <div className="flex items-center justify-between py-6">
             {/* Left: Logo + Title */}
-            <div className="flex min-w-0 items-center gap-4">
+            <div className="flex items-center gap-4">
               <button
                 onClick={() => navigate('/dashboard')}
                 className="p-2 rounded-lg bg-moss-green/10 hover:bg-moss-green/20 transition-colors"
               >
                 <img src={mascotUrl} alt="CozyVTT" className="w-10 h-10 object-contain" />
               </button>
-              <div className="min-w-0">
-                <h1 className="text-2xl font-bold text-moss-green font-heading sm:text-3xl">
+              <div>
+                <h1 className="text-3xl font-bold text-brand-ink font-heading">
                   My Characters
                 </h1>
                 <p className="text-sm text-warm-gray">
@@ -174,7 +187,7 @@ export default function CharactersPage() {
             </div>
 
             {/* Right: Actions */}
-            <div className="flex w-full items-center justify-end gap-3 sm:w-auto">
+            <div className="flex items-center gap-3">
               <Button
                 onClick={() => navigate('/dashboard')}
                 variant="secondary" className="flex items-center gap-2"
@@ -214,8 +227,8 @@ export default function CharactersPage() {
 
           {/* Create Character Section */}
           <section>
-            <div className="mb-6 flex flex-col items-stretch gap-4 sm:flex-row sm:items-center sm:justify-between">
-              <h2 className="text-2xl font-semibold text-moss-green font-heading">
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="text-2xl font-semibold text-brand-ink font-heading">
                 Your Characters
                 {!loading && (
                   <span className="text-lg text-warm-gray ml-2">
@@ -223,7 +236,7 @@ export default function CharactersPage() {
                   </span>
                 )}
               </h2>
-              <div className="flex flex-wrap items-center justify-end gap-3">
+              <div className="flex items-center gap-3">
                 <Button
                   onClick={() => setShowImportModal(true)}
                   variant="secondary" className="flex items-center gap-2"
@@ -251,7 +264,7 @@ export default function CharactersPage() {
             {/* Loading State */}
             {loading && (
               <div className="flex flex-col items-center justify-center py-16">
-                <Loader2 className="w-12 h-12 text-moss-green animate-spin mb-4" />
+                <Loader2 className="w-12 h-12 text-brand-ink animate-spin mb-4" />
                 <p className="text-stone-gray">Loading your characters...</p>
               </div>
             )}
@@ -280,8 +293,9 @@ export default function CharactersPage() {
                   <CharacterCard
                     key={character.id}
                     character={character}
-                    canManage={character.userId === user?.id}
                     campaign={getCharacterCampaign(character)}
+                    canManage={character.userId === user?.id}
+                    onView={handleView}
                     onEdit={handleEdit}
                     onCopy={handleCopy}
                     onDelete={handleDeleteClick}
@@ -296,12 +310,12 @@ export default function CharactersPage() {
           {/* Character Stats (if characters exist) */}
           {!loading && characters.length > 0 && (
             <section className="glass-panel p-6">
-              <h3 className="text-lg font-semibold text-moss-green mb-4">
+              <h3 className="text-lg font-semibold text-brand-ink mb-4">
                 Quick Stats
               </h3>
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div className="text-center p-4 rounded-lg bg-moss-green/5">
-                  <p className="text-3xl font-bold text-moss-green">
+                  <p className="text-3xl font-bold text-brand-ink">
                     {characters.filter((c) => c.campaignId).length}
                   </p>
                   <p className="text-sm text-warm-gray mt-1">Assigned to Campaigns</p>
@@ -325,6 +339,13 @@ export default function CharactersPage() {
       </main>
 
       {/* Modals */}
+      {viewingCharacter && (
+        <CharacterSheetViewerModal
+          character={viewingCharacter}
+          onClose={() => setViewingCharacter(null)}
+        />
+      )}
+
       <NewCharacterModal
         isOpen={showCreateModal}
         onClose={() => setShowCreateModal(false)}

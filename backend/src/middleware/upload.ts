@@ -1,15 +1,19 @@
 import multer, { FileFilterCallback } from 'multer';
 import path from 'path';
-import { Request } from 'express';
+import { errorMessage } from '../utils/errors';
+import { Request, Response, NextFunction } from 'express';
 import {
   AssetType,
   AssetScope,
+  isConfigurableAssetType,
+  MAX_UPLOAD_BYTES,
   generateUniqueFilename,
   getFilePath,
   getFileSizeLimit,
   isAllowedExtension,
   ensureDirectory,
   getTempDirectory,
+  ALLOWED_EXTENSIONS,
 } from '../utils/fileUtils';
 
 /**
@@ -50,8 +54,8 @@ const storage = multer.diskStorage({
       await ensureDirectory(uploadPath);
 
       cb(null, uploadPath);
-    } catch (error: any) {
-      cb(error, getTempDirectory()); // Fallback to temp directory
+    } catch (error: unknown) {
+      cb(error as Error, getTempDirectory()); // Fallback to temp directory
     }
   },
 
@@ -83,16 +87,12 @@ const fileFilter = (req: UploadRequest, file: Express.Multer.File, cb: FileFilte
 };
 
 /**
- * Helper to get allowed extensions as a string
+ * The allowed extensions for an error message, read from the one table that
+ * decides them. This used to be a hand-written copy that had already drifted
+ * from the real list.
  */
 function getAllowedExtensionsString(assetType: AssetType): string {
-  const extensions = {
-    MAP: '.png, .jpg, .jpeg, .webp, .pdf',
-    TOKEN: '.png, .jpg, .jpeg, .webp, .gif',
-    AUDIO: '.mp3, .ogg, .wav',
-    AVATAR: '.png, .jpg, .jpeg, .webp',
-  };
-  return extensions[assetType] || '';
+  return ALLOWED_EXTENSIONS[assetType].join(', ');
 }
 
 /**
@@ -119,7 +119,7 @@ export function createUploadMiddleware(assetType: AssetType) {
  * @param scope Scope of asset (optional, defaults to GLOBAL)
  */
 export function setAssetMetadata(assetType: AssetType, scope: AssetScope = 'GLOBAL') {
-  return (req: UploadRequest, res: any, next: any) => {
+  return (req: UploadRequest, res: Response, next: NextFunction): Response | void => {
     req.assetType = assetType;
     req.assetScope = scope;
 
@@ -143,11 +143,15 @@ export function setAssetMetadata(assetType: AssetType, scope: AssetScope = 'GLOB
  * Generic upload middleware that accepts all file types
  * Used when asset type is determined from request body
  * File type validation happens in subsequent middleware
+ *
+ * The cap is the largest configured per-type limit — multer runs before the
+ * asset type is known, so the exact per-type limit is enforced afterwards by
+ * validateFileSize() in middleware/fileValidation.ts.
  */
 export const uploadGeneric = multer({
   storage,
   limits: {
-    fileSize: 25 * 1024 * 1024, // Max 25MB (largest allowed size)
+    fileSize: MAX_UPLOAD_BYTES, // Largest MAX_<TYPE>_SIZE_MB configured
     files: 1, // Only allow one file per request
   },
   // No fileFilter - accept all files, validate in middleware
@@ -164,16 +168,23 @@ export const uploadAvatar = createUploadMiddleware('AVATAR');
 /**
  * Error handler middleware for multer errors
  */
-export function handleUploadError(err: any, req: any, res: any, next: any) {
+export function handleUploadError(err: unknown, req: Request, res: Response, next: NextFunction): Response | void {
   if (err instanceof multer.MulterError) {
     if (err.code === 'LIMIT_FILE_SIZE') {
-      const assetType = (req as UploadRequest).assetType || 'FILE';
-      const limit = getFileSizeLimit(assetType as AssetType);
+      // On the generic upload route multer aborts mid-stream, so req.assetType
+      // is not set yet. The client sends `type` before the file part, so fall
+      // back to the parsed body, then to a type-agnostic message.
+      const bodyType = typeof req.body?.type === 'string' ? req.body.type.toUpperCase() : undefined;
+      const assetType = (req as UploadRequest).assetType || bodyType;
+      const isKnownType = !!assetType && isConfigurableAssetType(assetType);
+      const limit = isKnownType ? getFileSizeLimit(assetType) : MAX_UPLOAD_BYTES;
       const limitMB = (limit / (1024 * 1024)).toFixed(0);
 
       return res.status(400).json({
         error: 'File Too Large',
-        message: `${assetType} files must be smaller than ${limitMB}MB`,
+        message: isKnownType
+          ? `${assetType} files must be smaller than ${limitMB}MB`
+          : `File exceeds the maximum upload size of ${limitMB}MB`,
       });
     }
 
@@ -193,7 +204,7 @@ export function handleUploadError(err: any, req: any, res: any, next: any) {
   if (err) {
     return res.status(400).json({
       error: 'Upload Error',
-      message: err.message || 'File upload failed',
+      message: errorMessage(err) || 'File upload failed',
     });
   }
 

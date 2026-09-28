@@ -17,6 +17,7 @@ import {
   getPasswordStrength,
 } from '@/utils/validation';
 import Button from '@/components/ui/Button';
+import { apiErrorMessage, apiErrorStatus, apiErrorText } from '@/utils/errors';
 
 // ============================================
 // Types
@@ -41,7 +42,7 @@ interface SystemConfigData {
 
 export default function SetupWizardPage() {
   const navigate = useNavigate();
-  const { refreshUser } = useAuth();
+  const { adoptSession } = useAuth();
   const { mascotUrl } = useTheme();
 
   // Step management
@@ -187,8 +188,12 @@ export default function SetupWizardPage() {
     setLoading(true);
 
     try {
-      // Call setup initialization endpoint
-      await setupService.initializeSetup({
+      // Call setup initialization endpoint.
+      //
+      // The system configuration step travels with the admin's details: it was
+      // collected and shown back on the review screen but never sent, so every
+      // instance came up with the defaults no matter what was chosen.
+      const { user } = await setupService.initializeSetup({
         email: adminData.email,
         password: adminData.password,
         displayName: adminData.displayName,
@@ -197,17 +202,21 @@ export default function SetupWizardPage() {
         allowRegistration: systemConfig.enableRegistration,
       });
 
-      // Refresh auth context to get the new admin user
-      await refreshUser();
+      // Take up the session the server just created. `refreshUser()` cannot do
+      // this — it returns early while the context still thinks nobody is signed
+      // in, which is exactly the state we are in here, so the navigation below
+      // used to hit the route guard and bounce the new admin to the login page.
+      adoptSession(user);
 
       // Redirect to dashboard
       navigate('/dashboard');
-    } catch (err: any) {
+    } catch (err) {
       console.error('Setup error:', err);
 
-      if (err.response?.data?.error) {
-        setError(err.response.data.message || err.response.data.error);
-      } else if (err.response?.status === 400) {
+      const serverError = apiErrorText(err);
+      if (serverError) {
+        setError(apiErrorMessage(err) || serverError);
+      } else if (apiErrorStatus(err) === 400) {
         setError('Setup has already been completed');
       } else {
         setError('An error occurred during setup. Please try again.');
@@ -261,7 +270,7 @@ export default function SetupWizardPage() {
         aria-live="polite"
         aria-label="Checking setup status"
       >
-        <Loader2 className="w-8 h-8 text-moss-green animate-spin" aria-hidden="true" />
+        <Loader2 className="w-8 h-8 text-brand-ink animate-spin" aria-hidden="true" />
       </div>
     );
   }
@@ -274,7 +283,7 @@ export default function SetupWizardPage() {
           <div className="flex justify-center mb-4">
             <img src={mascotUrl} alt="CozyVTT" className="w-20 h-20 object-contain animate-pulse-soft" />
           </div>
-          <h1 className="text-4xl font-bold text-moss-green font-heading">
+          <h1 className="text-4xl font-bold text-brand-ink font-heading">
             CozyVTT Setup
           </h1>
           <p className="mt-2 text-warm-gray">
@@ -397,11 +406,11 @@ function Step1Welcome() {
     <div className="space-y-6 text-center">
       <div className="flex justify-center gap-4">
         <Shield className="w-12 h-12 text-spirit-purple" />
-        <Settings className="w-12 h-12 text-moss-green" />
+        <Settings className="w-12 h-12 text-brand-ink" />
       </div>
 
       <div>
-        <h2 className="text-2xl font-bold text-moss-green mb-3">
+        <h2 className="text-2xl font-bold text-brand-ink mb-3">
           Welcome to CozyVTT!
         </h2>
         <p className="text-stone-gray max-w-xl mx-auto">
@@ -411,18 +420,18 @@ function Step1Welcome() {
       </div>
 
       <div className="glass-panel p-6 text-left space-y-4 bg-warm-amber/5">
-        <h3 className="font-semibold text-moss-green">What we'll set up:</h3>
+        <h3 className="font-semibold text-brand-ink">What we'll set up:</h3>
         <ul className="space-y-2 text-sm text-stone-gray">
           <li className="flex items-start gap-2">
-            <CheckCircle className="w-5 h-5 text-moss-green flex-shrink-0 mt-0.5" />
+            <CheckCircle className="w-5 h-5 text-brand-ink flex-shrink-0 mt-0.5" />
             <span>Create your administrator account</span>
           </li>
           <li className="flex items-start gap-2">
-            <CheckCircle className="w-5 h-5 text-moss-green flex-shrink-0 mt-0.5" />
+            <CheckCircle className="w-5 h-5 text-brand-ink flex-shrink-0 mt-0.5" />
             <span>Configure basic system settings</span>
           </li>
           <li className="flex items-start gap-2">
-            <CheckCircle className="w-5 h-5 text-moss-green flex-shrink-0 mt-0.5" />
+            <CheckCircle className="w-5 h-5 text-brand-ink flex-shrink-0 mt-0.5" />
             <span>Complete the installation process</span>
           </li>
         </ul>
@@ -450,7 +459,7 @@ function Step2AdminAccount({ data, setData, fieldErrors, passwordStrength }: Ste
   return (
     <div className="space-y-6">
       <div className="text-center">
-        <h2 className="text-2xl font-bold text-moss-green mb-2">
+        <h2 className="text-2xl font-bold text-brand-ink mb-2">
           Create Admin Account
         </h2>
         <p className="text-sm text-stone-gray">
@@ -461,7 +470,7 @@ function Step2AdminAccount({ data, setData, fieldErrors, passwordStrength }: Ste
       <div className="space-y-4">
         {/* Display Name */}
         <div>
-          <label htmlFor="displayName" className="block text-sm font-medium text-moss-green mb-1">
+          <label htmlFor="displayName" className="block text-sm font-medium text-brand-ink mb-1">
             Display Name
           </label>
           <input
@@ -482,7 +491,7 @@ function Step2AdminAccount({ data, setData, fieldErrors, passwordStrength }: Ste
 
         {/* Email */}
         <div>
-          <label htmlFor="email" className="block text-sm font-medium text-moss-green mb-1">
+          <label htmlFor="email" className="block text-sm font-medium text-brand-ink mb-1">
             Email Address
           </label>
           <input
@@ -502,7 +511,7 @@ function Step2AdminAccount({ data, setData, fieldErrors, passwordStrength }: Ste
 
         {/* Password */}
         <div>
-          <label htmlFor="password" className="block text-sm font-medium text-moss-green mb-1">
+          <label htmlFor="password" className="block text-sm font-medium text-brand-ink mb-1">
             Password
           </label>
           <input
@@ -527,10 +536,10 @@ function Step2AdminAccount({ data, setData, fieldErrors, passwordStrength }: Ste
                 <span
                   className={`text-xs font-medium ${
                     passwordStrength.color === 'green'
-                      ? 'text-green-600'
+                      ? 'text-success-ink'
                       : passwordStrength.color === 'yellow'
-                      ? 'text-yellow-600'
-                      : 'text-red-600'
+                      ? 'text-warning-ink'
+                      : 'text-danger-ink'
                   }`}
                 >
                   {passwordStrength.label}
@@ -540,10 +549,10 @@ function Step2AdminAccount({ data, setData, fieldErrors, passwordStrength }: Ste
                 <div
                   className={`h-1.5 rounded-full transition-all ${
                     passwordStrength.color === 'green'
-                      ? 'bg-green-600'
+                      ? 'bg-success'
                       : passwordStrength.color === 'yellow'
-                      ? 'bg-yellow-600'
-                      : 'bg-red-600'
+                      ? 'bg-warning'
+                      : 'bg-danger'
                   }`}
                   style={{ width: `${(passwordStrength.score / 10) * 100}%` }}
                 ></div>
@@ -556,7 +565,7 @@ function Step2AdminAccount({ data, setData, fieldErrors, passwordStrength }: Ste
         <div>
           <label
             htmlFor="confirmPassword"
-            className="block text-sm font-medium text-moss-green mb-1"
+            className="block text-sm font-medium text-brand-ink mb-1"
           >
             Confirm Password
           </label>
@@ -611,7 +620,7 @@ function Step3SystemConfig({ data, setData, fieldErrors }: Step3Props) {
   return (
     <div className="space-y-6">
       <div className="text-center">
-        <h2 className="text-2xl font-bold text-moss-green mb-2">
+        <h2 className="text-2xl font-bold text-brand-ink mb-2">
           System Configuration
         </h2>
         <p className="text-sm text-stone-gray">
@@ -624,7 +633,7 @@ function Step3SystemConfig({ data, setData, fieldErrors }: Step3Props) {
         <div>
           <label
             htmlFor="instanceName"
-            className="block text-sm font-medium text-moss-green mb-1"
+            className="block text-sm font-medium text-brand-ink mb-1"
           >
             Instance Name
           </label>
@@ -649,7 +658,7 @@ function Step3SystemConfig({ data, setData, fieldErrors }: Step3Props) {
 
         {/* Timezone */}
         <div>
-          <label htmlFor="timezone" className="block text-sm font-medium text-moss-green mb-1">
+          <label htmlFor="timezone" className="block text-sm font-medium text-brand-ink mb-1">
             Timezone
           </label>
           <select
@@ -689,7 +698,7 @@ function Step3SystemConfig({ data, setData, fieldErrors }: Step3Props) {
             <div className="flex-1">
               <label
                 htmlFor="enableRegistration"
-                className="block text-sm font-medium text-moss-green cursor-pointer"
+                className="block text-sm font-medium text-brand-ink cursor-pointer"
               >
                 Enable Public Registration
               </label>
@@ -721,7 +730,7 @@ function Step4Review({ adminData, systemConfig }: Step4Props) {
   return (
     <div className="space-y-6">
       <div className="text-center">
-        <h2 className="text-2xl font-bold text-moss-green mb-2">
+        <h2 className="text-2xl font-bold text-brand-ink mb-2">
           Review & Confirm
         </h2>
         <p className="text-sm text-stone-gray">
@@ -732,18 +741,18 @@ function Step4Review({ adminData, systemConfig }: Step4Props) {
       <div className="space-y-4">
         {/* Admin Account */}
         <div className="glass-panel p-4 bg-moss-green/5">
-          <h3 className="font-semibold text-moss-green mb-3 flex items-center gap-2">
+          <h3 className="font-semibold text-brand-ink mb-3 flex items-center gap-2">
             <Shield className="w-5 h-5" />
             Administrator Account
           </h3>
           <dl className="space-y-2 text-sm">
             <div className="flex justify-between">
               <dt className="text-warm-gray">Display Name:</dt>
-              <dd className="text-moss-green font-medium">{adminData.displayName}</dd>
+              <dd className="text-brand-ink font-medium">{adminData.displayName}</dd>
             </div>
             <div className="flex justify-between">
               <dt className="text-warm-gray">Email:</dt>
-              <dd className="text-moss-green font-medium">{adminData.email}</dd>
+              <dd className="text-brand-ink font-medium">{adminData.email}</dd>
             </div>
             <div className="flex justify-between">
               <dt className="text-warm-gray">Password:</dt>
@@ -754,18 +763,18 @@ function Step4Review({ adminData, systemConfig }: Step4Props) {
 
         {/* System Configuration */}
         <div className="glass-panel p-4 bg-warm-amber/5">
-          <h3 className="font-semibold text-moss-green mb-3 flex items-center gap-2">
+          <h3 className="font-semibold text-brand-ink mb-3 flex items-center gap-2">
             <Settings className="w-5 h-5" />
             System Configuration
           </h3>
           <dl className="space-y-2 text-sm">
             <div className="flex justify-between">
               <dt className="text-warm-gray">Instance Name:</dt>
-              <dd className="text-moss-green font-medium">{systemConfig.instanceName}</dd>
+              <dd className="text-brand-ink font-medium">{systemConfig.instanceName}</dd>
             </div>
             <div className="flex justify-between">
               <dt className="text-warm-gray">Timezone:</dt>
-              <dd className="text-moss-green font-medium">{systemConfig.timezone}</dd>
+              <dd className="text-brand-ink font-medium">{systemConfig.timezone}</dd>
             </div>
             <div className="flex justify-between">
               <dt className="text-warm-gray">Public Registration:</dt>
@@ -783,7 +792,7 @@ function Step4Review({ adminData, systemConfig }: Step4Props) {
         {/* Confirmation Message */}
         <div className="glass-panel p-4 border-2 border-moss-green/30">
           <p className="text-sm text-stone-gray text-center">
-            Click <span className="font-medium text-moss-green">Complete Setup</span> to
+            Click <span className="font-medium text-brand-ink">Complete Setup</span> to
             create your admin account and finish the installation. You will be
             automatically logged in and redirected to the dashboard.
           </p>

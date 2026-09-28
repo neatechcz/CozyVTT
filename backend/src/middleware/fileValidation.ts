@@ -2,9 +2,69 @@ import { Response, NextFunction } from 'express';
 import { fileTypeFromFile } from 'file-type';
 import fs from 'fs/promises';
 import path from 'path';
-import { AssetType, isAllowedMimeType, deleteFile } from '../utils/fileUtils';
+import { AssetType, isAllowedMimeType, deleteFile, getFileSizeLimit, ALLOWED_EXTENSIONS } from '../utils/fileUtils';
 import { UploadRequest } from './upload';
 import logger from '../utils/logger';
+import { isPlainTextFile } from '../utils/textFile';
+
+/** The first bytes of a file, or an empty buffer if it cannot be read. */
+async function leadingBytes(filePath: string, count: number): Promise<Buffer> {
+  let handle: fs.FileHandle | undefined;
+  try {
+    handle = await fs.open(filePath, 'r');
+    const buf = Buffer.alloc(count);
+    const { bytesRead } = await handle.read(buf, 0, count, 0);
+    return buf.subarray(0, bytesRead);
+  } catch {
+    return Buffer.alloc(0);
+  } finally {
+    await handle?.close();
+  }
+}
+
+/** Every PDF begins with the literal bytes %PDF-. */
+async function startsWithPdfHeader(filePath: string): Promise<boolean> {
+  const head = await leadingBytes(filePath, 5);
+  return head.toString('latin1') === '%PDF-';
+}
+
+/**
+ * An MP3 begins with an ID3v2 tag, or with an MPEG audio frame sync: eleven set
+ * bits, 0xFF followed by a byte whose top three bits are set.
+ */
+async function startsWithMp3Header(filePath: string): Promise<boolean> {
+  const head = await leadingBytes(filePath, 3);
+  if (head.length >= 3 && head.toString('latin1') === 'ID3') return true;
+  return head.length >= 2 && head[0] === 0xff && (head[1] & 0xe0) === 0xe0;
+}
+
+/**
+ * Rename the stored file so its extension matches the validated content.
+ *
+ * multer writes the file under the name the client chose, and the upload path
+ * applies no extension filter, so a genuine image can arrive as `evil.html` or
+ * a GIF whose header is also valid JavaScript as `x.js`. Left in place, the
+ * serving route hands it back with a Content-Type taken from that extension.
+ * Once the content is known the extension is forced to the canonical one for
+ * it, so nothing but a real image extension is ever stored. Returns the new
+ * on-disk path.
+ */
+async function normalizeStoredExtension(
+  file: Express.Multer.File,
+  detectedExt: string
+): Promise<void> {
+  const wanted = `.${detectedExt.toLowerCase()}`;
+  const current = path.extname(file.path).toLowerCase();
+  if (current === wanted) return;
+
+  const dir = path.dirname(file.path);
+  const base = path.basename(file.filename, path.extname(file.filename));
+  const newFilename = `${base}${wanted}`;
+  const newPath = path.join(dir, newFilename);
+  await fs.rename(file.path, newPath);
+  file.path = newPath;
+  file.filename = newFilename;
+}
 
 /**
  * Validate uploaded file by checking actual MIME type from file content (magic bytes)
@@ -47,15 +107,28 @@ export async function validateFileType(
     const ext = path.extname(req.file.originalname).toLowerCase();
     const isPDF = ext === '.pdf';
     const isMP3 = ext === '.mp3';
+    const isTextDocument = assetType === 'DOCUMENT' && (ext === '.txt' || ext === '.md');
 
-    // If file-type couldn't detect type, check if it's a known exception
+    // If file-type couldn't detect type, check if it's a known exception.
+    //
+    // These exceptions used to accept on extension alone. file-type does
+    // identify real PDFs and MP3s, so the only files that reach here under
+    // those names are ones it could not identify at all, and a filename is not
+    // evidence. The leading bytes are checked instead: a PDF starts with %PDF-
+    // and an MP3 with an ID3 tag or an MPEG frame sync.
     if (!fileType) {
-      if (isPDF && assetType === 'MAP') {
-        // PDF for maps is allowed
+      if (isPDF && assetType === 'MAP' && (await startsWithPdfHeader(filePath))) {
         next();
         return;
-      } else if (isMP3 && assetType === 'AUDIO') {
-        // MP3 for audio is allowed
+      } else if (isMP3 && assetType === 'AUDIO' && (await startsWithMp3Header(filePath))) {
+        next();
+        return;
+      } else if (isTextDocument && (await isPlainTextFile(filePath))) {
+        // Plain text and Markdown have no magic bytes, so file-type cannot
+        // identify them and they always land here. The extension is not
+        // trusted on its own: the bytes have to prove they are text. A PDF
+        // document does not need this branch, because file-type identifies a
+        // real PDF and it passes the MIME check below like any other file.
         next();
         return;
       } else {
@@ -76,14 +149,18 @@ export async function validateFileType(
 
       res.status(400).json({
         error: 'Validation Error',
-        message: `Invalid file type. ${assetType} files must be one of: ${getAllowedMimeTypesString(assetType)}`,
+        message: `Invalid file type. ${assetType} files must be one of: ${getAllowedExtensionsString(assetType)}`,
       });
       return;
     }
 
+    // The content is known and allowed. Force the stored extension to match it,
+    // so the serving route cannot be told the file is a page or a script.
+    await normalizeStoredExtension(req.file, fileType.ext);
+
     // File is valid, proceed
     next();
-  } catch (error: any) {
+  } catch (error) {
     logger.error('Error validating file type', { err: error });
 
     // Attempt to delete the file if it exists
@@ -103,16 +180,12 @@ export async function validateFileType(
 }
 
 /**
- * Helper to get allowed MIME types as a string
+ * The allowed extensions for an error message, read from the one table that
+ * decides them. This used to be a hand-written list of format names that had
+ * drifted from the real list; extensions are also what a person recognises.
  */
-function getAllowedMimeTypesString(assetType: AssetType): string {
-  const mimeTypes = {
-    MAP: 'PNG, JPEG, WEBP, PDF',
-    TOKEN: 'PNG, JPEG, WEBP, GIF',
-    AUDIO: 'MP3, OGG, WAV',
-    AVATAR: 'PNG, JPEG, WEBP',
-  };
-  return mimeTypes[assetType] || '';
+function getAllowedExtensionsString(assetType: AssetType): string {
+  return ALLOWED_EXTENSIONS[assetType].join(', ');
 }
 
 /**
@@ -137,16 +210,9 @@ export async function validateFileSize(
     const stats = await fs.stat(filePath);
     const fileSizeInBytes = stats.size;
 
-    // Get size limit for asset type
+    // Get size limit for asset type (resolved from MAX_<TYPE>_SIZE_MB at startup)
     const assetType = req.assetType || 'MAP';
-    const limits = {
-      MAP: 25 * 1024 * 1024,      // 25 MB
-      TOKEN: 5 * 1024 * 1024,     // 5 MB
-      AUDIO: 10 * 1024 * 1024,    // 10 MB
-      AVATAR: 2 * 1024 * 1024,    // 2 MB
-    };
-
-    const limit = limits[assetType];
+    const limit = getFileSizeLimit(assetType);
 
     if (fileSizeInBytes > limit) {
       // Delete the file
@@ -161,7 +227,7 @@ export async function validateFileSize(
     }
 
     next();
-  } catch (error: any) {
+  } catch (error) {
     logger.error('Error validating file size', { err: error });
 
     // Attempt to delete the file if it exists

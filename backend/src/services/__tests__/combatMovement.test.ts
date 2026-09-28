@@ -60,6 +60,15 @@ const verticalWall = (xInSquares: number, type: 'wall' | 'door-closed' | 'door-o
 });
 
 describe('resolveDnd5eMovementSpeed', () => {
+  it('uses upstream exhaustion when no survival ledger exists and prefers a tracked ledger', () => {
+    expect(resolveDnd5eMovementSpeed({
+      kind: 'pc', characterData: { speed: 30, exhaustionLevel: 2, conditions: ['exhausted'] },
+    })).toMatchObject({ ok: true, speedFeet: 15 });
+    expect(resolveDnd5eMovementSpeed({
+      kind: 'pc', characterData: { speed: 30, exhaustionLevel: 5, survival: { exhaustionLevel: 0 }, conditions: [] },
+    })).toMatchObject({ ok: true, speedFeet: 30 });
+  });
+
   it('resolves a player speed and the PC exhaustion level from the linked sheet', () => {
     expect(resolveDnd5eMovementSpeed({
       kind: 'pc',

@@ -11,20 +11,27 @@ import rateLimit from 'express-rate-limit';
 import { sessionConfig } from './config/session';
 import { trustProxyHops } from './config/proxy';
 import { requireSetupComplete } from './middleware/setup';
+import { requirePasswordChanged } from './middleware/passwordChange';
+import { bodyParsers } from './middleware/bodyParsers';
+import { errorHandler } from './middleware/errorHandler';
 import setupRoutes from './routes/setup';
 import authRoutes from './routes/auth';
 import campaignRoutes from './routes/campaigns';
 import userRoutes from './routes/users';
 import characterRoutes, { characterDataPatchBodyParser } from './routes/characters';
+import characterTemplateRoutes from './routes/characterTemplates';
 import invitationRoutes from './routes/invitations';
 import assetRoutes from './routes/assets';
 import mapRoutes from './routes/maps';
 import creatureRoutes from './routes/creatures';
 import tokenTemplateRoutes from './routes/tokenTemplates';
 import adminRoutes from './routes/admin';
+import configRoutes from './routes/config';
 import { initializeWebSocket } from './websocket';
 import logger from './utils/logger';
 import { prisma } from './config/database';
+import { UPLOAD_LIMITS } from './utils/fileUtils';
+import { getProxyLimitWarnings } from './utils/proxyLimits';
 
 const app = express();
 const httpServer = createServer(app);
@@ -44,7 +51,13 @@ app.set('trust proxy', trustProxyHops(process.env.TRUST_PROXY_HOPS));
 // SECURITY MIDDLEWARE
 // ============================================
 
-// Helmet: sets secure HTTP response headers
+// Helmet: sets secure HTTP response headers.
+//
+// These cover what this process answers, which in the production stack is
+// /api and /socket.io. The app page is served by the frontend container, so
+// its policy lives in frontend/security-headers.conf. The two describe the
+// same application and should be changed together; the page's is the wider of
+// the two, because the themes load Google Fonts and this one never has to.
 app.use(
   helmet({
     contentSecurityPolicy: {
@@ -87,16 +100,13 @@ const generalApiLimiter = rateLimit({
 // BODY PARSING
 // ============================================
 
-// A 100000-cell terrain list can be several megabytes; parse this bounded
-// map-edit payload before the 100kb general JSON parser.
+// Parse the bounded terrain-edit payload before the release's shared parser.
 app.put('/api/campaigns/:campaignId/maps/:id/difficult-terrain', express.json({ limit: '8mb' }));
+// Preserve the field-level PATCH parser while using the release's shared
+// 1 MB parser for all other JSON and form requests.
 
-// Character field-level PATCH may carry a full change set: 1mb for this
-// route only. It must run before the global parser (default 100kb), which
-// then skips the already-parsed body.
 app.patch('/api/characters/:id/data', characterDataPatchBodyParser);
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(bodyParsers());
 
 // ============================================
 // SESSION MANAGEMENT
@@ -139,8 +149,15 @@ app.get('/health', async (_req, res) => {
 // Apply general rate limiter to all API routes
 app.use('/api', generalApiLimiter);
 
+// Accounts flagged `mustChangePassword` (admin-created, or admin-reset) can do
+// nothing but change it until they do — see middleware/passwordChange.ts
+app.use('/api', requirePasswordChanged);
+
 // Setup wizard (accessible before setup is complete)
 app.use('/api/setup', setupRoutes);
+
+// Public client configuration (upload limits)
+app.use('/api/config', configRoutes);
 
 // Authentication: login, register, password reset, MFA
 app.use('/api/auth', authRoutes);
@@ -156,6 +173,9 @@ app.use('/api/campaigns', campaignRoutes);
 
 // Characters
 app.use('/api/characters', characterRoutes);
+// Distinct from GET /api/characters/templates/:system/:name, which serves the
+// hardcoded starter presets rather than these user-published ones.
+app.use('/api/character-templates', characterTemplateRoutes);
 
 // Campaign invitations
 app.use('/api/invitations', invitationRoutes);
@@ -184,14 +204,7 @@ app.use('*', (_req, res) => {
 // GLOBAL ERROR HANDLER
 // ============================================
 
-app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
-  logger.error('Unhandled error', { message: err.message, stack: err.stack });
-
-  res.status(500).json({
-    error: 'Internal Server Error',
-    message: process.env.NODE_ENV === 'development' ? err.message : 'An unexpected error occurred',
-  });
-});
+app.use(errorHandler);
 
 // ============================================
 // WEBSOCKET
@@ -207,6 +220,18 @@ httpServer.listen(PORT, () => {
   logger.info(`CozyVTT Backend running on port ${PORT}`);
   logger.info(`Environment: ${process.env.NODE_ENV || 'development'}`);
   logger.info(`CORS origin: ${process.env.CORS_ORIGIN || 'http://localhost:3000'}`);
+
+  const uploadLimits = Object.entries(UPLOAD_LIMITS)
+    .map(([type, bytes]) => `${type} ${Math.round(bytes / (1024 * 1024))}MB`)
+    .join(', ');
+  logger.info(`Upload limits: ${uploadLimits}`);
+
+  // A proxy body-size cap below the configured limits turns uploads into 413s
+  // that never reach this process — surface it at startup rather than in a
+  // bug report.
+  for (const warning of getProxyLimitWarnings()) {
+    logger.warn(warning);
+  }
 });
 
 export default app;

@@ -38,9 +38,15 @@ If you become a collaborator, here's what the codebase expects:
 
 ### Code Quality
 
-- **TypeScript strict mode** — no `any`, no implicit nulls
-- **Tests** — new features should include tests; bug fixes should include a regression test
-- **No new linter warnings** — `npm run lint` in the frontend must pass cleanly
+- **TypeScript strict mode** — no implicit nulls, and **no `any`**. This is not a
+  style preference: `@typescript-eslint/no-explicit-any` is an *error* in both
+  packages, so a diff containing one will not lint. Reach for `unknown` and a
+  narrowing helper instead — `frontend/src/utils/errors.ts` and
+  `backend/src/utils/prisma-json.ts` cover the two common cases
+- **Tests** — new features should include tests; bug fixes should include a regression test that fails before the fix
+- **No new linter warnings** — `npm run lint` must pass cleanly in **both** `backend/` and `frontend/`; both run with `--max-warnings 0`
+- **Run every gate, not a subset** — typecheck, lint, both test suites, the frontend build, and the two documentation checks. The full list is in [DEVELOPMENT.md](DEVELOPMENT.md#everything-before-you-call-something-done), and CI runs the same commands
+- **Documentation is part of the change** — if you alter a route, an event, a sheet field or anything a user sees, update the affected document in the same commit
 
 ### Security
 
@@ -48,6 +54,27 @@ If you become a collaborator, here's what the codebase expects:
 - All authorization checks happen server-side — never trust the client
 - File uploads must go through the existing magic byte validation middleware
 - Any new WebSocket events that modify state must verify campaign membership server-side
+
+### Styling and themes
+
+CozyVTT ships 16 themes, including four dark ones, plus user-defined custom colors. Two rules keep
+every screen working across all of them — both are enforced by tests, so breaking them fails the
+build rather than showing up as an unreadable screen for someone using a theme you didn't try:
+
+- **Never use a raw Tailwind palette color** (`bg-red-50`, `text-stone-500`, `text-blue-600`) in
+  themed UI. They keep their light-mode appearance on dark themes. Use the semantic tokens —
+  `danger`, `success`, `warning`, `info`, `spirit` — or the `.alert-*` and `.badge-*` classes in
+  `frontend/src/index.css`.
+- **Use the `-ink` variant when the color is text**: `text-danger-ink`, not `text-danger`;
+  `text-brand-ink`, not `text-moss-green`. The plain token is a fill (buttons, borders, tints); the
+  `-ink` version is derived per theme to stay above WCAG AA against that theme's backgrounds.
+
+Two areas are deliberately exempt and listed in `utils/__tests__/themeTokens.test.ts`: the character
+sheets (styled as light "paper" cards, matching the physical sheets) and the dark DM overlays that
+float over the map. If you add UI there, check its contrast by hand — exempt from theming is not
+exempt from being readable.
+
+See [ARCHITECTURE.md → Theming](ARCHITECTURE.md#theming) for the full token list.
 
 ### Performance
 

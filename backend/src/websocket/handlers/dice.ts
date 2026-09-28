@@ -8,6 +8,7 @@ import { prisma } from '../../config/database';
 import { rollDice, parseDiceExpression, DiceParserError } from '../../utils/dice-parser';
 import logger from '../../utils/logger';
 import { diceRollLimiter } from '../shared';
+import { toJson } from '../../utils/prisma-json';
 
 export function registerDiceHandlers(io: Server, socket: AuthenticatedSocket): void {
   /**
@@ -95,35 +96,35 @@ export function registerDiceHandlers(io: Server, socket: AuthenticatedSocket): v
           userId: socket.userId!,
           expression,
           result: rollResult.total,
-          breakdown: rollResult as any, // Store full RollResult
+          breakdown: toJson(rollResult), // Store full RollResult
           characterName: characterName || null,
           purpose: purpose || null,
           secret: secret || false, // Mark as secret for visibility filtering
         },
       });
 
-      // Create system message for dice roll
-      // Secret rolls are marked differently in chat
-      await prisma.message.create({
-        data: {
-          campaignId: socket.campaignId,
-          userId: socket.userId,
-          type: 'DICE_ROLL',
-          content: `${user.displayName}${characterName ? ` (${characterName})` : ''} rolled ${expression}${purpose ? ` for ${purpose}` : ''}${secret ? ' (SECRET)' : ''}`,
-          metadata: {
-            diceRollId: diceRoll.id,
-            expression,
-            result: rollResult.total,
-            breakdown: JSON.parse(JSON.stringify(rollResult)),
-            characterName: characterName || null,
-            purpose: purpose || null,
-            secret: secret || false, // Mark in metadata for client filtering
-          } as any,
-        },
-      });
+      // A roll is not a chat message, and no second row is written for it.
+      //
+      // One used to be: a Message of type DICE_ROLL whose metadata repeated the
+      // expression, result, breakdown, character name, purpose and secret flag
+      // that the DiceRoll row above already holds. Nothing ever read it — the
+      // chat panel does not listen for rolls, and the history endpoint filters
+      // the type out — so the rows accumulated with no way to reach or clear
+      // them, and their presence starved the chat page they were filtered from.
+      //
+      // The copy was also the unsafe one: `secret` lived only inside unindexed
+      // metadata, where the chat query does not filter on it. The DiceRoll table
+      // is the record, with `secret` as a real column and a clear-history
+      // watermark. Rolls are read from there, by the Dice panel.
 
-      // Broadcast result with role-based filtering
+      // Broadcast result with role-based filtering.
+      //
+      // `id` and the stored `rolledAt` are sent rather than a freshly generated
+      // timestamp so that a roll arriving live and the same roll replayed from
+      // history identify as one entry. Without the id the client keyed rolls by
+      // user and broadcast time, which no stored roll could ever match.
       const rollData = {
+        id: diceRoll.id,
         userId: socket.userId,
         userName: user.displayName,
         characterName: characterName || null,
@@ -131,7 +132,7 @@ export function registerDiceHandlers(io: Server, socket: AuthenticatedSocket): v
         result: rollResult.total,
         breakdown: rollResult,
         purpose: purpose || null,
-        timestamp: new Date().toISOString(),
+        timestamp: diceRoll.rolledAt.toISOString(),
         secret: secret || false,
       };
 
@@ -180,9 +181,21 @@ export function registerDiceHandlers(io: Server, socket: AuthenticatedSocket): v
       }
 
       if (socket.role !== 'DM') {
-        socket.emit('error', { message: 'Only a DM can clear roll history' });
+        socket.emit('error', { message: 'Only the DM can clear roll history' });
         return;
       }
+
+      // Record the clear so it survives a reload. This used to be broadcast
+      // only, which was invisible while history lived in browser memory — but
+      // now that the panel loads from the database, a clear that changed
+      // nothing server-side would undo itself on the next refresh.
+      //
+      // A watermark, not a delete: secret rolls are stored deliberately for
+      // audit, and clearing the panel should not destroy that record.
+      await prisma.campaign.update({
+        where: { id: socket.campaignId },
+        data: { rollHistoryClearedAt: new Date() },
+      });
 
       // Broadcast to all campaign members (including DM)
       io.to(socket.campaignId).emit('dice.historyCleared');

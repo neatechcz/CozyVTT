@@ -28,6 +28,15 @@ import CreateMapModal from './CreateMapModal';
 import EditMapModal from './EditMapModal';
 import ConfirmDialog from '@/components/common/ConfirmDialog';
 import Button from '@/components/ui/Button';
+import { extractAssetId } from '@/utils/assetUrl';
+import { apiErrorCode, apiErrorMessage } from '@/utils/errors';
+import {
+  uvttImportDecision,
+  uvttImportMessage,
+  uvttImportTitle,
+  hasOutOfBounds,
+} from '@/utils/uvttImport';
+import type { UvttImportDecision } from '@/utils/uvttImport';
 
 interface MapManagerProps {
   isOpen: boolean;
@@ -37,12 +46,6 @@ interface MapManagerProps {
 /**
  * Extract asset UUID from a stored imageUrl like /api/assets/maps/{uuid}
  */
-function extractAssetId(url: string | null | undefined): string {
-  if (!url) return '';
-  const parts = url.split('/');
-  return parts[parts.length - 1] || '';
-}
-
 // ============================================
 // Token Transfer Confirmation
 // ============================================
@@ -91,7 +94,7 @@ function TokenTransferConfirmation({
       </div>
 
       <div className="flex gap-2 text-xs">
-        <button type="button" onClick={selectAll} className="text-moss-green hover:underline">
+        <button type="button" onClick={selectAll} className="text-brand-ink hover:underline">
           Select all
         </button>
         <span className="text-stone-gray/40">·</span>
@@ -224,7 +227,7 @@ function MapCard({
 
       {/* Info */}
       <div className="p-3">
-        <h3 className="font-semibold text-moss-green truncate text-sm mb-0.5">{map.name}</h3>
+        <h3 className="font-semibold text-brand-ink truncate text-sm mb-0.5">{map.name}</h3>
         <p className="text-xs text-stone-gray/60">
           {map.width}×{map.height} grid · {map.gridSize}px/sq
         </p>
@@ -238,8 +241,8 @@ function MapCard({
             title={isActive ? 'Already active' : 'Set as active map'}
             className={`flex-1 text-xs py-1.5 px-2 rounded-lg transition-colors flex items-center justify-center gap-1 ${
               isActive
-                ? 'bg-moss-green/10 text-moss-green/50 cursor-not-allowed'
-                : 'bg-moss-green/10 hover:bg-moss-green/20 text-moss-green'
+                ? 'bg-moss-green/10 text-brand-ink/50 cursor-not-allowed'
+                : 'bg-moss-green/10 hover:bg-moss-green/20 text-brand-ink'
             }`}
           >
             {isSwitchingToThis ? (
@@ -263,7 +266,7 @@ function MapCard({
             type="button"
             onClick={() => onExport(map)}
             title="Export as .uvtt file"
-            className="p-1.5 rounded-lg bg-moss-green/10 hover:bg-moss-green/20 text-moss-green transition-colors"
+            className="p-1.5 rounded-lg bg-moss-green/10 hover:bg-moss-green/20 text-brand-ink transition-colors"
           >
             <Download className="w-3.5 h-3.5" />
           </button>
@@ -275,8 +278,8 @@ function MapCard({
             title={isActive ? 'Cannot delete the active map' : 'Delete map'}
             className={`p-1.5 rounded-lg transition-colors ${
               isActive
-                ? 'bg-red-500/5 text-red-400/40 cursor-not-allowed'
-                : 'bg-red-500/10 hover:bg-red-500/20 text-red-600'
+                ? 'bg-danger/5 text-danger-ink/40 cursor-not-allowed'
+                : 'bg-danger/10 hover:bg-danger/20 text-danger-ink'
             }`}
           >
             <Trash2 className="w-3.5 h-3.5" />
@@ -321,6 +324,16 @@ export default function MapManager({ isOpen, onClose }: MapManagerProps) {
   const uvttInputRef = useRef<HTMLInputElement>(null);
   const [isImportingUVTT, setIsImportingUVTT] = useState(false);
   const [importSuccess, setImportSuccess] = useState<string | null>(null);
+  /**
+   * A UVTT the server would not import without being asked: its walls reach
+   * outside its picture, or it carries walls for its furniture, or both. Held
+   * here so the same file can be sent again with the answer.
+   */
+  const [uvttToConfirm, setUvttToConfirm] = useState<{
+    file: File;
+    decision: UvttImportDecision;
+  } | null>(null);
+  const [includeObjectWalls, setIncludeObjectWalls] = useState(false);
 
   // Fetch maps when the panel opens
   const fetchMaps = useCallback(async () => {
@@ -370,8 +383,8 @@ export default function MapManager({ isOpen, onClose }: MapManagerProps) {
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
-    } catch (err: any) {
-      setError(err.response?.data?.message || 'Failed to export map.');
+    } catch (err: unknown) {
+      setError(apiErrorMessage(err) || 'Failed to export map.');
     }
   };
 
@@ -386,37 +399,59 @@ export default function MapManager({ isOpen, onClose }: MapManagerProps) {
     try {
       await mapService.deleteMap(campaign.id, map.id);
       setMaps((prev) => prev.filter((m) => m.id !== map.id));
-    } catch (err: any) {
-      setError(err.response?.data?.message || 'Failed to delete map.');
+    } catch (err: unknown) {
+      setError(apiErrorMessage(err) || 'Failed to delete map.');
     }
   };
 
   // ---- UVTT import ----
+
+  const runUVTTImport = async (
+    file: File,
+    opts: { confirm?: boolean; includeObjectWalls?: boolean } = {}
+  ) => {
+    if (!campaign?.id) return;
+    setIsImportingUVTT(true);
+    setError(null);
+    setImportSuccess(null);
+    try {
+      const result = await mapService.importUVTT(campaign.id, file, undefined, undefined, opts);
+      setMaps((prev) => [result.map, ...prev]);
+      const parts = [`${result.totalSegments} wall segments`];
+      if (result.portalCount > 0) parts.push(`${result.portalCount} doors`);
+      if (result.lightCount > 0) parts.push(`${result.lightCount} lights`);
+      setImportSuccess(`Imported "${result.map.name}" with ${parts.join(', ')}`);
+      // Auto-clear success message after 5 seconds
+      setTimeout(() => setImportSuccess(null), 5000);
+    } catch (err: unknown) {
+      // The file needs an answer before it can become a map. Nothing has been
+      // created; ask, then send the same file again with the decision.
+      if (apiErrorCode(err) === 'UVTT_IMPORT_NEEDS_CONFIRMATION') {
+        const decision = uvttImportDecision(err);
+        if (decision) {
+          setIncludeObjectWalls(false);
+          setUvttToConfirm({ file, decision });
+          return;
+        }
+      }
+      setError(apiErrorMessage(err) || 'Failed to import UVTT file.');
+    } finally {
+      setIsImportingUVTT(false);
+    }
+  };
 
   const handleUVTTImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file || !campaign?.id) return;
     // Reset input so the same file can be re-selected
     e.target.value = '';
+    await runUVTTImport(file);
+  };
 
-    setIsImportingUVTT(true);
-    setError(null);
-    setImportSuccess(null);
-    try {
-      const result = await mapService.importUVTT(campaign.id, file);
-      setMaps((prev) => [result.map, ...prev]);
-      const parts = [`${result.totalSegments} wall segments`];
-      if (result.portalCount > 0) parts.push(`${result.portalCount} doors`);
-      if ((result as any).lightCount > 0) parts.push(`${(result as any).lightCount} lights`);
-      setImportSuccess(`Imported "${result.map.name}" with ${parts.join(', ')}`);
-      // Auto-clear success message after 5 seconds
-      setTimeout(() => setImportSuccess(null), 5000);
-    } catch (err: any) {
-      const msg = err.response?.data?.message || 'Failed to import UVTT file.';
-      setError(msg);
-    } finally {
-      setIsImportingUVTT(false);
-    }
+  const handleConfirmUVTTImport = async () => {
+    const pending = uvttToConfirm;
+    setUvttToConfirm(null);
+    if (pending) await runUVTTImport(pending.file, { confirm: true, includeObjectWalls });
   };
 
   // ---- Map switching ----
@@ -514,8 +549,8 @@ export default function MapManager({ isOpen, onClose }: MapManagerProps) {
       if (socket) {
         socket.emitMapChange(targetMap.id);
       }
-    } catch (err: any) {
-      setError(err.response?.data?.message || 'Failed to switch map. Please try again.');
+    } catch (err: unknown) {
+      setError(apiErrorMessage(err) || 'Failed to switch map. Please try again.');
     } finally {
       setIsSwitching(false);
     }
@@ -546,9 +581,9 @@ export default function MapManager({ isOpen, onClose }: MapManagerProps) {
               <div className="sticky top-0 z-10 bg-moss-green/10 backdrop-blur-sm border-b border-moss-green/20 px-6 py-4">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-3">
-                    <MapPin className="w-6 h-6 text-moss-green" />
+                    <MapPin className="w-6 h-6 text-brand-ink" />
                     <div>
-                      <h2 className="text-xl font-bold text-moss-green">Map Library</h2>
+                      <h2 className="text-xl font-bold text-brand-ink">Map Library</h2>
                       <p className="text-xs text-stone-gray">{campaign.name}</p>
                     </div>
                   </div>
@@ -595,14 +630,14 @@ export default function MapManager({ isOpen, onClose }: MapManagerProps) {
               {/* Content */}
               <div className="p-6">
                 {error && (
-                  <div className="mb-4 p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-red-700 text-sm flex items-start gap-2">
+                  <div className="mb-4 p-3 bg-danger/10 border border-danger/20 rounded-lg text-danger-ink text-sm flex items-start gap-2">
                     <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
                     {error}
                   </div>
                 )}
 
                 {importSuccess && (
-                  <div className="mb-4 p-3 bg-moss-green/10 border border-moss-green/30 rounded-lg text-moss-green text-sm flex items-start gap-2">
+                  <div className="mb-4 p-3 bg-moss-green/10 border border-moss-green/30 rounded-lg text-brand-ink text-sm flex items-start gap-2">
                     <CheckCircle className="w-4 h-4 flex-shrink-0 mt-0.5" />
                     {importSuccess}
                   </div>
@@ -610,7 +645,7 @@ export default function MapManager({ isOpen, onClose }: MapManagerProps) {
 
                 {isLoading ? (
                   <div className="flex items-center justify-center py-20">
-                    <Loader2 className="w-10 h-10 text-moss-green animate-spin" />
+                    <Loader2 className="w-10 h-10 text-brand-ink animate-spin" />
                   </div>
                 ) : maps.length === 0 ? (
                   <div className="text-center py-16 space-y-3">
@@ -684,6 +719,31 @@ export default function MapManager({ isOpen, onClose }: MapManagerProps) {
           onUpdated={handleUpdated}
         />
       )}
+      <ConfirmDialog
+        isOpen={!!uvttToConfirm}
+        title={uvttImportTitle(uvttToConfirm?.decision)}
+        message={uvttImportMessage(uvttToConfirm?.decision)}
+        confirmLabel={
+          uvttToConfirm && !hasOutOfBounds(uvttToConfirm.decision.outOfBounds)
+            ? 'Import'
+            : 'Import anyway'
+        }
+        variant="warning"
+        onConfirm={handleConfirmUVTTImport}
+        onCancel={() => setUvttToConfirm(null)}
+      >
+        {uvttToConfirm && uvttToConfirm.decision.objectWalls > 0 && (
+          <label className="flex items-start gap-2 text-sm text-ink-secondary cursor-pointer">
+            <input
+              type="checkbox"
+              checked={includeObjectWalls}
+              onChange={(e) => setIncludeObjectWalls(e.target.checked)}
+              className="mt-0.5"
+            />
+            <span>Let furniture block sight too</span>
+          </label>
+        )}
+      </ConfirmDialog>
       <ConfirmDialog
         isOpen={!!mapToDelete}
         title="Delete Map"

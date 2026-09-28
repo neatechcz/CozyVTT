@@ -1,6 +1,6 @@
 // ============================================
-// Character handler: character.hp.update
-// Players update their own HP; DM can update any character's HP.
+// Character handlers: character.hp.update, character.hitdice.spend
+// Players act on their own characters; the DM may act on any of them.
 // ============================================
 
 import { Server } from 'socket.io';
@@ -10,7 +10,19 @@ import { withCharacterRowLock, isCharacterLockTimeout, CHARACTER_BUSY_MESSAGE } 
 import { resolveUpdatedBy } from '../../services/characterPatch';
 import { getCharacterSheetRecipientIds } from '../utils';
 import logger from '../../utils/logger';
+import { toJson } from '../../utils/prisma-json';
+import { effectiveDnd5eHpMaximum } from '../../utils/dnd5eExhaustion';
 
+/** One hit dice pool: `total` is the pool ("5d8"), `remaining` how many are left. */
+interface HitDiceEntry {
+  class?: unknown;
+  total?: unknown;
+  remaining?: unknown;
+}
+interface CharacterHitDiceData {
+  hitDice?: unknown;
+  [key: string]: unknown;
+}
 type HpChange =
   | { error: string }
   | { current: number; max: number; temp: number; hpPath: string };
@@ -21,22 +33,14 @@ type HpChange =
  */
 function applyHpDelta(gameSystem: string | null, charData: Record<string, any>, delta: number): HpChange {
   switch (gameSystem) {
-    case 'DND_5E': {
-      if (!charData.hp || typeof charData.hp.maximum !== 'number') {
-        return { error: 'Character does not have HP tracking' };
-      }
-      const max = (charData.survival?.exhaustionLevel ?? 0) >= 4
-        ? Math.floor(charData.hp.maximum / 2) : charData.hp.maximum;
-      const temp = typeof charData.hp.temporary === 'number' ? charData.hp.temporary : 0;
-      const current = Math.max(0, Math.min(max, (typeof charData.hp.current === 'number' ? charData.hp.current : max) + delta));
-      charData.hp.current = current;
-      return { current, max, temp, hpPath: 'hp.current' };
-    }
+    case 'DND_5E':
     case 'PATHFINDER_2E': {
       if (!charData.hp || typeof charData.hp.maximum !== 'number') {
         return { error: 'Character does not have HP tracking' };
       }
-      const max = charData.hp.maximum;
+      const max = gameSystem === 'DND_5E'
+        ? effectiveDnd5eHpMaximum(charData) ?? charData.hp.maximum
+        : charData.hp.maximum;
       const temp = typeof charData.hp.temporary === 'number' ? charData.hp.temporary : 0;
       const current = Math.max(0, Math.min(max, (typeof charData.hp.current === 'number' ? charData.hp.current : max) + delta));
       charData.hp.current = current;
@@ -159,6 +163,91 @@ export function registerCharacterHandlers(io: Server, socket: AuthenticatedSocke
       }
       logger.error('character.hp.update failed', { err: error });
       socket.emit('error', { message: 'Failed to update character HP' });
+    }
+  });
+
+  /**
+   * CHARACTER.HITDICE.SPEND — spend one D&D 5e hit die.
+   *
+   * The roll itself goes through `dice.roll` like every other roll; this only
+   * decrements the pool, so the count cannot be inflated by a client that
+   * simply declines to send it. Same permission rule as HP: the character's
+   * owner, or the DM covering for an absent player.
+   */
+  socket.on('character.hitdice.spend', async (data: { characterId: string; index: number }) => {
+    try {
+      if (!socket.campaignId) {
+        socket.emit('error', { message: 'Not authenticated to a campaign' });
+        return;
+      }
+
+      const { characterId, index } = data ?? {};
+
+      if (!characterId || typeof index !== 'number' || !Number.isInteger(index) || index < 0) {
+        socket.emit('error', { message: 'characterId (string) and index (integer) are required' });
+        return;
+      }
+
+      const campaignId = socket.campaignId;
+      const outcome = await withCharacterRowLock(prisma, characterId, async (tx) => {
+        const character = await tx.character.findUnique({ where: { id: characterId } });
+        if (!character) return { error: 'Character not found' };
+
+        const membership = await tx.campaignMembership.findUnique({
+          where: { userId_campaignId: { userId: socket.userId!, campaignId } },
+        });
+        if (!membership || character.campaignId !== campaignId) {
+          return { error: 'Character is not in this campaign' };
+        }
+        if (character.userId !== socket.userId && membership.role !== 'DM' &&
+          !(membership.role === 'PLAYER' && membership.characterIds.includes(characterId))) {
+          return { error: 'You do not have permission to spend this character\'s hit dice' };
+        }
+        if (character.gameSystem !== 'DND_5E') {
+          return { error: 'Hit dice are not tracked for this game system' };
+        }
+
+        const charData = character.data as unknown as CharacterHitDiceData;
+        const pools = Array.isArray(charData.hitDice) ? (charData.hitDice as HitDiceEntry[]) : null;
+        if (!pools || !pools[index]) return { error: 'No hit dice pool at that position' };
+        const remaining = typeof pools[index].remaining === 'number' ? pools[index].remaining : 0;
+        if (remaining <= 0) return { error: 'No hit dice remaining to spend' };
+        pools[index].remaining = remaining - 1;
+
+        const saved = await tx.character.update({
+          where: { id: characterId },
+          data: { data: toJson(charData) },
+          include: { campaign: { select: { id: true, name: true } } },
+        });
+        return { saved };
+      });
+
+      if ('error' in outcome) {
+        socket.emit('error', { message: outcome.error });
+        return;
+      }
+
+      try {
+        const recipients = await getCharacterSheetRecipientIds(campaignId, characterId, outcome.saved.userId);
+        const updatedBy = await resolveUpdatedBy(prisma, socket.userId!);
+        io.to(recipients).emit('character.updated', {
+          characterId,
+          character: outcome.saved,
+          userId: socket.userId,
+          changedPaths: ['hitDice'],
+          updatedBy,
+        });
+      } catch (error) {
+        logger.error('Failed to broadcast hit die spend', { err: error });
+      }
+
+    } catch (error) {
+      if (isCharacterLockTimeout(error)) {
+        socket.emit('error', { message: CHARACTER_BUSY_MESSAGE });
+        return;
+      }
+      logger.error('character.hitdice.spend failed', { err: error });
+      socket.emit('error', { message: 'Failed to spend hit die' });
     }
   });
 }

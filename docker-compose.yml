@@ -5,17 +5,27 @@
 # For development (hot-reload, exposed ports), use:
 #   docker compose -f docker-compose.dev.yml up
 #
+# Prefer not to edit this file: personal tweaks belong in docker-compose.override.yml,
+# which Compose merges automatically and git ignores — so `git pull` never conflicts.
+# Copy docker-compose.override.example.yml to get started.
+#
 # If you have a reverse proxy that handles INTERNAL routing too
 # (Traefik, Caddy, an existing host-level Nginx): you can remove the bundled
-# nginx service below. Then:
-#   - Change `expose` to `ports` on the frontend service so your proxy can reach it
-#   - Point your proxy at frontend:80 for the SPA and backend:4000 for /api + /socket.io
+# nginx service below. Then ALL of the following are required:
+#   - Add `ports` to the BACKEND service (e.g. "127.0.0.1:4000:4000") — it is
+#     `expose`-only by default, so nothing outside Docker can reach it and your
+#     proxy would be pointing at a closed port
+#   - Add `ports` to the FRONTEND service (e.g. "127.0.0.1:8080:80")
+#   - Route /api/* AND /socket.io/* to the backend, everything else to the frontend
+# Miss any of these and the site loads but the API is unreachable: a fresh install
+# shows the login page instead of the setup wizard, or setup fails with a 502.
 #
-# Cloudflare Tunnel users: KEEP the bundled nginx. CF Tunnel only handles
-# public-facing TLS and origin hiding; you still need the bundled nginx to
-# route between the frontend SPA and the backend API/WebSocket. Just point
-# your `cloudflared` ingress at http://localhost:80 and you're done.
-# See docs/DEPLOYMENT.md for details.
+# Cloudflare Tunnel users: the simplest setup is to KEEP the bundled nginx —
+# CF Tunnel handles public-facing TLS and origin hiding, but not the routing
+# between the frontend SPA and the backend API/WebSocket. Point your
+# `cloudflared` ingress at http://localhost:80 and you're done. To run without
+# nginx you need path-based ingress rules (specific paths first, catch-all last).
+# See docs/DEPLOYMENT.md → "Using an External Reverse Proxy" for all three setups.
 
 services:
   database:
@@ -68,6 +78,10 @@ services:
       MAX_TOKEN_SIZE_MB: ${MAX_TOKEN_SIZE_MB:-5}
       MAX_AUDIO_SIZE_MB: ${MAX_AUDIO_SIZE_MB:-20}
       MAX_AVATAR_SIZE_MB: ${MAX_AVATAR_SIZE_MB:-2}
+      MAX_DOCUMENT_SIZE_MB: ${MAX_DOCUMENT_SIZE_MB:-50}
+      # Read-only here: lets the backend warn at startup when the Nginx body
+      # cap is smaller than the limits above (it is applied by the nginx service)
+      NGINX_MAX_BODY_SIZE: ${NGINX_MAX_BODY_SIZE:-55M}
       # Rate limiting
       RATE_LIMIT_MAX_REQUESTS: ${RATE_LIMIT_MAX_REQUESTS:-300}
     volumes:
@@ -99,8 +113,12 @@ services:
       context: ./frontend
       dockerfile: Dockerfile.prod
       args:
-        VITE_API_URL: ""        # Empty = use relative URLs; Nginx proxies /api/* to backend
-        VITE_SOCKET_URL: ""     # Empty = use relative URLs; Nginx proxies /socket.io/* to backend
+        # Taken from .env, which offers both and ships them empty. Empty means
+        # relative URLs, and the bundled nginx proxies /api/* and /socket.io/*
+        # to the backend — the setup nearly everyone wants. These were pinned to
+        # "" here, so anything set in .env was silently discarded.
+        VITE_API_URL: ${VITE_API_URL:-}
+        VITE_SOCKET_URL: ${VITE_SOCKET_URL:-}
     image: cozyvtt-frontend:latest
     container_name: cozyvtt-frontend
     restart: unless-stopped
@@ -122,13 +140,22 @@ services:
     depends_on:
       - frontend
       - backend
+    environment:
+      # Request body cap. Must be >= the largest MAX_*_SIZE_MB above plus a few
+      # MB of multipart overhead, or large uploads fail with HTTP 413.
+      NGINX_MAX_BODY_SIZE: ${NGINX_MAX_BODY_SIZE:-55M}
+      # Only substitute this one variable — without the filter, envsubst would
+      # also blank Nginx's own $host / $scheme / $proxy_add_x_forwarded_for.
+      NGINX_ENVSUBST_FILTER: "NGINX_MAX_BODY_SIZE"
     ports:
       # Change these if 80/443 are already in use on your host.
       # Example: HTTP_PORT=8080 in .env to access CozyVTT at http://yourserver:8080
       - "${HTTP_PORT:-80}:80"
       - "${HTTPS_PORT:-443}:443"
     volumes:
-      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      # Mounted as a template: the nginx image renders it to
+      # /etc/nginx/conf.d/default.conf at start, filling in NGINX_MAX_BODY_SIZE.
+      - ./nginx/nginx.conf:/etc/nginx/templates/default.conf.template:ro
       - ./nginx/certs:/etc/nginx/certs:ro  # Place your SSL certs here
     networks:
       - internal

@@ -1,8 +1,28 @@
 openapi: 3.0.3
 info:
-  title: CozyVTT API
+  title: CozyVTT Backend Route Reference
   description: |
-    RESTful API for CozyVTT — a self-hosted, browser-based Virtual Tabletop platform.
+    The HTTP routes CozyVTT's own web client calls, described for people working
+    on CozyVTT itself.
+
+    ## No stability guarantee
+    This is an internal surface, not a public API. It is **not versioned**, it
+    carries **no compatibility promise**, and any route here may change shape or
+    disappear in a point release without notice or a deprecation period.
+
+    There are no API keys, no bearer tokens and no service accounts. The only
+    credential is the session cookie described below — but a program can obtain
+    one exactly as the web client does, by posting a user's own email and
+    password to `/api/auth/login` and keeping the cookie it returns. That cookie
+    also authenticates the Socket.io connection, which shares the same session.
+
+    So scripting CozyVTT is possible, and people have done it. What it does not
+    come with is a promise: a script authenticates **as a specific user** and can
+    do only what that user could do in the browser, the session expires after an
+    hour of inactivity (refreshed by activity), an account with MFA enabled needs
+    the second step, and any route here may change shape in a point release
+    without notice. Treat this document as a map of the current code rather than
+    a contract.
 
     ## Authentication
     All endpoints (except `/health`, `/api/setup/*`, and public auth routes) require authentication via session cookies.
@@ -18,21 +38,36 @@ info:
 
     ## Rate Limiting
     - Global API limit: 300 requests per minute per IP (all `/api/*` routes)
-    - Authentication endpoints: 5 requests per 15 minutes
+    - Credential endpoints (login, register, reset-password, MFA login verify):
+      5 **failed** requests per 15 minutes. Successful requests are not counted,
+      so getting your password right never moves you towards a lockout.
+    - `POST /api/auth/forgot-password`: 5 requests per 15 minutes, counted whether
+      or not they succeed. That endpoint answers identically for a known and an
+      unknown address, so successes cannot be skipped without removing the limit
+      on the mail it sends
     - MFA setup verification: 5 attempts per 15 minutes
     - MFA login verification: 5 attempts per 15 minutes (separate limit)
-    - Asset uploads: 30 requests per minute per user (configurable via `ASSET_UPLOAD_RATE_LIMIT`)
+    - Asset uploads and typed documents (`POST /api/assets/upload`, `POST /api/assets/documents`):
+      30 requests per minute per user (configurable via `ASSET_UPLOAD_RATE_LIMIT`)
     - Chat messages: 5 per minute (WebSocket)
     - Dice rolls: 30 per minute (WebSocket)
     - Token movement: 60 per second (WebSocket, throttled)
 
     Rate-limited responses return HTTP 429 with `RateLimit-*` standard headers.
 
+    ## Forced password changes
+    Accounts an admin created, or whose password an admin reset, are flagged
+    `mustChangePassword`. Until a new password is set, every endpoint except
+    `POST /api/auth/change-password`, `POST /api/auth/logout`, `GET /api/auth/me`,
+    `GET /api/auth/ping`, `GET /api/auth/appearance` and `GET /api/config` returns
+    HTTP 403 with `code: PASSWORD_CHANGE_REQUIRED`. WebSocket connections are refused
+    on the same basis. Clients should route on `code` rather than the message.
+
     ## Real-time Events
     Real-time campaign features (token movement, dice, chat, initiative, etc.) use Socket.io.
     See the WebSocket section at the bottom of this document for the full event reference.
 
-  version: 1.1.0
+  version: 1.4.0
   contact:
     name: CozyVTT
     url: https://cozyvtt.com
@@ -85,6 +120,10 @@ tags:
     description: Export and import campaigns as portable `.cozyvtt` archives
   - name: Messages
     description: Chat message history
+  - name: Documents
+    description: PDF, text and Markdown files uploaded as assets, shared with a campaign by its DM and read inline
+  - name: Dice Macros
+    description: A player's own saved dice rolls for one campaign, private to whoever saved them
   - name: Admin
     description: Admin-only platform management endpoints (requires ADMIN platform role)
   - name: WebSocket
@@ -113,6 +152,56 @@ paths:
                   timestamp:
                     type: string
                     format: date-time
+
+  # ============================================
+  # CLIENT CONFIG
+  # ============================================
+
+  /api/config:
+    get:
+      tags:
+        - Health
+      summary: Get public client configuration
+      description: |
+        Public endpoint — returns the upload size limits the server enforces,
+        derived from the `MAX_<TYPE>_SIZE_MB` environment variables. The SPA is
+        built ahead of time, so it reads the limits from here at runtime rather
+        than baking them into the bundle. No authentication required.
+      operationId: getClientConfig
+      security: []
+      responses:
+        '200':
+          description: Client configuration
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  uploadLimits:
+                    type: object
+                    description: Maximum upload size in bytes, per asset type
+                    properties:
+                      MAP:
+                        type: integer
+                      TOKEN:
+                        type: integer
+                      AUDIO:
+                        type: integer
+                      AVATAR:
+                        type: integer
+                      DOCUMENT:
+                        type: integer
+                  maxUploadBytes:
+                    type: integer
+                    description: Largest configured limit — the cap enforced before the asset type is known
+              example:
+                uploadLimits:
+                  MAP: 52428800
+                  TOKEN: 5242880
+                  AUDIO: 20971520
+                  AVATAR: 2097152
+                  DOCUMENT: 52428800
+                maxUploadBytes: 52428800
 
   # ============================================
   # SETUP
@@ -168,6 +257,25 @@ paths:
                   minLength: 12
                 displayName:
                   type: string
+                instanceName:
+                  type: string
+                  maxLength: 100
+                  default: CozyVTT
+                  description: >-
+                    Shown in browser tabs and page titles. Blank, missing or
+                    non-string values leave the default in place rather than
+                    failing setup, which can only be run once.
+                timezone:
+                  type: string
+                  maxLength: 50
+                  default: UTC
+                  description: IANA timezone name, used for timestamps.
+                allowRegistration:
+                  type: boolean
+                  default: false
+                  description: >-
+                    Whether people may create their own accounts. Changeable
+                    afterwards from Admin → Settings.
       responses:
         '201':
           description: Setup completed successfully
@@ -413,7 +521,7 @@ paths:
       tags:
         - Authentication
       summary: Change own password
-      description: Change password for the authenticated user. Requires current password verification. Sets mustChangePassword to false.
+      description: Change password for the authenticated user. Requires current password verification. Sets mustChangePassword to false. Ends the user's other login sessions; the session making the request stays signed in.
       operationId: changePassword
       security:
         - cookieAuth: []
@@ -575,7 +683,7 @@ paths:
       tags:
         - MFA
       summary: Disable MFA
-      description: Disable MFA for the authenticated user. Requires current password and a valid TOTP code. Admin accounts cannot disable MFA.
+      description: Disable MFA for the authenticated user. Requires current password and a valid TOTP code. Admin accounts cannot disable MFA. Ends the user's other login sessions; the session making the request stays signed in.
       operationId: mfaDisable
       security:
         - cookieAuth: []
@@ -845,7 +953,7 @@ paths:
       tags:
         - Users
       summary: Update user
-      description: Update user profile (own profile or admin). Admin can change platformRole.
+      description: Update user profile (own profile or admin). Admin can change platformRole, which ends every login session the target has, because the role is carried in the session. The globalAssetManager and templateEditor flags are read from the database at the point of use, so changing those takes effect on the next request and does not sign anyone out.
       operationId: updateUser
       security:
         - cookieAuth: []
@@ -897,7 +1005,7 @@ paths:
       tags:
         - Users
       summary: Delete user
-      description: Delete user account (Admin only, cannot delete self)
+      description: Delete user account (Admin only, cannot delete self). Ends every login session the deleted user had.
       operationId: deleteUser
       security:
         - cookieAuth: []
@@ -1396,7 +1504,7 @@ paths:
       tags:
         - Campaigns
       summary: Remove member
-      description: Remove a member from campaign (DM only, cannot remove DM)
+      description: Remove a member from campaign (DM only). The sitting DM and the campaign owner cannot be removed; both return 400.
       operationId: removeMember
       security:
         - cookieAuth: []
@@ -1468,6 +1576,58 @@ paths:
           $ref: '#/components/responses/BadRequest'
         '403':
           $ref: '#/components/responses/Forbidden'
+
+  /api/campaigns/{campaignId}/dm:
+    put:
+      tags:
+        - Campaigns
+      summary: Transfer the DM role
+      description: >-
+        Hand the Dungeon Master seat to another member of the campaign. The
+        outgoing DM becomes a PLAYER and the named member becomes DM, as a single
+        atomic change, so the campaign is never observable with two DMs or none.
+        The campaign's owner is NOT changed: ownership and the DM role are
+        separate, which lets an owner hand the game to someone else and remain at
+        the table as a player. Callable by the sitting DM, the campaign owner
+        (even when they are not the DM), or a platform admin.
+      operationId: transferDM
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CampaignId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - userId
+              properties:
+                userId:
+                  type: string
+                  format: uuid
+                  description: The campaign member who should become DM
+      responses:
+        '200':
+          description: DM role transferred
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  memberships:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CampaignMembership'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
 
   /api/campaigns/{campaignId}/vibe:
     put:
@@ -1708,7 +1868,21 @@ paths:
       tags:
         - Messages
       summary: Get message history
-      description: Get paginated message history for a campaign (campaign member required). DICE_ROLL messages are excluded from chat history.
+      description: >
+        Chat history for a campaign, newest first, for a campaign member.
+
+        Paging is by keyset, not offset: take `pagination.nextCursor` from one
+        response and send it back as `cursor` to get the page before it. Repeat
+        until `hasMore` is false to reach the first message in the campaign.
+        Messages arriving while someone pages back cannot shift the window,
+        which is what an offset would allow.
+
+        Do not construct a cursor. It is opaque and its shape is not part of
+        this contract.
+
+        Dice rolls are not chat messages and are never returned here — they are
+        served by `GET /api/campaigns/{campaignId}/dice-rolls`, which is the
+        only path that applies the secret-roll rules.
       operationId: getMessages
       security:
         - cookieAuth: []
@@ -1718,17 +1892,17 @@ paths:
           in: query
           schema:
             type: integer
-            default: 50
+            minimum: 1
             maximum: 100
-        - name: before
+            default: 50
+        - name: cursor
           in: query
+          description: From the previous response's `pagination.nextCursor`. Omit for the newest page.
           schema:
             type: string
-            format: date-time
-            description: Cursor-based pagination - get messages before this timestamp
       responses:
         '200':
-          description: Message history
+          description: A page of chat history
           content:
             application/json:
               schema:
@@ -1738,6 +1912,557 @@ paths:
                     type: array
                     items:
                       $ref: '#/components/schemas/Message'
+                  pagination:
+                    type: object
+                    properties:
+                      limit:
+                        type: integer
+                      hasMore:
+                        type: boolean
+                      nextCursor:
+                        type: string
+                        nullable: true
+                        description: Send as `cursor` for the next page. Null when the history is exhausted.
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  # ============================================
+  # PERSONAL NOTES
+  #
+  # Private to the signed-in user. Every route scopes its query by the session's
+  # own user id as well as the campaign, never by an id from the request, and a
+  # note belonging to somebody else answers 404 rather than 403 — a 403 would
+  # confirm the id exists. The DM has no access to a player's notes.
+  # ============================================
+
+  /api/campaigns/{campaignId}/documents:
+    get:
+      tags:
+        - Documents
+      summary: List documents shared with a campaign
+      description: >-
+        Every member can list. Two kinds appear: documents shared into the
+        campaign by the DM, and the campaign's own, created or uploaded at
+        CAMPAIGN scope. Either way, appearing here means members may read it
+        through `GET /api/assets/documents/{id}`.
+      operationId: listCampaignDocuments
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CampaignId'
+      responses:
+        '200':
+          description: Shared documents, in the order they were shared
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  documents:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/CampaignDocument'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags:
+        - Documents
+      summary: Share a document with a campaign
+      description: >-
+        DM only, and only for a document the DM uploaded or wrote themselves,
+        or a global one. A document the caller cannot read answers 404, so
+        sharing cannot be used to grant a table access to a stranger's private
+        file from nothing but its id. A document the caller can read but did
+        not upload answers 403: being shared into one campaign does not let a
+        member who runs another pass it on. Admins may share anything. Sharing
+        a document twice is not an error.
+      operationId: linkCampaignDocument
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CampaignId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - assetId
+              properties:
+                assetId:
+                  type: string
+                  format: uuid
+      responses:
+        '201':
+          description: Shared
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  link:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                      campaignId:
+                        type: string
+                        format: uuid
+                      assetId:
+                        type: string
+                        format: uuid
+                      linkedById:
+                        type: string
+                        format: uuid
+                      createdAt:
+                        type: string
+                        format: date-time
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/campaigns/{campaignId}/documents/{assetId}:
+    delete:
+      tags:
+        - Documents
+      summary: Stop sharing a document with a campaign
+      description: DM only. The document itself is untouched; only the share is removed.
+      operationId: unlinkCampaignDocument
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CampaignId'
+        - name: assetId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Unshared
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/campaigns/{campaignId}/macros:
+    get:
+      tags:
+        - Dice Macros
+      summary: List your own saved macros
+      description: >
+        The caller's macros for this campaign, **oldest first** — so a macro keeps
+        its place in the row of buttons. These are things people aim at without
+        looking, and ordering by last edit would move one every time it changed.
+        Private to the caller; a DM sees only their own.
+      operationId: listDiceMacros
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CampaignId'
+      responses:
+        '200':
+          description: Your macros, oldest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  macros:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DiceMacro'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags:
+        - Dice Macros
+      summary: Save a macro
+      description: >
+        The expression is rolled once and the result discarded, to prove it can be
+        rolled at all. An expression that only looks like dice — `2d6+`, `dddd` —
+        is refused here rather than becoming a button that fails every time it is
+        pressed. Limited to 50 per campaign per player.
+      operationId: createDiceMacro
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CampaignId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+                - expression
+              properties:
+                name:
+                  type: string
+                  maxLength: 60
+                expression:
+                  type: string
+                  maxLength: 200
+      responses:
+        '201':
+          description: Macro saved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  macro:
+                    $ref: '#/components/schemas/DiceMacro'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/campaigns/{campaignId}/macros/{macroId}:
+    get:
+      tags:
+        - Dice Macros
+      summary: Read one of your macros
+      description: >
+        A macro belonging to someone else answers `404`, not `403`, so the
+        response cannot be used to confirm that an id exists.
+      operationId: getDiceMacro
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CampaignId'
+        - name: macroId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The macro
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  macro:
+                    $ref: '#/components/schemas/DiceMacro'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags:
+        - Dice Macros
+      summary: Rename a macro or correct its expression
+      description: >
+        Either field alone is a valid edit; a body with neither is refused so a
+        mistake is visible rather than silent. A new expression is checked the
+        same way it was on creation, so an edit cannot make a macro unrollable.
+      operationId: updateDiceMacro
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CampaignId'
+        - name: macroId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  maxLength: 60
+                expression:
+                  type: string
+                  maxLength: 200
+      responses:
+        '200':
+          description: Macro updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  macro:
+                    $ref: '#/components/schemas/DiceMacro'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags:
+        - Dice Macros
+      summary: Delete a macro
+      operationId: deleteDiceMacro
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CampaignId'
+        - name: macroId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Macro deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/campaigns/{campaignId}/notes:
+    get:
+      tags:
+        - Notes
+      summary: List your own notes
+      description: >
+        The caller's notes for this campaign, most recently edited first.
+        **Titles only** — `content` is deliberately not returned. A note may run
+        to 100,000 characters, and a list carrying every body would move
+        megabytes each time the panel opened; fetch one note to read it.
+      operationId: listPersonalNotes
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CampaignId'
+      responses:
+        '200':
+          description: Your notes, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  notes:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PersonalNoteSummary'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags:
+        - Notes
+      summary: Create a note
+      description: >
+        Starts a note. `content` may be omitted — notes are usually created
+        empty and written into afterwards. Refused once you hold 200 notes in
+        this campaign.
+      operationId: createPersonalNote
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CampaignId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [title]
+              properties:
+                title:
+                  type: string
+                  maxLength: 120
+                content:
+                  type: string
+                  maxLength: 100000
+                  description: Markdown source.
+      responses:
+        '201':
+          description: Note created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  note:
+                    $ref: '#/components/schemas/PersonalNote'
+        '400':
+          description: Invalid title or content, or the per-campaign limit reached
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/campaigns/{campaignId}/notes/{noteId}:
+    get:
+      tags:
+        - Notes
+      summary: Read one of your notes
+      description: >
+        The note with its Markdown source. Answers 404 for a note that is not
+        yours — including to the campaign's DM — rather than 403, so the
+        response does not confirm that the id exists.
+      operationId: getPersonalNote
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CampaignId'
+        - name: noteId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The note
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  note:
+                    $ref: '#/components/schemas/PersonalNote'
+        '404':
+          description: No such note of yours in this campaign
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    put:
+      tags:
+        - Notes
+      summary: Rename a note, replace its body, or both
+      operationId: updatePersonalNote
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CampaignId'
+        - name: noteId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              description: At least one of the two must be present.
+              properties:
+                title:
+                  type: string
+                  maxLength: 120
+                content:
+                  type: string
+                  maxLength: 100000
+      responses:
+        '200':
+          description: The updated note
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  note:
+                    $ref: '#/components/schemas/PersonalNote'
+        '400':
+          description: Invalid values, or a body that changes nothing
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: No such note of yours in this campaign
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    delete:
+      tags:
+        - Notes
+      summary: Delete a note
+      operationId: deletePersonalNote
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CampaignId'
+        - name: noteId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Deleted
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+        '404':
+          description: No such note of yours in this campaign
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
 
@@ -1746,6 +2471,57 @@ paths:
   # ============================================
 
   /api/campaigns/{campaignId}/sessions:
+    get:
+      tags:
+        - Sessions
+      summary: List past sessions
+      description: >
+        Sessions for the campaign, newest first, with the notes the DM recorded
+        when each one ended. Any campaign member may read them — the notes
+        describe what happened at the table, which is what the session history
+        panel shows a player before the next game.
+
+
+        `savedState` is deliberately not returned: it is a large blob of token
+        positions kept for resuming a session, and nothing reading history needs
+        it. Capped at the 50 most recent sessions.
+      operationId: listSessions
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CampaignId'
+      responses:
+        '200':
+          description: Sessions, newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessions:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                          format: uuid
+                        sessionNumber:
+                          type: integer
+                        startedAt:
+                          type: string
+                          format: date-time
+                        endedAt:
+                          type: string
+                          format: date-time
+                          nullable: true
+                        notes:
+                          type: string
+                          nullable: true
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
     post:
       tags:
         - Sessions
@@ -1845,6 +2621,59 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /api/campaigns/{campaignId}/sessions/{sessionId}/notes:
+    put:
+      tags:
+        - Sessions
+      summary: Edit or clear a past session's notes
+      description: >-
+        Rewrite the recap recorded for a session, or clear it by sending an
+        empty string. DM only. The session must belong to the campaign in the
+        path; one that does not answers 404 rather than 403, so the response
+        cannot be used to discover which session ids exist.
+      operationId: updateSessionNotes
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CampaignId'
+        - name: sessionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - notes
+              properties:
+                notes:
+                  type: string
+                  maxLength: 2000
+                  description: >-
+                    The recap. Empty, or only whitespace, clears it and stores
+                    null.
+      responses:
+        '200':
+          description: Notes updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  session:
+                    $ref: '#/components/schemas/Session'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /api/campaigns/{campaignId}/resume:
     put:
       tags:
@@ -1914,6 +2743,12 @@ paths:
         - If `gameSystem` is provided, character data is validated against that
           system's Zod schema.
         - If `gameSystem` is null, no validation occurs (flexible character).
+        - If `campaignId` is provided, the caller must already be a member of
+          that campaign; a non-member gets 403 and nothing is created. The
+          character is added to the caller's membership as well as carrying the
+          `campaignId` column, in one transaction — both are needed, because the
+          campaign roster and the token permission checks read the membership,
+          not the column.
       operationId: createCharacter
       security:
         - cookieAuth: []
@@ -1978,6 +2813,12 @@ paths:
                           type: string
                         code:
                           type: string
+        '403':
+          description: >
+            The caller is not a member of the campaign named by `campaignId`.
+            Nothing is created.
+        '404':
+          description: No campaign exists with the id given in `campaignId`
 
   /api/characters/{id}:
     get:
@@ -2285,7 +3126,10 @@ paths:
       tags:
         - Assets
       summary: List assets
-      description: List assets with filtering and pagination
+      description: >-
+        List assets with filtering and pagination. With no `type`, documents
+        are left out: they have their own section, and are fetched by asking
+        for `type=DOCUMENT` explicitly.
       operationId: listAssets
       security:
         - cookieAuth: []
@@ -2294,7 +3138,7 @@ paths:
           in: query
           schema:
             type: string
-            enum: [MAP, TOKEN, AUDIO, AVATAR]
+            enum: [MAP, TOKEN, AUDIO, AVATAR, DOCUMENT]
         - name: scope
           in: query
           schema:
@@ -2350,13 +3194,16 @@ paths:
         inspection (not just MIME header or extension) and rejected if the
         detected type doesn't match the declared `type`.
 
-        **File size limits** (admin-configurable per type, defaults shown):
-        | Type | Default limit |
-        |------|---------------|
-        | MAP    | 50 MB |
-        | TOKEN  | 5 MB |
-        | AUDIO  | 20 MB |
-        | AVATAR | 2 MB |
+        **File size limits** — set per type with the `MAX_<TYPE>_SIZE_MB`
+        environment variables (defaults shown). The effective values are
+        available from `GET /api/config`.
+        | Type | Env var | Default limit |
+        |------|---------|---------------|
+        | MAP    | `MAX_MAP_SIZE_MB`    | 50 MB |
+        | TOKEN  | `MAX_TOKEN_SIZE_MB`  | 5 MB |
+        | AUDIO  | `MAX_AUDIO_SIZE_MB`  | 20 MB |
+        | AVATAR | `MAX_AVATAR_SIZE_MB` | 2 MB |
+        | DOCUMENT | `MAX_DOCUMENT_SIZE_MB` | 50 MB |
 
         Image assets generate a 512×512 thumbnail server-side.
 
@@ -2381,7 +3228,7 @@ paths:
                   format: binary
                 type:
                   type: string
-                  enum: [MAP, TOKEN, AUDIO, AVATAR]
+                  enum: [MAP, TOKEN, AUDIO, AVATAR, DOCUMENT]
                 scope:
                   type: string
                   enum: [GLOBAL, USER, CAMPAIGN]
@@ -2581,6 +3428,167 @@ paths:
         '404':
           $ref: '#/components/responses/NotFound'
 
+  /api/assets/documents:
+    post:
+      tags:
+        - Documents
+      summary: Create a text or Markdown document from typed content
+      description: >-
+        The same rules as uploading decide who may place it at each scope:
+        anyone into their own library, the DM into their campaign, an admin or
+        global asset manager instance-wide. The content is checked to be text,
+        bounded at 900 KB (typed content arrives as JSON; anything larger is a
+        file to upload), written to disk exactly as sent, and never interpreted.
+        A PDF cannot be typed. Counts against the upload rate limit, since it
+        creates a file on disk exactly as an upload does.
+      operationId: createDocument
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - name
+                - format
+                - content
+              properties:
+                name:
+                  type: string
+                  maxLength: 200
+                description:
+                  type: string
+                  maxLength: 1000
+                format:
+                  type: string
+                  enum: [txt, md]
+                content:
+                  type: string
+                scope:
+                  type: string
+                  enum: [USER, CAMPAIGN, GLOBAL]
+                  default: USER
+                campaignId:
+                  type: string
+                  format: uuid
+                  description: Required when scope is CAMPAIGN
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  asset:
+                    $ref: '#/components/schemas/Asset'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/assets/documents/{id}/content:
+    put:
+      tags:
+        - Documents
+      summary: Replace the text of a text or Markdown document
+      description: >-
+        The uploader or an admin. A document the caller may not edit answers
+        404, so the reply does not confirm a private id exists. A PDF answers
+        400: it is a file, and is replaced by uploading a new one. The recorded
+        size is updated.
+      operationId: updateDocumentContent
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+                - content
+              properties:
+                content:
+                  type: string
+      responses:
+        '200':
+          description: Saved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  asset:
+                    $ref: '#/components/schemas/Asset'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/assets/documents/{id}:
+    get:
+      tags:
+        - Documents
+      summary: Serve a document for reading inline
+      description: >-
+        A PDF, plain text or Markdown file. A document is private to its
+        uploader unless a DM has shared it with a campaign the caller belongs
+        to; anyone else gets 404, not 403, so the reply never confirms a
+        private id exists. The content type is decided from the file's
+        validated extension, never from what was declared at upload, and
+        Markdown is served as text/plain so the browser never renders a
+        document as a page. The response carries
+        `X-Content-Type-Options: nosniff` and a
+        `Content-Security-Policy: default-src 'none'; sandbox` that applies
+        whenever the browser renders the response as a document. Note it does
+        not sandbox a PDF; a client embedding one should sandbox the frame
+        itself, as CozyVTT's reader does. Caching differs by format: a PDF
+        cannot change under its id and is cacheable as immutable, while text
+        and Markdown can be rewritten in place, so they are served
+        `Cache-Control: private, no-cache` with an ETag that changes with the
+        file. Send `If-None-Match` and an unchanged document answers 304.
+      operationId: serveDocument
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The document, inline
+        '304':
+          description: Unchanged since the ETag in `If-None-Match`
+          content:
+            application/pdf:
+              schema:
+                type: string
+                format: binary
+            text/plain:
+              schema:
+                type: string
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
   /api/assets/maps/{id}:
     get:
       tags:
@@ -2638,7 +3646,16 @@ paths:
       tags:
         - Assets
       summary: Stream audio file
-      description: Stream audio with HTTP range request support
+      description: >-
+        Stream audio with HTTP range request support. Read access is the shared
+        asset rule: GLOBAL for anyone signed in, CAMPAIGN for that campaign's
+        members, USER for its uploader, and additionally anyone in a campaign
+        whose atmosphere is currently set to this track, since the sound is
+        fetched by each player's browser rather than relayed by the server. That
+        grant covers the one track and lasts only while it is set. Anyone else
+        gets 404, not 403. The Content-Type comes from the file's validated
+        extension, never from the type declared at upload, and the response
+        carries X-Content-Type-Options: nosniff.
       operationId: streamAudio
       security:
         - cookieAuth: []
@@ -3735,7 +4752,7 @@ paths:
     get:
       tags: [Creatures]
       summary: Get creature template
-      description: Get a single creature template by ID. Any campaign member can view.
+      description: Get a single creature template by ID. Any campaign member can view a creature belonging to this campaign, or a global SRD creature. A creature belonging to another campaign answers 404.
       operationId: getCreature
       security:
         - cookieAuth: []
@@ -3843,7 +4860,7 @@ paths:
     post:
       tags: [Creatures]
       summary: Duplicate creature
-      description: Duplicate any creature (including SRD) as a new custom creature in this campaign (DM only).
+      description: Duplicate a creature of this campaign, or a global SRD creature, as a new custom creature in this campaign (DM only). A creature belonging to another campaign answers 404.
       operationId: duplicateCreature
       security:
         - cookieAuth: []
@@ -3897,7 +4914,7 @@ paths:
     post:
       tags: [Creatures]
       summary: Toggle creature favorite
-      description: Toggle favorite for the current user in this campaign. If already favorited, removes it; otherwise adds it.
+      description: Toggle favorite for the current user in this campaign. If already favorited, removes it; otherwise adds it. Only a creature of this campaign or a global SRD creature can be favorited; another campaign's answers 404.
       operationId: toggleCreatureFavorite
       security:
         - cookieAuth: []
@@ -3952,6 +4969,11 @@ paths:
       description: |
         Fetch SRD creatures from Open5e and populate the library (DM only).
         Safe to call multiple times — existing SRD creatures are not duplicated.
+
+        Existing SRD creatures stored before hit points were tracked are updated
+        in place with `hpMax` / `hitDice`; only those missing keys are added, and
+        custom creatures are never modified.
+
         Returns 409 if seeding is already in progress.
       operationId: seedSrdCreatures
       security:
@@ -3968,9 +4990,19 @@ paths:
                 properties:
                   message:
                     type: string
+                  fetched:
+                    type: integer
+                    description: Monsters returned by Open5e
                   created:
                     type: integer
+                    description: New SRD creatures inserted
+                  updated:
+                    type: integer
+                    description: Existing SRD creatures backfilled with hit points
                   skipped:
+                    type: integer
+                    description: Existing SRD creatures left unchanged
+                  alreadyExisted:
                     type: integer
         '409':
           description: Seeding already in progress
@@ -4498,6 +5530,8 @@ paths:
                         type: integer
                       AVATAR:
                         type: integer
+                      DOCUMENT:
+                        type: integer
                   sessionTimeoutMs:
                     type: integer
                   rememberMeTimeoutMs:
@@ -4526,7 +5560,15 @@ paths:
     post:
       tags: [Admin]
       summary: Create a new user
-      description: Creates a user with a generated temporary password. The user must change their password on first login (`mustChangePassword` is set to true).
+      description: |
+        Creates a user with a generated temporary password. The account is flagged
+        `mustChangePassword`, so that password can only be used to set a real one — every
+        other endpoint returns 403 `PASSWORD_CHANGE_REQUIRED` until it is replaced.
+
+        When SMTP is configured the credentials are emailed and `temporaryPassword` is
+        **withheld** from the response; it is returned only when the email could not be
+        sent, so the admin never holds a working credential unnecessarily. To create an
+        account without any password at all, use `/api/admin/users/invite`.
       operationId: adminCreateUser
       security:
         - cookieAuth: []
@@ -4560,9 +5602,14 @@ paths:
                     type: string
                   user:
                     $ref: '#/components/schemas/User'
+                  emailSent:
+                    type: boolean
+                    description: Whether the welcome email with the credentials was delivered
                   temporaryPassword:
                     type: string
-                    description: One-time temporary password — store securely and share with user
+                    description: >-
+                      One-time temporary password. Present ONLY when emailSent is false —
+                      share it securely; it is not retrievable afterwards.
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
@@ -4571,6 +5618,108 @@ paths:
           $ref: '#/components/responses/Forbidden'
         '409':
           description: Email already in use
+
+  /api/admin/users/invite:
+    post:
+      tags: [Admin]
+      summary: Invite a user by email
+      description: |
+        Creates an account with **no usable password** and emails the new user a link to
+        choose one. The link expires in 7 days and is the only way into the account, so
+        no credential is ever returned or shown to the inviting admin.
+
+        Requires SMTP. If the invitation cannot be delivered the account is rolled back
+        rather than left unreachable.
+
+        The recipient completes setup at `/accept-invite?token=…`, which submits to
+        `POST /api/auth/reset-password` — invitations and password resets share the same
+        token machinery.
+      operationId: adminInviteUser
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email]
+              properties:
+                email:
+                  type: string
+                  format: email
+                displayName:
+                  type: string
+                  maxLength: 50
+                platformRole:
+                  type: string
+                  enum: [USER, ADMIN]
+                  default: USER
+      responses:
+        '201':
+          description: Invitation sent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  user:
+                    $ref: '#/components/schemas/User'
+                  expiresInDays:
+                    type: integer
+                    example: 7
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: Email already in use
+        '502':
+          description: The invitation email could not be delivered; no account was created
+        '503':
+          description: SMTP is not configured on this instance
+
+  /api/admin/users/{id}/resend-invite:
+    post:
+      tags: [Admin]
+      summary: Resend an invitation
+      description: |
+        Issues a fresh invitation link and invalidates any outstanding one. Useful when the
+        original expired or never arrived. Requires SMTP.
+      operationId: adminResendInvite
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Invitation resent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  expiresInDays:
+                    type: integer
+                    example: 7
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '503':
+          description: SMTP is not configured on this instance
 
   /api/admin/users/{id}/approve:
     post:
@@ -5104,6 +6253,12 @@ paths:
 # character.hp.updated:
 #   payload: { characterId: string, hp: { current: number, max: number, temp: number } }
 #   description: A character's HP was updated. Broadcast to all campaign members.
+#                Emitted from two places: the 'character.hp.update' socket handler
+#                (the roster's +/- control) and PUT /api/characters/:id, which
+#                sends it after a sheet save when the hit points actually changed.
+#                Both matter — the campaign screen's HP cache, which feeds the
+#                roster cards and the HP bars on map tokens, is filled by this
+#                event alone.
 #
 # character.updated:
 #   payload: { characterId: string, character: object }
@@ -5140,6 +6295,382 @@ paths:
 # ============================================
 # COMPONENTS
 # ============================================
+
+  # ---------------------------------------------------------------------------
+  # Shared character sheets ("character templates")
+  #
+  # Server-wide starter sheets any signed-in user can copy. Creating, editing and
+  # deleting one requires the `templateEditor` flag on the user, or platform
+  # ADMIN. That check reads the database rather than the session, because
+  # templateEditor is not carried in the session.
+  # ---------------------------------------------------------------------------
+  /api/character-templates:
+    get:
+      tags: [Character Templates]
+      summary: List shared character sheets
+      operationId: listCharacterTemplates
+      security:
+        - cookieAuth: []
+      responses:
+        '200':
+          description: Templates visible to the caller
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+    post:
+      tags: [Character Templates]
+      summary: Publish a shared character sheet
+      description: Requires the `templateEditor` flag or platform ADMIN.
+      operationId: createCharacterTemplate
+      security:
+        - cookieAuth: []
+      responses:
+        '201':
+          description: Template created
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/character-templates/{id}:
+    get:
+      tags: [Character Templates]
+      summary: Get one shared character sheet
+      operationId: getCharacterTemplate
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The template
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Character Templates]
+      summary: Update a shared character sheet
+      description: Requires the `templateEditor` flag or platform ADMIN.
+      operationId: updateCharacterTemplate
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Template updated
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Character Templates]
+      summary: Delete a shared character sheet
+      description: Requires the `templateEditor` flag or platform ADMIN.
+      operationId: deleteCharacterTemplate
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Template deleted
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/characters/templates/{gameSystem}/{templateName}:
+    get:
+      tags: [Characters]
+      summary: Get a blank starter sheet for a game system
+      description: >
+        The factory templates built into the server, as distinct from the
+        user-published sheets under /api/character-templates.
+      operationId: getBuiltInCharacterTemplate
+      security:
+        - cookieAuth: []
+      parameters:
+        - name: gameSystem
+          in: path
+          required: true
+          schema:
+            type: string
+        - name: templateName
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: The blank sheet
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/campaigns/{campaignId}/dice-rolls:
+    get:
+      tags: [Campaigns]
+      summary: Roll history for a campaign
+      description: >
+        Newest first. Secret rolls are filtered server-side before anything is
+        sent: a player receives public rolls plus their own secret ones, a DM
+        receives everything. Rolls older than the last history clear are
+        omitted; the rows themselves are kept, so a DM can still audit them.
+      operationId: getCampaignDiceRolls
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CampaignId'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: offset
+          in: query
+          schema:
+            type: integer
+            minimum: 0
+            default: 0
+      responses:
+        '200':
+          description: The rolls this caller is entitled to see
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/campaigns/{campaignId}/messages/join-leave:
+    delete:
+      tags: [Campaigns]
+      summary: Clear the old join and leave chat messages
+      description: >
+        DM only. Those notices are no longer written, and nothing is removed on
+        upgrade, so this is how a campaign clears the ones it already has.
+      operationId: clearJoinLeaveMessages
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CampaignId'
+      responses:
+        '200':
+          description: Messages removed
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /api/campaigns/{campaignId}/maps/import-uvtt:
+    post:
+      tags: [Maps]
+      summary: Create a map from a Universal VTT file
+      description: >-
+        DM only. Accepts .uvtt, .dd2vtt and .df2vtt, bringing in the image along
+        with its wall segments, doors and lights.
+
+
+        A Universal VTT holds a single image, so one file is one map; a dungeon
+        with several levels arrives as one file per level.
+
+
+        `resolution.map_origin` is honoured: an export of a region of a larger
+        map carries coordinates in that map's space, and the origin is
+        subtracted so the geometry lands on the image.
+
+
+        Walls the file keeps in `objects_line_of_sight` (furniture, pillars,
+        crates) are left out unless `includeObjectWalls=true`. They block sight
+        like any other wall, so whether they should is the DM's call.
+
+
+        When the file needs an answer before it can become a map, the route
+        answers **409** with `code: UVTT_IMPORT_NEEDS_CONFIRMATION` and creates
+        nothing. Two things can prompt it: geometry outside the image, which
+        happens when the exporting tool cropped the picture but wrote out the
+        geometry for the whole map; and object walls it can offer. Send
+        `confirm=true` with the answers to go ahead. Nothing is discarded for
+        being out of bounds, since there it is the image that is incomplete and
+        not the walls, and a wall counts as outside only when both of its ends
+        are, so a wall on the map's edge does not trigger it.
+
+
+        A file with more wall segments or lights than a map can hold is refused
+        with **400**, because import used to write past the limits every later
+        edit enforces, leaving a map that could not be saved.
+
+
+        The embedded picture is checked by its bytes, not by what the file
+        claims: anything that is not a map image is refused, as is one over the
+        `MAX_MAP_SIZE_MB` limit. A thumbnail is generated, and the route counts
+        against the upload rate limit, since it writes a file to disk exactly
+        as an upload does.
+      operationId: importUvttMap
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CampaignId'
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                name:
+                  type: string
+                gridSize:
+                  type: integer
+                confirm:
+                  type: string
+                  enum: ['true']
+                  description: >-
+                    Go ahead with whatever the file raised. Without it such a
+                    file answers 409.
+                includeObjectWalls:
+                  type: string
+                  enum: ['true']
+                  description: >-
+                    Import the walls belonging to objects, from
+                    objects_line_of_sight. Omitted means leave them out.
+      responses:
+        '201':
+          description: Map created, with counts of what was imported
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: >-
+            The file needs the DM's answer first. Nothing was created. Resend
+            with `confirm=true`, plus `includeObjectWalls` if it offered them.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                  code:
+                    type: string
+                    enum: [UVTT_IMPORT_NEEDS_CONFIRMATION]
+                  message:
+                    type: string
+                  outOfBounds:
+                    type: object
+                    description: How much of the geometry the image does not cover.
+                    properties:
+                      walls:
+                        type: integer
+                      doors:
+                        type: integer
+                      lights:
+                        type: integer
+                  objectWalls:
+                    type: integer
+                    description: >-
+                      Wall segments the file keeps for its furniture, offered
+                      but not imported. Zero when it has none.
+              example:
+                error: Confirmation Required
+                code: UVTT_IMPORT_NEEDS_CONFIRMATION
+                message: This file needs a decision before it can be imported.
+                outOfBounds: { walls: 79, doors: 20, lights: 0 }
+                objectWalls: 0
+
+  /api/campaigns/{campaignId}/maps/{id}/export-uvtt:
+    get:
+      tags: [Maps]
+      summary: Export a map as a Universal VTT file
+      description: DM only.
+      operationId: exportUvttMap
+      security:
+        - cookieAuth: []
+      parameters:
+        - $ref: '#/components/parameters/CampaignId'
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: The .uvtt payload
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /api/admin/backups/restore:
+    post:
+      tags: [Admin]
+      summary: Restore the instance from a backup archive
+      description: >
+        Platform ADMIN only. Replaces the database and the uploaded files from
+        an archive downloaded earlier. Needs psql present in the backend image.
+        The database load runs as a single transaction and stops at the first
+        failed statement, so an archive that cannot be applied in full leaves
+        the existing database unchanged and answers 500.
+      operationId: restoreBackup
+      security:
+        - cookieAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [backup]
+              properties:
+                backup:
+                  type: string
+                  format: binary
+      responses:
+        '200':
+          description: Restore completed
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          description: Restore failed, or psql is not available in the image
 
 components:
   securitySchemes:
@@ -5406,6 +6937,118 @@ components:
           type: string
           format: date-time
 
+    PersonalNoteSummary:
+      type: object
+      description: >
+        A note in a listing. Carries no `content` on purpose — see the list
+        endpoint.
+      properties:
+        id:
+          type: string
+          format: uuid
+        title:
+          type: string
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    PersonalNote:
+      allOf:
+        - $ref: '#/components/schemas/PersonalNoteSummary'
+        - type: object
+          properties:
+            content:
+              type: string
+              description: >
+                Markdown source, stored exactly as typed. Rendered on the client
+                with raw HTML disabled, so markup in a note is shown as text
+                rather than executed.
+
+    CampaignDocument:
+      type: object
+      description: A document as it appears in a campaign's shared list.
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: The asset id, used with GET /api/assets/documents/{id}
+        name:
+          type: string
+        description:
+          type: string
+          nullable: true
+        originalName:
+          type: string
+          example: players-handbook.pdf
+        mimeType:
+          type: string
+          description: As declared at upload. Not what the file is served as.
+        fileSize:
+          type: integer
+        createdAt:
+          type: string
+          format: date-time
+        uploadedBy:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            displayName:
+              type: string
+        linkedAt:
+          type: string
+          format: date-time
+        linkedBy:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            displayName:
+              type: string
+        shared:
+          type: boolean
+          description: >-
+            True when the document was shared into the campaign by link and the
+            DM can stop sharing it. False when it is the campaign's own, created
+            or uploaded at CAMPAIGN scope, where there is no link to remove.
+
+    DiceMacro:
+      type: object
+      description: >
+        A player's saved dice roll for one campaign — a name and an expression,
+        shown as a one-click button in the dice panel. Private to whoever saved
+        it, the DM included. The expression is validated when written against the
+        same code that rolls it, so a stored macro can always be rolled.
+      properties:
+        id:
+          type: string
+          format: uuid
+        userId:
+          type: string
+          format: uuid
+        campaignId:
+          type: string
+          format: uuid
+        name:
+          type: string
+          maxLength: 60
+          example: Wild magic surge
+        expression:
+          type: string
+          maxLength: 200
+          example: 4d6kh3
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
     Session:
       type: object
       properties:
@@ -5473,7 +7116,7 @@ components:
           format: uuid
         type:
           type: string
-          enum: [MAP, TOKEN, AUDIO, AVATAR]
+          enum: [MAP, TOKEN, AUDIO, AVATAR, DOCUMENT]
         scope:
           type: string
           enum: [GLOBAL, CAMPAIGN]
@@ -5795,7 +7438,11 @@ components:
           nullable: true
         statBlock:
           type: object
-          description: Game-system-agnostic stat block (AC, HP, attacks, abilities, etc.)
+          description: |
+            Game-system-agnostic stat block. Common keys: `ac`, `hpMax`, `hitDice`,
+            `speed`, `abilities`, `traits`, `actions`. `hpMax` seeds the hit points
+            of tokens placed from this creature (defaults to 10 when absent, as on
+            stat blocks saved before hit points were tracked).
         size:
           type: object
           properties:
@@ -6201,12 +7848,24 @@ components:
         customLogoUrl:
           type: string
           nullable: true
+          description: >-
+            A path this instance serves, such as /default-logo.png. An address
+            on another host is refused with 400: the app page's
+            Content-Security-Policy allows images from its own origin only, and
+            an outside image would have every visitor contact that host before
+            signing in. Branding is changed by replacing the files in
+            frontend/public/ and rebuilding.
+          example: /default-logo.png
         customFaviconUrl:
           type: string
           nullable: true
+          description: A path this instance serves. Same rule as customLogoUrl.
+          example: /favicon-32.png
         customMascotUrl:
           type: string
           nullable: true
+          description: A path this instance serves. Same rule as customLogoUrl.
+          example: /default-mascot.png
 
   responses:
     BadRequest:
@@ -6238,6 +7897,21 @@ components:
           example:
             error: Forbidden
             message: You do not have permission to perform this action.
+
+    PasswordChangeRequired:
+      description: >-
+        Forbidden - The account must set a new password before it can do anything else
+        (admin-created account, or an admin reset its password). Returned by every
+        endpoint except change-password, logout, /auth/me, /auth/ping, /auth/appearance
+        and /api/config. Route on `code`, not the message.
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+          example:
+            error: Password Change Required
+            code: PASSWORD_CHANGE_REQUIRED
+            message: You must set a new password before continuing.
 
     NotFound:
       description: Not Found - Resource does not exist or you cannot see it.

@@ -32,8 +32,11 @@ import {
   StopCircle,
 } from 'lucide-react';
 import { useCampaign } from '@/contexts/CampaignContext';
+import { useAuth } from '@/contexts/AuthContext';
 import { useWebSocket } from '@/contexts/WebSocketContext';
 import api from '@/services/api';
+import { AssetScope } from '@/types';
+import { assetScopeLabel } from '@/utils/assetUrl';
 import type { Asset } from '@/types';
 
 // ============================================
@@ -71,6 +74,7 @@ interface AtmospherePanelProps {
 
 export default function AtmospherePanel({ isOpen, onClose }: AtmospherePanelProps) {
   const { campaign, activeAtmosphereEffect, activeAtmosphereAudio } = useCampaign();
+  const { user } = useAuth();
   const { socket } = useWebSocket();
 
   // Audio asset list
@@ -98,10 +102,24 @@ export default function AtmospherePanel({ isOpen, onClose }: AtmospherePanelProp
     setLoadingAssets(true);
     setAssetError(null);
     api.listAssets({ type: 'AUDIO' })
-      .then((r) => setAudioAssets(r.assets || []))
+      // The list is wider than what can be played here: it also carries audio
+      // belonging to other campaigns this DM is in, which the server refuses
+      // because a campaign's audio belongs to that table, and other people's
+      // personal tracks are not the DM's to open to the room. Offering one
+      // gave a button that did nothing.
+      .then((r) =>
+        setAudioAssets(
+          (r.assets || []).filter(
+            (a) =>
+              a.scope === AssetScope.GLOBAL ||
+              (a.scope === AssetScope.USER && a.uploadedById === user?.id) ||
+              (a.scope === AssetScope.CAMPAIGN && a.campaignId === campaign.id)
+          )
+        )
+      )
       .catch(() => setAssetError('Failed to load audio assets'))
       .finally(() => setLoadingAssets(false));
-  }, [isOpen, campaign]);
+  }, [isOpen, campaign, user?.id]);
 
   // ============================================
   // Handlers
@@ -207,10 +225,10 @@ export default function AtmospherePanel({ isOpen, onClose }: AtmospherePanelProp
             <div className="sticky top-0 z-10 flex items-center justify-between px-6 py-4 bg-soft-cream border-b border-moss-green/20">
               <div className="flex items-center gap-3">
                 <div className="p-2 rounded-lg bg-moss-green/10">
-                  <Cloud className="w-5 h-5 text-moss-green" />
+                  <Cloud className="w-5 h-5 text-brand-ink" />
                 </div>
                 <div>
-                  <h2 className="text-lg font-bold text-moss-green">Atmosphere</h2>
+                  <h2 className="text-lg font-bold text-brand-ink">Atmosphere</h2>
                   <p className="text-xs text-warm-gray">Visual effects + ambient audio</p>
                 </div>
               </div>
@@ -228,7 +246,7 @@ export default function AtmospherePanel({ isOpen, onClose }: AtmospherePanelProp
                   Section 1: Particle Overlay
                   ============================================ */}
               <section>
-                <h3 className="text-sm font-semibold text-moss-green uppercase tracking-wide mb-3">
+                <h3 className="text-sm font-semibold text-brand-ink uppercase tracking-wide mb-3">
                   Particle Overlay
                 </h3>
 
@@ -242,14 +260,14 @@ export default function AtmospherePanel({ isOpen, onClose }: AtmospherePanelProp
                         title={opt.description}
                         className={`flex flex-col items-center gap-2 p-3 rounded-lg border-2 transition-all ${
                           isActive
-                            ? 'border-moss-green bg-moss-green/10 text-moss-green'
+                            ? 'border-moss-green bg-moss-green/10 text-brand-ink'
                             : 'border-moss-green/20 bg-parchment/50 text-stone-gray hover:border-moss-green/50 hover:bg-moss-green/5'
                         }`}
                       >
                         {opt.icon}
                         <span className="text-xs font-medium">{opt.label}</span>
                         {isActive && (
-                          <CheckCircle className="w-3 h-3 text-moss-green" />
+                          <CheckCircle className="w-3 h-3 text-brand-ink" />
                         )}
                       </button>
                     );
@@ -281,7 +299,7 @@ export default function AtmospherePanel({ isOpen, onClose }: AtmospherePanelProp
                   Section 2: Ambient Audio
                   ============================================ */}
               <section>
-                <h3 className="text-sm font-semibold text-moss-green uppercase tracking-wide mb-3">
+                <h3 className="text-sm font-semibold text-brand-ink uppercase tracking-wide mb-3">
                   Ambient Audio
                 </h3>
 
@@ -301,7 +319,7 @@ export default function AtmospherePanel({ isOpen, onClose }: AtmospherePanelProp
                       ))}
                     </div>
                     <div className="flex-1 min-w-0">
-                      <p className="text-xs font-semibold text-moss-green">Now Playing</p>
+                      <p className="text-xs font-semibold text-brand-ink">Now Playing</p>
                       <p className="text-xs text-stone-gray truncate">
                         {audioAssets.find((a) => a.id === activeAtmosphereAudio.assetId)?.name ?? 'Audio Track'}
                       </p>
@@ -309,7 +327,7 @@ export default function AtmospherePanel({ isOpen, onClose }: AtmospherePanelProp
                     <button
                       onClick={() => handleAudioSelect(null)}
                       title="Stop audio"
-                      className="p-1.5 rounded-lg text-red-500 hover:bg-red-50 transition-colors flex-shrink-0"
+                      className="p-1.5 rounded-lg text-danger-ink hover:bg-danger/10 transition-colors flex-shrink-0"
                     >
                       <StopCircle className="w-4 h-4" />
                     </button>
@@ -324,7 +342,7 @@ export default function AtmospherePanel({ isOpen, onClose }: AtmospherePanelProp
                       <button
                         onClick={handleMuteToggle}
                         title={isMuted ? 'Unmute' : 'Mute'}
-                        className="text-stone-gray hover:text-moss-green transition-colors flex-shrink-0"
+                        className="text-stone-gray hover:text-brand-ink transition-colors flex-shrink-0"
                       >
                         {isMuted || volume === 0
                           ? <VolumeX className="w-4 h-4" />
@@ -375,7 +393,7 @@ export default function AtmospherePanel({ isOpen, onClose }: AtmospherePanelProp
                   )}
 
                   {assetError && (
-                    <p className="text-sm text-red-600 py-2">{assetError}</p>
+                    <p className="text-sm text-danger-ink py-2">{assetError}</p>
                   )}
 
                   {!loadingAssets && !assetError && audioAssets.length === 0 && (
@@ -407,21 +425,22 @@ export default function AtmospherePanel({ isOpen, onClose }: AtmospherePanelProp
                           >
                             <div className={`p-1.5 rounded ${isPlaying ? 'bg-moss-green/20' : 'bg-stone-gray/10'}`}>
                               {isPlaying
-                                ? <StopCircle className="w-4 h-4 text-moss-green" />
+                                ? <StopCircle className="w-4 h-4 text-brand-ink" />
                                 : <Play className="w-4 h-4 text-stone-gray" />
                               }
                             </div>
                             <div className="flex-1 min-w-0">
-                              <p className={`text-sm font-medium truncate ${isPlaying ? 'text-moss-green' : 'text-stone-gray'}`}>
+                              <p className={`text-sm font-medium truncate ${isPlaying ? 'text-brand-ink' : 'text-stone-gray'}`}>
                                 {asset.name}
                               </p>
                               <p className="text-xs text-warm-gray">
                                 {formatSize(asset.fileSize)}
-                                {asset.scope === 'CAMPAIGN' ? ' · Campaign' : ' · Global'}
+                                {' · '}
+                                {assetScopeLabel(asset.scope)}
                               </p>
                             </div>
                             {isPlaying && (
-                              <CheckCircle className="w-4 h-4 text-moss-green flex-shrink-0" />
+                              <CheckCircle className="w-4 h-4 text-brand-ink flex-shrink-0" />
                             )}
                           </button>
                         );

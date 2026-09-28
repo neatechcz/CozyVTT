@@ -3,12 +3,13 @@
  * Service that fetches D&D 5e SRD monsters from Open5e API and seeds the
  * CreatureTemplate table. Used by both the CLI script and the API endpoint.
  *
- * SRD content is used under the Open Game License v1.0a.
- * See OGL_ATTRIBUTION.md for details.
+ * SRD 5.1 content is used under CC BY 4.0, and reaches us through Open5e.
+ * See SRD_ATTRIBUTION.md for the notice and why that licence rather than the OGL.
  */
 
 import { Prisma, PrismaClient } from '@prisma/client';
 import { randomUUID } from 'crypto';
+import { normalizeSkillKey } from '../utils/rules/dnd5e';
 import logger from '../utils/logger';
 
 // ─── Open5e API Types ───────────────────────────────────────────
@@ -117,6 +118,14 @@ export function mapOpen5eMonster(m: Open5eMonster) {
   if (m.wisdom_save !== null) savingThrows.wis = m.wisdom_save;
   if (m.charisma_save !== null) savingThrows.cha = m.charisma_save;
 
+  const rawSkills = m.skills ?? {};
+  const normalisedSkills: Record<string, number> | undefined =
+    Object.keys(rawSkills).length > 0
+      ? Object.fromEntries(
+          Object.entries(rawSkills).map(([key, value]) => [normalizeSkillKey(key), value])
+        )
+      : undefined;
+
   const creatureType = m.subtype
     ? `${m.size} ${m.type} (${m.subtype})`
     : `${m.size} ${m.type}`;
@@ -124,13 +133,19 @@ export function mapOpen5eMonster(m: Open5eMonster) {
   const statBlock = {
     ac: m.armor_class,
     hp: mapHitPoints(m),
+    hpMax: m.hit_points,
+    hitDice: m.hit_dice || undefined,
     speed: speedStr,
     abilities: {
       str: m.strength, dex: m.dexterity, con: m.constitution,
       int: m.intelligence, wis: m.wisdom, cha: m.charisma,
     },
     savingThrows: Object.keys(savingThrows).length > 0 ? savingThrows : undefined,
-    skills: m.skills && Object.keys(m.skills).length > 0 ? m.skills : undefined,
+    // Open5e uses its own lowercase keys, including snake_case for multi-word
+    // skills ("animal_handling"). Normalising on import means the skill lookup
+    // recognises them, so they keep their ability association in the roll
+    // picker instead of being treated as unknown custom skills.
+    skills: normalisedSkills,
     damageVulnerabilities: m.damage_vulnerabilities || undefined,
     damageResistances: m.damage_resistances || undefined,
     damageImmunities: m.damage_immunities || undefined,
@@ -150,7 +165,7 @@ export function mapOpen5eMonster(m: Open5eMonster) {
   };
 
   // Remove undefined keys for clean JSON storage
-  const cleanBlock = JSON.parse(JSON.stringify(statBlock)) as Record<string, unknown> & { hp?: StatBlockHp };
+  const cleanBlock = JSON.parse(JSON.stringify(statBlock)) as typeof statBlock;
 
   return {
     name: m.name,
@@ -167,6 +182,8 @@ export function mapOpen5eMonster(m: Open5eMonster) {
 }
 
 // ─── Fetch all SRD monsters from Open5e (paginated) ─────────────
+
+export const transformMonster = mapOpen5eMonster;
 
 async function fetchAllSrdMonsters(): Promise<Open5eMonster[]> {
   const all: Open5eMonster[] = [];
@@ -192,6 +209,7 @@ async function fetchAllSrdMonsters(): Promise<Open5eMonster[]> {
 export interface SeedResult {
   fetched: number;
   created: number;
+  updated: number;
   skipped: number;
   alreadyExisted: number;
   /** Existing SRD templates whose missing `statBlock.hp` was backfilled. */
@@ -202,6 +220,34 @@ type ExistingSrdTemplate = { id: string; name: string; gameSystem: string | null
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Fill in hit points on a stat block that predates HP tracking.
+ *
+ * Returns null when the stat block already has HP (or is unusable), so callers
+ * can skip the write. Only the HP keys are added — every other key is copied
+ * through untouched, so a re-seed never rewrites curated stat block content.
+ */
+export function backfillStatBlockHp(
+  existingStatBlock: unknown,
+  hpMax: number,
+  hitDice?: string
+): Record<string, unknown> | null {
+  if (!existingStatBlock || typeof existingStatBlock !== 'object' || Array.isArray(existingStatBlock)) {
+    return null;
+  }
+
+  const statBlock = existingStatBlock as Record<string, unknown>;
+  if (typeof statBlock.hpMax === 'number') {
+    return null; // Already has HP — leave it alone
+  }
+
+  return {
+    ...statBlock,
+    hpMax,
+    ...(hitDice && !statBlock.hitDice && { hitDice }),
+  };
 }
 
 /**
@@ -227,6 +273,7 @@ export async function seedSrdCreatures(
   const monsters = await fetchMonsters();
 
   let created = 0;
+  let updated = 0;
   let skipped = 0;
   let updatedHp = 0;
 
@@ -244,25 +291,28 @@ export async function seedSrdCreatures(
     }
 
     if (alreadyExists) {
-      const hp = data.statBlock.hp;
-      if (!hp) continue;
-
-      // Backfill hp on matching SRD templates that lack it
+      // Preserve curated content and add only missing HP representations.
       const targets = existing.filter((e) =>
         e.name === data.name
         && e.gameSystem === data.gameSystem
         && isPlainObject(e.statBlock)
-        && e.statBlock.hp == null,
+        && (e.statBlock.hp == null || e.statBlock.hpMax == null),
       );
       for (const target of targets) {
         try {
-          const statBlock = { ...(target.statBlock as Record<string, unknown>), hp };
+          const previous = target.statBlock as Record<string, unknown>;
+          const statBlock = {
+            ...previous,
+            ...(previous.hp == null && data.statBlock.hp && { hp: data.statBlock.hp }),
+            ...(previous.hpMax == null && { hpMax: data.statBlock.hpMax, hitDice: previous.hitDice ?? data.statBlock.hitDice }),
+          };
           await prisma.creatureTemplate.update({
             where: { id: target.id },
             data: { statBlock: statBlock as Prisma.InputJsonObject },
           });
           target.statBlock = statBlock as Prisma.JsonObject;
-          updatedHp++;
+          updated++;
+          if (previous.hp == null) updatedHp++;
         } catch (err) {
           // Log but don't abort — skip problematic entries
           logger.error(`Failed to backfill hp for "${monster.name}"`, { err: err });
@@ -300,6 +350,7 @@ export async function seedSrdCreatures(
   return {
     fetched: monsters.length,
     created,
+    updated,
     skipped,
     alreadyExisted: existingNames.size,
     updatedHp,

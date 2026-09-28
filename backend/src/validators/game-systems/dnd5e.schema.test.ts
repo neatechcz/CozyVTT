@@ -85,6 +85,7 @@ describe('D&D 5e survival state', () => {
     expect(result.success).toBe(false);
   });
 
+
   it('preserves a dated food, water, and exhaustion tracker', () => {
     const survival = { lastResolvedDay: '8. Mlžníku', daysWithoutFood: 0.5,
       foodTodayPounds: 0.5, waterTodayGallons: 0.5, waterRequiredGallons: 1,

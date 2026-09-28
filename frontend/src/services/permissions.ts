@@ -96,14 +96,44 @@ export function canViewCharacter(
     (membership?.role === 'PLAYER' && membership.characterIds.includes(character.id)) || false;
 }
 
-/** Character-based rolls use the sheet's modifiers and require control. */
+/**
+ * Check if a user can roll a character's dice
+ *
+ * Rolling uses the sheet's own modifiers, so it is an action taken *as* that
+ * character rather than a way of reading one. The owner may, and the DM may so
+ * they can cover for an absent player. Everyone else in the campaign — other
+ * players and spectators alike — may still open and read the sheet, which the
+ * server deliberately allows, but not roll from it.
+ *
+ * This is deliberately its own rule rather than a call to canEditCharacter.
+ * The two happen to agree today, but "may change this sheet" and "may act as
+ * this character" are different questions, and folding them together would
+ * mean any future change to editing silently changed who can roll.
+ *
+ * @param user - Current user
+ * @param character - Character whose rolls are being offered
+ * @param membership - User's campaign membership (if in campaign context)
+ * @returns true if user can roll as the character
+ */
 export function canRollAsCharacter(
   user: User,
-  character: Pick<Character, 'id' | 'userId'>,
+  // Only ownership is read, and the roster's context menu holds the owner id
+  // without the character object — so this takes the narrowest thing that
+  // answers the question rather than making callers fetch a whole Character.
+  character: Pick<Character, 'userId'> & Partial<Pick<Character, 'id'>>,
   membership?: CampaignMembership
 ): boolean {
-  return character.userId === user.id || membership?.role === 'DM' ||
-    (membership?.role === 'PLAYER' && membership.characterIds.includes(character.id)) || false;
+  // User owns the character
+  if (character.userId === user.id) {
+    return true;
+  }
+
+  // User is DM of the campaign
+  if (membership && membership.role === 'DM') {
+    return true;
+  }
+
+  return membership?.role === 'PLAYER' && !!character.id && membership.characterIds.includes(character.id) || false;
 }
 
 /**

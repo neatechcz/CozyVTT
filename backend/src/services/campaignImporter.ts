@@ -15,7 +15,7 @@ import { randomUUID } from 'crypto';
 import path from 'path';
 import fs from 'fs';
 import unzipper from 'unzipper';
-import { Prisma } from '@prisma/client';
+import { Prisma, type AssetType, type GameSystem } from '@prisma/client';
 import { prisma } from '../config/database';
 import { fileTypeFromBuffer } from 'file-type';
 import {
@@ -28,6 +28,7 @@ import {
   IMPORT_LIMITS,
 } from '../validators/campaignImport';
 import type { MapData, AssetManifestData } from '../validators/campaignImport';
+import { preserveAtmosphereAudio } from '../utils/vibe-presets';
 import { isSafeArchivePath } from '../utils/archive';
 import { normalizeSpellName } from '../utils/spell-names';
 import logger from '../utils/logger';
@@ -206,10 +207,14 @@ export async function importCampaign(
       id: newCampaignId,
       name: campaignName || campaignSettings.name,
       description: campaignSettings.description || null,
-      gameSystem: campaignSettings.gameSystem as any || null,
+      gameSystem: (campaignSettings.gameSystem as GameSystem) || null,
       status: 'PREPARATION',
       ownerId: importingUserId,
-      vibeSettings: (campaignSettings.vibeSettings as Prisma.InputJsonValue) || defaultVibeSettings,
+      // The archive is a file the importer chose, so its atmosphere track is a
+      // client-supplied asset id like any other. A new campaign has none.
+      vibeSettings:
+        (preserveAtmosphereAudio(campaignSettings.vibeSettings) as Prisma.InputJsonValue) ||
+        defaultVibeSettings,
       currentVibe: campaignSettings.currentVibe || null,
       spiritLayerEnabled: campaignSettings.spiritLayerEnabled ?? false,
       spiritLayerStyle: campaignSettings.spiritLayerStyle ?? 'wispy',
@@ -273,7 +278,7 @@ export async function importCampaign(
     await prisma.asset.create({
       data: {
         id: newId,
-        type: assetInfo.type as any,
+        type: assetInfo.type as AssetType,
         scope: 'CAMPAIGN',
         uploadedById: importingUserId,
         campaignId: newCampaignId,
@@ -371,7 +376,7 @@ export async function importCampaign(
           data: {
             id: randomUUID(),
             name: c.name,
-            gameSystem: c.gameSystem as any || null,
+            gameSystem: (c.gameSystem as GameSystem) || null,
             source: 'custom',
             challengeRating: c.challengeRating || null,
             creatureType: c.creatureType || null,

@@ -26,7 +26,25 @@ export const queryKeys = {
   characters: ['characters'] as const,
   pendingInvitations: ['invitations', 'pending'] as const,
   assets: (params: AssetListParams) => ['assets', params] as const,
+  characterTemplates: (params: CharacterTemplateListParams) =>
+    ['character-templates', params] as const,
+  serverConfig: ['server-config'] as const,
 };
+
+/**
+ * Server-enforced upload limits. Changes only when the server restarts with new
+ * MAX_*_SIZE_MB values, so it is cached for the session; callers fall back to
+ * DEFAULT_UPLOAD_LIMITS (utils/uploadLimits.ts) while it loads or if the
+ * endpoint is unavailable (e.g. an older backend).
+ */
+export function useServerConfigQuery() {
+  return useQuery({
+    queryKey: queryKeys.serverConfig,
+    queryFn: () => api.getServerConfig(),
+    staleTime: Infinity,
+    retry: 1,
+  });
+}
 
 export function useCampaignsQuery() {
   return useQuery({
@@ -60,5 +78,19 @@ export function useAssetsQuery(params: AssetListParams) {
   return useQuery({
     queryKey: queryKeys.assets(params),
     queryFn: () => api.listAssets(params),
+  });
+}
+
+export interface CharacterTemplateListParams {
+  search?: string;
+  /** A GameSystem value, or 'flexible' for the system-agnostic ones. */
+  gameSystem?: string;
+  mine?: boolean;
+}
+
+export function useCharacterTemplatesQuery(params: CharacterTemplateListParams = {}) {
+  return useQuery({
+    queryKey: queryKeys.characterTemplates(params),
+    queryFn: () => api.listCharacterTemplates({ ...params, limit: 100 }),
   });
 }

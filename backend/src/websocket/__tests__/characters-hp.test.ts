@@ -92,7 +92,7 @@ function setup(gameSystem: string, data: Record<string, unknown>, overrides: Par
   });
   db.user.findUnique.mockResolvedValue({ displayName: 'Václav' });
 
-  const roomEmit = jest.fn((event: string) => {
+  const roomEmit = jest.fn((event: string, _payload?: unknown) => {
     order.push(`emit:${event}`);
   });
   const io = { to: jest.fn(() => ({ emit: roomEmit })) };
@@ -119,10 +119,50 @@ function setup(gameSystem: string, data: Record<string, unknown>, overrides: Par
       stored = row;
     },
     handler: handlers['character.hp.update'],
+    hitDieHandler: handlers['character.hitdice.spend'],
   };
 }
 
 beforeEach(() => jest.clearAllMocks());
+
+test('hit die spend locks the row and broadcasts the full sheet only to viewers', async () => {
+  const { hitDieHandler, order, io, roomEmit, socket, stored } = setup('DND_5E', {
+    hitDice: [{ class: 'fighter', total: '3d10', remaining: 2 }], notes: 'private',
+  });
+  await hitDieHandler({ characterId: 'char-1', index: 0 });
+  expect(socket.emit).not.toHaveBeenCalled();
+  expect(order).toEqual(expect.arrayContaining(['begin', 'lock', 'read', 'write', 'commit', 'emit:character.updated']));
+  expect(order.indexOf('commit')).toBeLessThan(order.indexOf('emit:character.updated'));
+  expect(io.to).not.toHaveBeenCalledWith('camp-1');
+  expect(io.to).toHaveBeenCalledWith(['owner', 'dm', 'assigned']);
+  expect((stored().data.hitDice as { remaining: number }[])[0].remaining).toBe(1);
+  const payload = roomEmit.mock.calls.find(([event]) => event === 'character.updated')?.[1];
+  expect(payload).toMatchObject({ changedPaths: ['hitDice'], character: { data: { notes: 'private' } } });
+});
+
+test('HP delta respects the halved maximum at D&D exhaustion level four', async () => {
+  const { handler, stored, roomEmit } = setup('DND_5E', {
+    hp: { current: 9, maximum: 21, temporary: 0 },
+    survival: { exhaustionLevel: 4 }, exhaustionLevel: 4,
+  });
+  await handler({ characterId: 'char-1', delta: 20 });
+  expect((stored().data.hp as { current: number }).current).toBe(10);
+  expect(roomEmit.mock.calls[0][1]).toMatchObject({ hp: { current: 10, max: 10 } });
+});
+
+test('an assigned player may spend a hit die, but an unassigned player may not', async () => {
+  const assigned = setup('DND_5E', { hitDice: [{ total: '2d8', remaining: 1 }] });
+  assigned.socket.userId = 'assigned';
+  await assigned.hitDieHandler({ characterId: 'char-1', index: 0 });
+  expect(assigned.socket.emit).not.toHaveBeenCalled();
+  expect((assigned.stored().data.hitDice as { remaining: number }[])[0].remaining).toBe(0);
+
+  const other = setup('DND_5E', { hitDice: [{ total: '2d8', remaining: 1 }] });
+  other.socket.userId = 'other';
+  await other.hitDieHandler({ characterId: 'char-1', index: 0 });
+  expect(other.socket.emit).toHaveBeenCalledWith('error', expect.objectContaining({ message: expect.stringMatching(/permission/i) }));
+  expect((other.stored().data.hitDice as { remaining: number }[])[0].remaining).toBe(1);
+});
 
 test('emits character.updated with changedPaths ["hp.current"] after character.hp.updated', async () => {
   const { roomEmit, io, socket, handler } = setup('DND_5E', { hp: { current: 8, maximum: 10, temporary: 0 } });

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * StatBlockEditor
  * DM inline editor for NPC stat blocks. Provides a compact form to edit
  * all stat block fields. Used inside the NpcQuickEditor panel.
@@ -7,15 +7,33 @@
 import { useState, useCallback } from 'react';
 import { Plus, X, ChevronDown, ChevronRight } from 'lucide-react';
 import type { NpcStatBlock } from '@/types';
+import { ABILITY_KEYS, CHALLENGE_RATINGS } from '@/utils/rules/dnd5e';
+import ProficiencyEditor from './ProficiencyEditor';
+import Pf2eProficiencyEditor from './Pf2eProficiencyEditor';
+import { recomputeDerivedBonuses } from './statBlockProficiency';
+import { readAttributeModifiers, setAttributeModifier } from './pf2eStatBlock';
 
 interface StatBlockEditorProps {
   statBlock: NpcStatBlock;
   onChange: (updated: NpcStatBlock) => void;
+  /**
+   * The campaign's game system. Decides how this stat block is interpreted:
+   * D&D 5e derives saves and skills from ability scores and Challenge Rating,
+   * while Pathfinder 2e stores printed modifiers against a creature Level.
+   * Defaults to 5e, which is the shape the stat block was designed around.
+   */
+  gameSystem?: string | null;
 }
 
 type ActionEntry = { name: string; description: string };
 
-export default function StatBlockEditor({ statBlock, onChange }: StatBlockEditorProps) {
+export default function StatBlockEditor({
+  statBlock,
+  onChange,
+  gameSystem = 'DND_5E',
+}: StatBlockEditorProps) {
+  const isPf2e = gameSystem === 'PATHFINDER_2E';
+  const pf2eModifiers = readAttributeModifiers(statBlock);
   const [expandedSections, setExpandedSections] = useState<Set<string>>(new Set(['core', 'abilities']));
 
   const toggleSection = (section: string) => {
@@ -34,31 +52,26 @@ export default function StatBlockEditor({ statBlock, onChange }: StatBlockEditor
     [statBlock, onChange]
   );
 
+  // Ability scores and CR both feed every derived save and skill, so changing
+  // one has to move the others — raising Wisdom must raise Perception.
+  // Bonuses marked as overrides keep their value.
   const updateAbility = useCallback(
     (ab: keyof NpcStatBlock['abilities'], value: number) => {
-      update({ abilities: { ...statBlock.abilities, [ab]: value } });
+      onChange(
+        recomputeDerivedBonuses({
+          ...statBlock,
+          abilities: { ...statBlock.abilities, [ab]: value },
+        })
+      );
     },
-    [statBlock.abilities, update]
+    [statBlock, onChange]
   );
 
-  const updateSave = useCallback(
-    (key: string, value: number | null) => {
-      const saves = { ...(statBlock.savingThrows || {}) };
-      if (value === null) delete saves[key];
-      else saves[key] = value;
-      update({ savingThrows: saves });
+  const updateChallengeRating = useCallback(
+    (cr: string) => {
+      onChange(recomputeDerivedBonuses({ ...statBlock, challengeRating: cr || undefined }));
     },
-    [statBlock.savingThrows, update]
-  );
-
-  const updateSkill = useCallback(
-    (key: string, value: number | null) => {
-      const skills = { ...(statBlock.skills || {}) };
-      if (value === null) delete skills[key];
-      else skills[key] = value;
-      update({ skills });
-    },
-    [statBlock.skills, update]
+    [statBlock, onChange]
   );
 
   const updateActionList = useCallback(
@@ -78,7 +91,7 @@ export default function StatBlockEditor({ statBlock, onChange }: StatBlockEditor
         <div className="space-y-2 pl-1">
           <div className="grid grid-cols-2 gap-2">
             <div>
-              <label className="text-[10px] text-stone-500 block mb-0.5">Creature Type</label>
+              <label className="text-[10px] text-ink-muted block mb-0.5">Creature Type</label>
               <input
                 type="text"
                 value={statBlock.creatureType || ''}
@@ -88,7 +101,7 @@ export default function StatBlockEditor({ statBlock, onChange }: StatBlockEditor
               />
             </div>
             <div>
-              <label className="text-[10px] text-stone-500 block mb-0.5">Alignment</label>
+              <label className="text-[10px] text-ink-muted block mb-0.5">Alignment</label>
               <input
                 type="text"
                 value={statBlock.alignment || ''}
@@ -100,7 +113,7 @@ export default function StatBlockEditor({ statBlock, onChange }: StatBlockEditor
           </div>
           <div className="grid grid-cols-3 gap-2">
             <div>
-              <label className="text-[10px] text-stone-500 block mb-0.5">AC</label>
+              <label className="text-[10px] text-ink-muted block mb-0.5">AC</label>
               <input
                 type="number"
                 value={statBlock.ac}
@@ -108,18 +121,44 @@ export default function StatBlockEditor({ statBlock, onChange }: StatBlockEditor
                 className="input-cozy input-cozy-number w-full text-xs text-center"
               />
             </div>
+            {isPf2e ? (
+              <div>
+                {/* PF2e rates creatures by Level, not Challenge Rating. */}
+                <label className="text-[10px] text-ink-muted block mb-0.5" htmlFor="statblock-level">Level</label>
+                <input
+                  id="statblock-level"
+                  type="number"
+                  min={-1}
+                  max={30}
+                  value={statBlock.level ?? ''}
+                  onChange={(e) => {
+                    const parsed = parseInt(e.target.value, 10);
+                    update({ level: Number.isFinite(parsed) ? parsed : undefined });
+                  }}
+                  placeholder="5"
+                  className="input-cozy input-cozy-number w-full text-xs text-center"
+                />
+              </div>
+            ) : (
+              <div>
+                <label className="text-[10px] text-ink-muted block mb-0.5" htmlFor="statblock-cr">CR</label>
+                {/* A select, not free text: CR drives the proficiency bonus, so a
+                    typo would silently change every derived save and skill. */}
+                <select
+                  id="statblock-cr"
+                  value={statBlock.challengeRating || ''}
+                  onChange={(e) => updateChallengeRating(e.target.value)}
+                  className="input-cozy w-full text-xs"
+                >
+                  <option value="">—</option>
+                  {CHALLENGE_RATINGS.map((cr) => (
+                    <option key={cr} value={cr}>{cr}</option>
+                  ))}
+                </select>
+              </div>
+            )}
             <div>
-              <label className="text-[10px] text-stone-500 block mb-0.5">CR</label>
-              <input
-                type="text"
-                value={statBlock.challengeRating || ''}
-                onChange={(e) => update({ challengeRating: e.target.value })}
-                placeholder="1/4"
-                className="input-cozy w-full text-xs"
-              />
-            </div>
-            <div>
-              <label className="text-[10px] text-stone-500 block mb-0.5">XP</label>
+              <label className="text-[10px] text-ink-muted block mb-0.5">XP</label>
               <input
                 type="number"
                 value={statBlock.xp ?? ''}
@@ -129,7 +168,7 @@ export default function StatBlockEditor({ statBlock, onChange }: StatBlockEditor
             </div>
           </div>
           <div>
-            <label className="text-[10px] text-stone-500 block mb-0.5">Speed</label>
+            <label className="text-[10px] text-ink-muted block mb-0.5">Speed</label>
             <input
               type="text"
               value={statBlock.speed}
@@ -142,12 +181,40 @@ export default function StatBlockEditor({ statBlock, onChange }: StatBlockEditor
       )}
 
       {/* ── Ability Scores ── */}
-      <SectionHeader title="Ability Scores" section="abilities" expanded={isExpanded('abilities')} toggle={toggleSection} />
-      {isExpanded('abilities') && (
+      <SectionHeader
+        title={isPf2e ? 'Attribute Modifiers' : 'Ability Scores'}
+        section="abilities"
+        expanded={isExpanded('abilities')}
+        toggle={toggleSection}
+      />
+      {isExpanded('abilities') && isPf2e && (
+        // PF2e stat blocks print modifiers ("Str +4") with no score behind
+        // them, so these are entered directly rather than derived from a score.
+        <div className="grid grid-cols-6 gap-1.5 pl-1">
+          {ABILITY_KEYS.map((ab) => (
+            <div key={ab} className="text-center">
+              <label className="text-[9px] font-bold text-brand-ink uppercase block mb-0.5">{ab}</label>
+              <input
+                type="number"
+                aria-label={`${ab} modifier`}
+                min={-10}
+                max={20}
+                value={pf2eModifiers[ab]}
+                onChange={(e) => {
+                  const parsed = parseInt(e.target.value, 10);
+                  onChange(setAttributeModifier(statBlock, ab, Number.isFinite(parsed) ? parsed : 0));
+                }}
+                className="input-cozy input-cozy-number w-full text-xs text-center"
+              />
+            </div>
+          ))}
+        </div>
+      )}
+      {isExpanded('abilities') && !isPf2e && (
         <div className="grid grid-cols-6 gap-1.5 pl-1">
           {(['str', 'dex', 'con', 'int', 'wis', 'cha'] as const).map((ab) => (
             <div key={ab} className="text-center">
-              <label className="text-[9px] font-bold text-moss-green uppercase block mb-0.5">{ab}</label>
+              <label className="text-[9px] font-bold text-brand-ink uppercase block mb-0.5">{ab}</label>
               <input
                 type="number"
                 value={statBlock.abilities[ab]}
@@ -161,22 +228,12 @@ export default function StatBlockEditor({ statBlock, onChange }: StatBlockEditor
 
       {/* ── Saves & Skills ── */}
       <SectionHeader title="Saves & Skills" section="saves" expanded={isExpanded('saves')} toggle={toggleSection} />
-      {isExpanded('saves') && (
-        <div className="pl-1 space-y-2">
-          <KeyValueEditor
-            label="Saving Throws"
-            entries={statBlock.savingThrows || {}}
-            onUpdate={(k, v) => updateSave(k, v)}
-            placeholder="e.g. dex"
-          />
-          <KeyValueEditor
-            label="Skills"
-            entries={statBlock.skills || {}}
-            onUpdate={(k, v) => updateSkill(k, v)}
-            placeholder="e.g. perception"
-          />
-        </div>
-      )}
+      {isExpanded('saves') &&
+        (isPf2e ? (
+          <Pf2eProficiencyEditor statBlock={statBlock} onChange={onChange} />
+        ) : (
+          <ProficiencyEditor statBlock={statBlock} onChange={onChange} />
+        ))}
 
       {/* ── Defenses ── */}
       <SectionHeader title="Defenses & Senses" section="defenses" expanded={isExpanded('defenses')} toggle={toggleSection} />
@@ -191,7 +248,7 @@ export default function StatBlockEditor({ statBlock, onChange }: StatBlockEditor
             ['languages', 'Languages'],
           ] as const).map(([field, label]) => (
             <div key={field}>
-              <label className="text-[10px] text-stone-500 block mb-0.5">{label}</label>
+              <label className="text-[10px] text-ink-muted block mb-0.5">{label}</label>
               <input
                 type="text"
                 value={(statBlock[field] as string) || ''}
@@ -260,7 +317,7 @@ function SectionHeader({
     <button
       type="button"
       onClick={() => toggle(section)}
-      className="flex items-center gap-1 w-full text-left py-1 text-[10px] font-semibold text-moss-green uppercase tracking-wide hover:text-moss-green/80 transition-colors"
+      className="flex items-center gap-1 w-full text-left py-1 text-[10px] font-semibold text-brand-ink uppercase tracking-wide hover:text-brand-ink/80 transition-colors"
     >
       {expanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
       {title}
@@ -268,70 +325,6 @@ function SectionHeader({
   );
 }
 
-function KeyValueEditor({
-  label,
-  entries,
-  onUpdate,
-  placeholder,
-}: {
-  label: string;
-  entries: Record<string, number>;
-  onUpdate: (key: string, value: number | null) => void;
-  placeholder: string;
-}) {
-  const [newKey, setNewKey] = useState('');
-
-  const handleAdd = () => {
-    const k = newKey.trim().toLowerCase();
-    if (k && !(k in entries)) {
-      onUpdate(k, 0);
-      setNewKey('');
-    }
-  };
-
-  return (
-    <div>
-      <label className="text-[10px] text-stone-500 block mb-0.5">{label}</label>
-      {Object.entries(entries).map(([key, val]) => (
-        <div key={key} className="flex items-center gap-1 mb-0.5">
-          <span className="text-[10px] text-stone-600 w-20 capitalize">{key}</span>
-          <input
-            type="number"
-            value={val}
-            onChange={(e) => onUpdate(key, parseInt(e.target.value, 10) || 0)}
-            className="input-cozy input-cozy-number w-14 text-xs text-center"
-          />
-          <button
-            type="button"
-            onClick={() => onUpdate(key, null)}
-            className="p-0.5 text-stone-400 hover:text-red-500 transition-colors"
-            title="Remove"
-          >
-            <X className="w-3 h-3" />
-          </button>
-        </div>
-      ))}
-      <div className="flex items-center gap-1 mt-0.5">
-        <input
-          type="text"
-          value={newKey}
-          onChange={(e) => setNewKey(e.target.value)}
-          onKeyDown={(e) => e.key === 'Enter' && handleAdd()}
-          placeholder={placeholder}
-          className="input-cozy flex-1 text-xs"
-        />
-        <button
-          type="button"
-          onClick={handleAdd}
-          className="p-1 text-moss-green hover:text-moss-green/80 transition-colors"
-          title="Add"
-        >
-          <Plus className="w-3 h-3" />
-        </button>
-      </div>
-    </div>
-  );
-}
 
 function ActionListEditor({
   items,
@@ -374,7 +367,7 @@ function ActionListEditor({
           <button
             type="button"
             onClick={() => removeItem(i)}
-            className="p-1 mt-1 text-stone-400 hover:text-red-500 transition-colors flex-shrink-0"
+            className="p-1 mt-1 text-ink-muted hover:text-danger-ink transition-colors flex-shrink-0"
             title="Remove"
           >
             <X className="w-3 h-3" />
@@ -384,7 +377,7 @@ function ActionListEditor({
       <button
         type="button"
         onClick={addItem}
-        className="flex items-center gap-1 text-[10px] text-moss-green hover:text-moss-green/80 transition-colors"
+        className="flex items-center gap-1 text-[10px] text-brand-ink hover:text-brand-ink/80 transition-colors"
       >
         <Plus className="w-3 h-3" /> Add entry
       </button>

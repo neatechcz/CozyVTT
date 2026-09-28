@@ -19,7 +19,10 @@ import {
   type RollOption,
   type CharacterRolls,
 } from '@/utils/characterRolls';
-import { rollWithExhaustion } from '@/utils/dnd5eSurvival';
+import { resolveCharacterInitiative } from '@/utils/rules/initiative';
+import CustomRollFooter from './CustomRollFooter';
+import { rollWithExhaustion, trackedExhaustionLevel } from '@/utils/dnd5eSurvival';
+
 
 // ---------------------------------------------------------------------------
 // Types
@@ -30,8 +33,30 @@ interface CharacterRollPickerProps {
   character?: Character;
   /** If character is not supplied, fetch by ID */
   characterId?: string;
-  /** Called with the final dice expression and purpose when the player clicks a roll button */
-  onRoll: (expression: string, purpose: string) => void;
+  /**
+   * Called with the final dice expression, purpose, and the name of the
+   * character the roll is for, when the player clicks a roll button.
+   *
+   * The name comes from here rather than from each caller because this is the
+   * component that already holds the character; three call sites looking it up
+   * for themselves is how the roll menu got its ownership check wrong.
+   */
+  onRoll: (expression: string, purpose: string, characterName?: string) => void;
+  /**
+   * Called when the chosen roll spends a hit die, with the position of the
+   * pool. The roll itself still goes through `onRoll`; this is the decrement.
+   */
+  onSpendHitDie?: (index: number) => void;
+  /**
+   * Roll initiative for the token this picker was opened from, sending the
+   * result to the initiative tracker rather than only to the dice log.
+   *
+   * Omitted when initiative is not on offer — the token is not in the
+   * initiative order, or this viewer is not allowed to roll for it — in which
+   * case the section is not rendered at all. Whether a roll is permitted is
+   * decided by the server; this only controls what is shown.
+   */
+  onRollInitiative?: () => void;
   onClose: () => void;
   /** Position (from mouse event) — picker will flip if it would overflow viewport */
   anchorX: number;
@@ -65,7 +90,7 @@ const Section: React.FC<SectionProps> = ({ title, rolls, mode: _mode, onRoll }) 
           onClick={() => onRoll(opt)}
           className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-stone-gray hover:bg-moss-green/10 transition-colors text-left"
         >
-          <Dices className="w-3 h-3 text-moss-green flex-shrink-0" />
+          <Dices className="w-3 h-3 text-brand-ink flex-shrink-0" />
           <span className="flex-1">{opt.label}</span>
         </button>
       ))}
@@ -100,6 +125,8 @@ export default function CharacterRollPicker({
   character: initialCharacter,
   characterId,
   onRoll,
+  onSpendHitDie,
+  onRollInitiative,
   onClose,
   anchorX,
   anchorY,
@@ -165,7 +192,7 @@ export default function CharacterRollPicker({
     let purpose = opt.purpose;
 
     if (character?.gameSystem === 'DND_5E' && opt.supportsAdvantage) {
-      expr = rollWithExhaustion(expr, purpose, (character.data as any)?.survival?.exhaustionLevel ?? 0, mode);
+      expr = rollWithExhaustion(expr, purpose, trackedExhaustionLevel(character.data as Parameters<typeof trackedExhaustionLevel>[0]) ?? 0, mode);
       const actualMode = expr.startsWith('2d20kh1') ? 'Advantage'
         : expr.startsWith('2d20kl1') ? 'Disadvantage' : '';
       if (actualMode) purpose = `${purpose} (${actualMode})`;
@@ -174,13 +201,22 @@ export default function CharacterRollPicker({
       purpose = `${purpose} (${getModeLabels(character?.gameSystem ?? null)[mode]})`;
     }
 
-    onRoll(expr, purpose);
+    onRoll(expr, purpose, character?.name);
+    // Spending is recorded after the roll, so a failure to decrement cannot
+    // swallow the roll the player just made.
+    if (opt.hitDiceIndex !== undefined) onSpendHitDie?.(opt.hitDiceIndex);
     onClose();
   };
 
   const gameSystem = character?.gameSystem ?? null;
   const hasAdvantage = systemSupportsAdvantage(gameSystem);
   const modeLabels = getModeLabels(gameSystem);
+
+  // What initiative means for this character, purely so the entry can describe
+  // itself ("1d20+3", or "DEX 65" for a system that does not roll). The server
+  // works the same thing out from the same shared rules when the roll is
+  // actually made — this never decides the outcome.
+  const initiative = resolveCharacterInitiative(gameSystem, character?.data);
 
   const characterName = character?.name ?? 'Character';
   const hasAnyRolls = rolls && (
@@ -193,7 +229,7 @@ export default function CharacterRollPicker({
   return (
     <div
       ref={pickerRef}
-      className="fixed z-[60] bg-soft-cream border-2 border-moss-green/30 rounded-lg shadow-2xl overflow-hidden"
+      className="fixed z-[60] bg-soft-cream border-2 border-moss-green/30 rounded-lg shadow-2xl overflow-hidden flex flex-col"
       style={{
         left:       pos ? pos.x : anchorX,
         top:        pos ? pos.y : anchorY,
@@ -204,9 +240,9 @@ export default function CharacterRollPicker({
       }}
     >
       {/* Header */}
-      <div className="flex items-center justify-between px-3 py-2 bg-moss-green/10 border-b border-moss-green/20">
+      <div className="flex-shrink-0 flex items-center justify-between px-3 py-2 bg-moss-green/10 border-b border-moss-green/20">
         <div className="flex items-center gap-2">
-          <Dices className="w-4 h-4 text-moss-green" />
+          <Dices className="w-4 h-4 text-brand-ink" />
           <span className="text-sm font-semibold text-stone-gray truncate">
             Roll for {characterName}
           </span>
@@ -218,14 +254,14 @@ export default function CharacterRollPicker({
 
       {/* Roll Mode Selector (d20 systems only) */}
       {hasAdvantage && !loading && hasAnyRolls && (
-        <div className="px-3 py-2 border-b border-moss-green/10 bg-parchment/30">
+        <div className="flex-shrink-0 px-3 py-2 border-b border-moss-green/10 bg-parchment/30">
           <div className="text-xs text-warm-gray mb-1">Roll mode</div>
           <div className="relative">
             <button
               onClick={() => setModeOpen((o) => !o)}
               className="w-full flex items-center justify-between px-2 py-1.5 rounded border border-moss-green/30 bg-paper/60 text-sm text-ink-secondary hover:bg-paper/80 transition-colors"
             >
-              <span className={mode !== 'normal' ? 'text-amber-600 font-medium' : ''}>
+              <span className={mode !== 'normal' ? 'text-warning-ink font-medium' : ''}>
                 {modeLabels[mode]}
               </span>
               <ChevronDown className="w-3.5 h-3.5 text-warm-gray" />
@@ -237,7 +273,7 @@ export default function CharacterRollPicker({
                     key={m}
                     onClick={() => { setMode(m); setModeOpen(false); }}
                     className={`w-full text-left px-3 py-2 text-sm hover:bg-moss-green/10 transition-colors first:rounded-t-lg last:rounded-b-lg ${
-                      mode === m ? 'font-semibold text-moss-green' : 'text-stone-gray'
+                      mode === m ? 'font-semibold text-brand-ink' : 'text-stone-gray'
                     }`}
                   >
                     {modeLabels[m]}
@@ -250,7 +286,7 @@ export default function CharacterRollPicker({
       )}
 
       {/* Content */}
-      <div className="overflow-y-auto" style={{ maxHeight: 400 }}>
+      <div className="flex-1 min-h-0 overflow-y-auto">
         {loading && (
           <div className="flex items-center justify-center py-8 text-warm-gray text-sm">
             Loading rolls…
@@ -258,7 +294,35 @@ export default function CharacterRollPicker({
         )}
 
         {error && (
-          <div className="px-3 py-4 text-sm text-red-600 text-center">{error}</div>
+          <div className="px-3 py-4 text-sm text-danger-ink text-center">{error}</div>
+        )}
+
+        {/* Initiative — offered only while this token is in the initiative
+            order, and only to someone allowed to roll for it. Kept outside the
+            block below so it still shows for a character whose sheet has
+            nothing else rollable on it: being in a fight does not depend on
+            having filled the sheet in. */}
+        {!loading && !error && onRollInitiative && (
+          <div className="border-b border-moss-green/10">
+            <div className="px-3 py-1 text-xs font-semibold uppercase tracking-wider text-warm-gray bg-parchment/40">
+              Initiative
+            </div>
+            <button
+              onClick={() => { onRollInitiative(); onClose(); }}
+              className="w-full flex items-center gap-2 px-3 py-1.5 text-sm text-stone-gray hover:bg-moss-green/10 transition-colors text-left"
+            >
+              <Dices className="w-3 h-3 text-brand-ink flex-shrink-0" />
+              {/* The wording follows the system. Call of Cthulhu ranks
+                  combatants by Dexterity with no die involved, so offering to
+                  "roll" would promise something that does not happen. */}
+              <span className="flex-1">
+                {initiative?.kind === 'fixed' ? 'Set Initiative' : 'Roll Initiative'}
+              </span>
+              {initiative && (
+                <span className="text-xs text-warm-gray flex-shrink-0">{initiative.label}</span>
+              )}
+            </button>
+          </div>
         )}
 
         {!loading && !error && !hasAnyRolls && (
@@ -277,9 +341,22 @@ export default function CharacterRollPicker({
               <Section title="Saving Throws" rolls={rolls.savingThrows} mode={mode} onRoll={handleRollOption} />
             )}
             <Section title="Combat" rolls={rolls.combat} mode={mode} onRoll={handleRollOption} />
+            <Section title="Hit Dice" rolls={rolls.hitDice} mode={mode} onRoll={handleRollOption} />
           </div>
         )}
       </div>
+
+      {/* Not everything a character rolls comes off the sheet. Pinned below the
+          list rather than inside it, so it is reachable without scrolling past
+          a long skill list — the same place the creature picker keeps it.
+
+          Only shown once the character has loaded: the roll is filed under
+          their name, and there is nothing to file it under until then. */}
+      {!loading && !error && character && (
+        <CustomRollFooter
+          onRoll={(expression, purpose) => { onRoll(expression, purpose, character.name); onClose(); }}
+        />
+      )}
     </div>
   );
 }

@@ -8,6 +8,7 @@ import { useState, FormEvent } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useAuth } from '@/contexts/AuthContext';
 import Button from '@/components/ui/Button';
+import { apiErrorStatus, apiErrorText } from '@/utils/errors';
 
 export default function MFAVerifyPage() {
   const navigate = useNavigate();
@@ -57,14 +58,15 @@ export default function MFAVerifyPage() {
       await verifyMFA(token);
 
       // On success, user is logged in and will be redirected
-    } catch (err: any) {
+    } catch (err) {
       console.error('MFA verification error:', err);
 
-      if (err.response?.data?.error) {
-        setError(err.response.data.error);
-      } else if (err.response?.status === 401) {
+      const serverError = apiErrorText(err);
+      if (serverError) {
+        setError(serverError);
+      } else if (apiErrorStatus(err) === 401) {
         setError('Invalid authentication code. Please try again.');
-      } else if (err.response?.status === 429) {
+      } else if (apiErrorStatus(err) === 429) {
         setError('Too many attempts. Please try again later.');
       } else {
         setError('An error occurred during verification. Please try again.');
@@ -99,14 +101,15 @@ export default function MFAVerifyPage() {
       await verifyMFAWithBackupCode(cleanedCode);
 
       // On success, user is logged in and will be redirected
-    } catch (err: any) {
+    } catch (err) {
       console.error('Backup code verification error:', err);
 
-      if (err.response?.data?.error) {
-        setError(err.response.data.error);
-      } else if (err.response?.status === 401) {
+      const serverError = apiErrorText(err);
+      if (serverError) {
+        setError(serverError);
+      } else if (apiErrorStatus(err) === 401) {
         setError('Invalid backup code. Please try again.');
-      } else if (err.response?.status === 429) {
+      } else if (apiErrorStatus(err) === 429) {
         setError('Too many attempts. Please try again later.');
       } else {
         setError('An error occurred during verification. Please try again.');
@@ -134,7 +137,7 @@ export default function MFAVerifyPage() {
           <div className="flex justify-center mb-4">
             <div className="bg-moss-green/10 rounded-full p-3">
               <svg
-                className="w-8 h-8 text-moss-green"
+                className="w-8 h-8 text-brand-ink"
                 fill="none"
                 stroke="currentColor"
                 viewBox="0 0 24 24"
@@ -148,7 +151,7 @@ export default function MFAVerifyPage() {
               </svg>
             </div>
           </div>
-          <h1 className="text-3xl font-bold text-moss-green font-heading">
+          <h1 className="text-3xl font-bold text-brand-ink font-heading">
             Two-Factor Authentication
           </h1>
           <p className="mt-2 text-sm text-warm-gray">
@@ -171,7 +174,7 @@ export default function MFAVerifyPage() {
             <div>
               <label
                 htmlFor="token"
-                className="block text-sm font-medium text-moss-green mb-1"
+                className="block text-sm font-medium text-brand-ink mb-1"
               >
                 Authentication Code
               </label>
@@ -240,7 +243,7 @@ export default function MFAVerifyPage() {
             <div>
               <label
                 htmlFor="backupCode"
-                className="block text-sm font-medium text-moss-green mb-1"
+                className="block text-sm font-medium text-brand-ink mb-1"
               >
                 Backup Code
               </label>
@@ -313,7 +316,7 @@ export default function MFAVerifyPage() {
         <div className="text-center">
           <button
             onClick={toggleInputMode}
-            className="text-sm text-moss-green hover:text-moss-green/80 transition-colors"
+            className="text-sm text-brand-ink hover:text-brand-ink/80 transition-colors"
             disabled={loading}
           >
             {useBackupCode
@@ -326,7 +329,7 @@ export default function MFAVerifyPage() {
         <div className="text-center pt-4 border-t border-warm-gray/20">
           <button
             onClick={() => navigate('/auth/login')}
-            className="text-sm text-warm-gray hover:text-moss-green transition-colors"
+            className="text-sm text-warm-gray hover:text-brand-ink transition-colors"
             disabled={loading}
           >
             Back to login

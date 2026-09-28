@@ -4,14 +4,15 @@
 // ============================================
 
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { motion, AnimatePresence } from 'framer-motion';
-import { MapPin, Check, Search, Loader2, ZoomIn, ZoomOut, Sparkles } from 'lucide-react';
+import { MapPin, Loader2, ZoomIn, ZoomOut, Sparkles } from 'lucide-react';
 import { api } from '@/services/api';
 import mapService from '@/services/map.service';
 import type { Asset, Map, UpdateMapRequest } from '@/types';
 import { AssetType } from '@/types';
+import AssetPicker from '@/components/assets/AssetPicker';
 import { detectMapGrid, type GridDetectionResult } from '@/utils/detectMapGrid';
 import { Button, Modal } from '@/components/ui';
+import { extractAssetId } from '@/utils/assetUrl';
 
 interface EditMapModalProps {
   isOpen: boolean;
@@ -19,184 +20,6 @@ interface EditMapModalProps {
   campaignId: string;
   onClose: () => void;
   onUpdated: (map: Map) => void;
-}
-
-// ============================================
-// AssetPicker
-// Inline grid for selecting map/spirit layer images
-// (Identical to CreateMapModal's — kept local to avoid coupling)
-// ============================================
-
-function AssetPicker({
-  label,
-  required,
-  selectedAssetId,
-  onSelect,
-}: {
-  label: string;
-  required?: boolean;
-  selectedAssetId: string | null;
-  onSelect: (asset: Asset | null) => void;
-}) {
-  const [assets, setAssets] = useState<Asset[]>([]);
-  const [loading, setLoading] = useState(false);
-  const [expanded, setExpanded] = useState(false);
-  const [search, setSearch] = useState('');
-
-  const loadAssets = async () => {
-    if (assets.length > 0) return;
-    setLoading(true);
-    try {
-      const res = await api.listAssets({ type: AssetType.MAP, limit: 50 });
-      setAssets(res.assets);
-    } catch {
-      // silently ignore
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const handleBrowse = () => {
-    if (!expanded) loadAssets();
-    setExpanded((v) => !v);
-  };
-
-  const filtered = search
-    ? assets.filter((a) => a.name.toLowerCase().includes(search.toLowerCase()))
-    : assets;
-
-  // Find the selected asset object — may be from the pre-filled URL (UUID at end)
-  const selectedAsset = selectedAssetId ? assets.find((a) => a.id === selectedAssetId) : null;
-
-  return (
-    <div className="space-y-2">
-      <div className="flex items-center justify-between">
-        <label className="block text-sm font-medium text-stone-gray">
-          {label}
-          {required && <span className="text-red-500 ml-1">*</span>}
-        </label>
-        <div className="flex gap-2">
-          {selectedAssetId && (
-            <button
-              type="button"
-              onClick={() => onSelect(null)}
-              className="text-xs text-red-500 hover:text-red-700"
-            >
-              Clear
-            </button>
-          )}
-          <Button
-            type="button"
-            onClick={handleBrowse}
-            variant="secondary" className="text-xs py-1 px-2"
-          >
-            {expanded ? 'Hide' : 'Browse Assets'}
-          </Button>
-        </div>
-      </div>
-
-      {/* Preview of currently selected / stored URL */}
-      {selectedAssetId && (
-        <div className="flex items-center gap-3 p-2 bg-moss-green/10 border border-moss-green/30 rounded-lg">
-          <img
-            src={api.getAssetUrl(selectedAssetId, 'maps')}
-            alt="Selected map"
-            className="w-12 h-12 object-cover rounded"
-            onError={(e) => { (e.target as HTMLImageElement).style.display = 'none'; }}
-          />
-          <span className="text-sm text-moss-green font-medium truncate flex-1">
-            {selectedAsset?.name ?? 'Current image'}
-          </span>
-          <Check className="w-4 h-4 text-moss-green flex-shrink-0" />
-        </div>
-      )}
-
-      <AnimatePresence>
-        {expanded && (
-          <motion.div
-            initial={{ opacity: 0, height: 0 }}
-            animate={{ opacity: 1, height: 'auto' }}
-            exit={{ opacity: 0, height: 0 }}
-            className="overflow-hidden"
-          >
-            <div className="border border-moss-green/20 rounded-lg bg-parchment/30 p-3 space-y-3">
-              <div className="relative">
-                <Search className="absolute left-2 top-1/2 -translate-y-1/2 w-4 h-4 text-stone-gray/40" />
-                <input
-                  type="text"
-                  placeholder="Search maps..."
-                  value={search}
-                  onChange={(e) => setSearch(e.target.value)}
-                  className="w-full pl-8 pr-3 py-1.5 text-sm bg-paper-white border border-moss-green/20 rounded focus:outline-none focus:ring-1 focus:ring-moss-green text-stone-gray"
-                />
-              </div>
-
-              {loading ? (
-                <div className="flex justify-center py-4">
-                  <Loader2 className="w-6 h-6 text-moss-green animate-spin" />
-                </div>
-              ) : filtered.length === 0 ? (
-                <p className="text-center text-sm text-stone-gray/60 py-4">
-                  {assets.length === 0
-                    ? 'No map assets found. Upload a map image in the Asset Library first.'
-                    : 'No results for your search.'}
-                </p>
-              ) : (
-                <div className="grid grid-cols-3 gap-2 max-h-52 overflow-y-auto">
-                  {filtered.map((asset) => {
-                    const isSelected = selectedAssetId === asset.id;
-                    return (
-                      <button
-                        key={asset.id}
-                        type="button"
-                        onClick={() => {
-                          onSelect(isSelected ? null : asset);
-                          if (!isSelected) setExpanded(false);
-                        }}
-                        className={`relative rounded-lg overflow-hidden border-2 transition-all aspect-square ${
-                          isSelected
-                            ? 'border-moss-green shadow-md'
-                            : 'border-transparent hover:border-moss-green/40'
-                        }`}
-                      >
-                        <img
-                          src={api.getAssetUrl(asset.id, 'maps')}
-                          alt={asset.name}
-                          className="w-full h-full object-cover"
-                          onError={(e) => {
-                            const t = e.target as HTMLImageElement;
-                            t.style.display = 'none';
-                            const parent = t.parentElement;
-                            if (parent) {
-                              // SECURITY: use textContent (not innerHTML) so a
-                              // maliciously-named asset like `<img onerror=...>`
-                              // is rendered as literal text, not executed as HTML.
-                              const span = document.createElement('span');
-                              span.className = 'text-xs text-stone-gray/50 p-1 text-center';
-                              span.textContent = asset.name;
-                              parent.replaceChildren(span);
-                            }
-                          }}
-                        />
-                        {isSelected && (
-                          <div className="absolute inset-0 bg-moss-green/20 flex items-center justify-center">
-                            <Check className="w-6 h-6 text-moss-green drop-shadow" />
-                          </div>
-                        )}
-                        <div className="absolute bottom-0 inset-x-0 bg-black/60 px-1 py-0.5">
-                          <p className="text-white text-xs truncate">{asset.name}</p>
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
-  );
 }
 
 // ============================================
@@ -352,16 +175,6 @@ function DimensionField({
 // EditMapModal
 // ============================================
 
-/**
- * Extract asset UUID from a stored map imageUrl like /api/assets/maps/{uuid}
- * Falls back to the value itself if it's already a UUID
- */
-function extractAssetId(url: string | null): string | null {
-  if (!url) return null;
-  const parts = url.split('/');
-  return parts[parts.length - 1] || null;
-}
-
 export default function EditMapModal({
   isOpen,
   map,
@@ -498,7 +311,7 @@ export default function EditMapModal({
             <div className="space-y-6">
               <p className="text-xs text-ink-muted -mt-4 truncate">{map.name}</p>
               {error && (
-                <div role="alert" className="p-3 bg-red-500/10 border border-red-500/20 rounded-lg text-red-700 text-sm">
+                <div role="alert" className="p-3 bg-danger/10 border border-danger/20 rounded-lg text-danger-ink text-sm">
                   {error}
                 </div>
               )}
@@ -506,19 +319,27 @@ export default function EditMapModal({
               <AssetPicker
                 label="Map Image"
                 required
+                type={AssetType.MAP}
+                allowUpload={false}
+                searchPlaceholder="Search maps..."
+                emptyMessage="No map assets found. Upload a map image in the Asset Library first."
                 selectedAssetId={mapAssetId}
                 onSelect={handleMapAssetSelect}
               />
 
               <AssetPicker
                 label="Spirit Layer Image (optional)"
+                type={AssetType.MAP}
+                allowUpload={false}
+                searchPlaceholder="Search maps..."
+                emptyMessage="No map assets found. Upload a map image in the Asset Library first."
                 selectedAssetId={spiritAssetId}
                 onSelect={handleSpiritAssetSelect}
               />
 
               <div>
                 <label className="block text-sm font-medium text-stone-gray mb-1">
-                  Map Name <span className="text-red-500">*</span>
+                  Map Name <span className="text-danger-ink">*</span>
                 </label>
                 <input
                   type="text"
@@ -571,7 +392,7 @@ export default function EditMapModal({
 
                   {/* Grid Settings */}
                   <div className="border border-moss-green/20 rounded-lg p-4 space-y-4 bg-moss-green/5">
-                    <h3 className="text-sm font-medium text-moss-green">Grid Settings</h3>
+                    <h3 className="text-sm font-medium text-brand-ink">Grid Settings</h3>
 
                     {/* Grid Scale */}
                     <div>
@@ -631,7 +452,7 @@ export default function EditMapModal({
                             className="mt-0.5 accent-moss-green"
                           />
                           <div>
-                            <span className="text-sm text-stone-gray group-hover:text-moss-green transition-colors">
+                            <span className="text-sm text-stone-gray group-hover:text-brand-ink transition-colors">
                               Flat — every square costs the same
                             </span>
                             <p className="text-xs text-stone-gray/50">D&D 5e default</p>
@@ -647,7 +468,7 @@ export default function EditMapModal({
                             className="mt-0.5 accent-moss-green"
                           />
                           <div>
-                            <span className="text-sm text-stone-gray group-hover:text-moss-green transition-colors">
+                            <span className="text-sm text-stone-gray group-hover:text-brand-ink transition-colors">
                               Alternating — 5/10/5/10 ft diagonals
                             </span>
                             <p className="text-xs text-stone-gray/50">Pathfinder 2e default</p>
@@ -669,7 +490,7 @@ export default function EditMapModal({
                       aria-label="Enable dynamic lighting"
                     />
                     <div>
-                      <span className="text-sm text-stone-gray group-hover:text-moss-green transition-colors">
+                      <span className="text-sm text-stone-gray group-hover:text-brand-ink transition-colors">
                         Enable Dynamic Lighting
                       </span>
                       <p className="text-xs text-stone-gray/50">Raycasting visibility — players only see what their tokens can see through walls</p>
@@ -718,13 +539,13 @@ export default function EditMapModal({
 
                   {/* Auto-detect suggestion banner — only shown when image is changed */}
                   {detectedGrid && (
-                    <div className="flex items-start gap-2 p-2.5 bg-amber-50 border border-amber-200 rounded-lg">
-                      <Sparkles className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
+                    <div className="flex items-start gap-2 p-2.5 bg-warning/10 border border-warning/30 rounded-lg">
+                      <Sparkles className="w-4 h-4 text-warning-ink flex-shrink-0 mt-0.5" />
                       <div className="flex-1 min-w-0">
-                        <p className="text-xs font-medium text-amber-800">Grid detected</p>
-                        <p className="text-xs text-amber-700 mt-0.5">
+                        <p className="text-xs font-medium text-warning-ink">Grid detected</p>
+                        <p className="text-xs text-warning-ink mt-0.5">
                           {detectedGrid.width}×{detectedGrid.height} squares · {detectedGrid.gridSize}px/sq
-                          <span className="text-amber-500 ml-1">
+                          <span className="text-warning-ink ml-1">
                             ({Math.round(detectedGrid.confidence * 100)}% confidence)
                           </span>
                         </p>
@@ -733,14 +554,14 @@ export default function EditMapModal({
                         <button
                           type="button"
                           onClick={applyDetectedGrid}
-                          className="text-xs px-2 py-1 bg-amber-600 text-white rounded hover:bg-amber-700 transition-colors"
+                          className="text-xs px-2 py-1 bg-warning text-white rounded hover:bg-warning transition-colors"
                         >
                           Apply
                         </button>
                         <button
                           type="button"
                           onClick={() => setDetectedGrid(null)}
-                          className="text-xs px-2 py-1 text-amber-600 hover:text-amber-800 transition-colors"
+                          className="text-xs px-2 py-1 text-warning-ink hover:text-warning-ink transition-colors"
                           aria-label="Dismiss suggestion"
                         >
                           ✕

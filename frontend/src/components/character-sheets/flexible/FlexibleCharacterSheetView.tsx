@@ -78,7 +78,7 @@ export const FlexibleCharacterSheetView: React.FC<FlexibleCharacterSheetViewProp
             />
           ) : (
             <div className="p-2 rounded-lg bg-moss-green/10">
-              <User className="w-6 h-6 text-moss-green" />
+              <User className="w-6 h-6 text-brand-ink" />
             </div>
           )}
           <div className="min-w-0">

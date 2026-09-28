@@ -7,6 +7,7 @@ import { useState } from 'react';
 import { AlertTriangle, Trash2 } from 'lucide-react';
 import type { Character, Campaign } from '@/types';
 import { Button, Modal } from '@/components/ui';
+import { apiErrorMessage } from '@/utils/errors';
 
 interface DeleteCharacterModalProps {
   isOpen: boolean;
@@ -60,8 +61,8 @@ export default function DeleteCharacterModal({
     try {
       await onConfirm(character.id);
       onClose();
-    } catch (err: any) {
-      setError(err.response?.data?.message || 'Failed to delete character');
+    } catch (err) {
+      setError(apiErrorMessage(err) || 'Failed to delete character');
     } finally {
       setLoading(false);
     }
@@ -124,7 +125,7 @@ export default function DeleteCharacterModal({
                 {!campaign && (
                   <div className="bg-moss-green/10 border border-moss-green/30 rounded-lg p-4">
                     <p className="text-sm text-stone-gray">
-                      Are you sure you want to delete <strong className="text-moss-green">{character.name}</strong>?
+                      Are you sure you want to delete <strong className="text-brand-ink">{character.name}</strong>?
                       This action cannot be undone.
                     </p>
                   </div>
@@ -132,7 +133,7 @@ export default function DeleteCharacterModal({
 
                 {/* Character Info */}
                 <div className="glass-panel p-4">
-                  <h3 className="font-semibold text-moss-green mb-2">Character Details</h3>
+                  <h3 className="font-semibold text-brand-ink mb-2">Character Details</h3>
                   <dl className="space-y-1 text-sm">
                     <div className="flex justify-between">
                       <dt className="text-warm-gray">Name:</dt>

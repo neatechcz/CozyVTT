@@ -7,10 +7,13 @@
 // ============================================
 
 import { useState, useEffect, lazy, Suspense } from 'react';
+import { isCampaignOwner } from '@/utils/campaignRoles';
+import { useAuth } from '@/contexts/AuthContext';
 import { useNavigate } from 'react-router-dom';
 import { CampaignProvider, useCampaign } from '@/contexts/CampaignContext';
 import { WebSocketProvider, useWebSocket } from '@/contexts/WebSocketContext';
 import { useGameStore } from '@/stores/gameStore';
+import { useInitiativeSync } from '@/hooks/useInitiativeSync';
 import {
   ArrowLeft,
   Loader2,
@@ -19,8 +22,7 @@ import {
   PanelLeftClose,
   PanelLeftOpen,
   PanelRightClose,
-  PanelRightOpen,
-} from 'lucide-react';
+  PanelRightOpen, Settings, BookOpen } from 'lucide-react';
 import {
   Group,
   Panel,
@@ -47,6 +49,7 @@ import CreatureLibrary from '@/components/campaign/CreatureLibrary';
 import TokenTemplateLibrary from '@/components/campaign/TokenTemplateLibrary';
 import TokenRoster from '@/components/campaign/TokenRoster';
 import CampaignSettingsModal from '@/components/campaign/CampaignSettingsModal';
+import CampaignDocumentsModal from '@/components/documents/CampaignDocumentsModal';
 import SessionSidebar from '@/components/campaign/SessionSidebar';
 import CampaignMobileLayout from '@/components/campaign/CampaignMobileLayout';
 import SessionToolbar, { type SessionToolKey } from '@/components/campaign/SessionToolbar';
@@ -63,7 +66,25 @@ import Tooltip from '@/components/ui/Tooltip';
 function CampaignPageContent() {
   const navigate = useNavigate();
   const { campaign, currentMap, loading, error, userRole, updateCampaignStatus, setActiveSession, refreshCurrentMap } = useCampaign();
+  const { user } = useAuth();
+
+  /**
+   * Owning a campaign and running it are different things once the DM seat can
+   * move. The owner keeps the powers that are theirs — deleting the campaign,
+   * and taking the seat back — so they need a way into the settings panel even
+   * when somebody else is the DM. Without this, handing the game over left the
+   * campaign with nobody able to delete it: the owner had the permission and no
+   * route to it, the new DM had the route and no permission.
+   */
+  const isOwner = isCampaignOwner(campaign, user?.id);
+  const canOpenSettings = userRole === 'DM' || isOwner;
   const { socket, reconnectCount, status } = useWebSocket();
+
+  // Mirror combat/initiative state into the game store. Owned here rather than
+  // by the initiative panel so both the tracker and the map's active-token
+  // ring read one source, and so the subscription survives the panel being
+  // collapsed or unmounted.
+  useInitiativeSync();
 
   // After a WebSocket reconnect, refetch the current map's state via REST.
   // The real-time stream only pushes deltas; any moves/wall edits/fog ops
@@ -78,11 +99,33 @@ function CampaignPageContent() {
     }
     // refreshCurrentMap is stable enough for this trigger pattern
   }, [reconnectCount]);
+
+  // A player changing their character's token image rewrites the image on every
+  // token bound to that character, server-side — tokens hold their own copy. The
+  // map has to refetch to show it, but only when tokens really changed: this
+  // event also fires for every HP tweak and sheet save.
+  useEffect(() => {
+    if (!socket) return;
+    const handleCharacterUpdated = (data: { tokensChanged?: boolean }) => {
+      if (data?.tokensChanged) refreshCurrentMap();
+    };
+    socket.on('character.updated', handleCharacterUpdated);
+    return () => {
+      socket.off('character.updated', handleCharacterUpdated);
+    };
+    // refreshCurrentMap MUST be a dependency. It is a useCallback keyed on the
+    // campaign and map ids, so its identity changes once they load. Keyed on
+    // `socket` alone this effect would run once and capture the version built
+    // before either existed — whose body returns immediately — and the refresh
+    // would silently never happen. (`socket` is a module singleton, so it never
+    // changes identity and cannot re-trigger this on its own.)
+  }, [socket, refreshCurrentMap]);
   const [isMapManagerOpen, setIsMapManagerOpen] = useState(false);
   const [isTokenManagerOpen, setIsTokenManagerOpen] = useState(false);
   const [isSpiritLayerOpen, setIsSpiritLayerOpen] = useState(false);
   const [isAtmospherePanelOpen, setIsAtmospherePanelOpen] = useState(false);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isDocumentsOpen, setIsDocumentsOpen] = useState(false);
   const [isCreatureLibraryOpen, setIsCreatureLibraryOpen] = useState(false);
   const [isTokenTemplateLibraryOpen, setIsTokenTemplateLibraryOpen] = useState(false);
   const [quickEditToken, setQuickEditToken] = useState<Token | null>(null);
@@ -171,6 +214,11 @@ function CampaignPageContent() {
     socket.onSessionResumed(handleResumed);
 
     return () => {
+      // Through the client, not the raw io instance. The client keeps a registry
+      // so listeners survive a reconnect, and `getSocket().off()` only detaches
+      // from the current instance — the registry entry would survive and be
+      // re-attached on the next reconnect, stacking up four more stale handlers
+      // every time this effect re-ran.
       socket.off('session.started', handleStarted);
       socket.off('session.paused', handlePaused);
       socket.off('session.ended', handleEnded);
@@ -183,7 +231,7 @@ function CampaignPageContent() {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-soft-cream via-parchment to-warm-amber/20">
         <div className="text-center space-y-4">
-          <Loader2 className="w-12 h-12 text-moss-green animate-spin mx-auto" />
+          <Loader2 className="w-12 h-12 text-brand-ink animate-spin mx-auto" />
           <p className="text-stone-gray">Loading campaign...</p>
         </div>
       </div>
@@ -291,9 +339,9 @@ function CampaignPageContent() {
 
           {/* Session status indicator (visible to all) */}
           {campaign.status === CampaignStatus.ACTIVE && (
-            <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-green-500/10 border border-green-500/20">
-              <div className="w-2 h-2 rounded-full bg-green-500 animate-pulse" />
-              <span className="text-xs font-medium text-green-700 hidden sm:inline">Live</span>
+            <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg bg-success/10 border border-success/20">
+              <div className="w-2 h-2 rounded-full bg-success animate-pulse" />
+              <span className="text-xs font-medium text-success-ink hidden sm:inline">Live</span>
             </div>
           )}
           {campaign.status === CampaignStatus.PAUSED && (
@@ -327,6 +375,40 @@ function CampaignPageContent() {
             </div>
           )}
 
+          {/* An owner who has handed the game over keeps two powers — deleting
+              the campaign and taking the seat back — and this is their way to
+              them. It sits here, beside where the DM's own settings gear would
+              be, because that is where somebody goes looking for it; tucked in
+              the sidebar it read as missing. */}
+          {isOwner && userRole !== 'DM' && (
+            <>
+              <div className="h-6 w-px bg-moss-green/20" />
+              <Tooltip content="Owner settings — delete, or take back the DM role" side="bottom">
+                <Button
+                  variant="ghost"
+                  iconOnly
+                  icon={Settings}
+                  aria-label="Owner Settings"
+                  onClick={() => setIsSettingsOpen(true)}
+                />
+              </Tooltip>
+            </>
+          )}
+
+          {/* Documents shared with the campaign. Every member, not just the
+              DM: a rulebook the table is meant to read has to be reachable by
+              the people reading it. */}
+          <div className="h-6 w-px bg-moss-green/20" />
+          <Tooltip content="Campaign documents" side="bottom">
+            <Button
+              variant="ghost"
+              iconOnly
+              icon={BookOpen}
+              aria-label="Campaign documents"
+              onClick={() => setIsDocumentsOpen(true)}
+            />
+          </Tooltip>
+
           {/* Sidebar collapse toggles (all roles) */}
           <div className="hidden h-6 w-px bg-moss-green/20 lg:block" />
           <div className="hidden items-center gap-1 lg:flex">
@@ -339,7 +421,7 @@ function CampaignPageContent() {
                 onClick={() => togglePanel(leftPanelRef, '20%')}
               />
             </Tooltip>
-            <Tooltip content={rightCollapsed ? 'Show session panel' : 'Hide session panel'} side="bottom" align="end">
+            <Tooltip content={rightCollapsed ? 'Show session panel' : 'Hide session panel'} side="bottom">
               <Button
                 variant="ghost"
                 iconOnly
@@ -478,11 +560,21 @@ function CampaignPageContent() {
         />
       )}
 
-      {/* Campaign Settings slide-over panel (DM only) */}
-      {userRole === 'DM' && (
+      {/* Campaign Settings slide-over panel — the DM, or the owner, who sees
+          only the parts that are theirs (see CampaignSettingsModal). */}
+      {canOpenSettings && (
         <CampaignSettingsModal
           isOpen={isSettingsOpen}
           onClose={() => setIsSettingsOpen(false)}
+        />
+      )}
+
+      {campaign?.id && (
+        <CampaignDocumentsModal
+          isOpen={isDocumentsOpen}
+          onClose={() => setIsDocumentsOpen(false)}
+          campaignId={campaign.id}
+          isDM={userRole === 'DM'}
         />
       )}
 

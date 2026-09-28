@@ -159,7 +159,7 @@ beforeEach(() => {
   db.campaign.update.mockResolvedValue({ id: CAMPAIGN_ID, currentMapId: MAP_ID, currentMap: { id: MAP_ID } });
   db.character.findMany.mockResolvedValue([]);
   movementDuringLockWait = null;
-  mockWithCampaignMapRowLock.mockImplementation(async (_prisma: unknown, _campaignId: string, mapId: string, fn: Function) => {
+  mockWithCampaignMapRowLock.mockImplementation(async (_prisma: unknown, _campaignId: string, mapId: string, fn: (...args: unknown[]) => unknown) => {
     if (movementDuringLockWait) stored.tokens[0].position = movementDuringLockWait;
     const campaign = await db.campaign.findUnique({ where: { id: CAMPAIGN_ID } });
     const tx = {
@@ -227,21 +227,21 @@ describe('REST walls and lights', () => {
     expect(tokenEvents(alice)).toEqual([['token.removed', 'goblin']]);
   });
 
-  it('re-syncs after light POST, PATCH, DELETE and PUT', async () => {
+  it('does not reveal tokens through a wall after light POST, PATCH, DELETE or PUT', async () => {
     await request(app).post(`${BASE}/lights`).send(TORCH);
-    expect(tokenEvents(alice)).toEqual([['token.added', 'goblin']]);
+    expect(tokenEvents(alice)).toEqual([]);
 
     alice.emit.mockClear();
     await request(app).patch(`${BASE}/lights/${LIGHT_ID}`).send({ enabled: false });
-    expect(tokenEvents(alice)).toEqual([['token.removed', 'goblin']]);
+    expect(tokenEvents(alice)).toEqual([]);
 
     alice.emit.mockClear();
     await request(app).put(`${BASE}/lights`).send({ lights: [TORCH] });
-    expect(tokenEvents(alice)).toEqual([['token.added', 'goblin']]);
+    expect(tokenEvents(alice)).toEqual([]);
 
     alice.emit.mockClear();
     await request(app).delete(`${BASE}/lights/${LIGHT_ID}`);
-    expect(tokenEvents(alice)).toEqual([['token.removed', 'goblin']]);
+    expect(tokenEvents(alice)).toEqual([]);
   });
 });
 
@@ -404,6 +404,19 @@ describe('difficult terrain', () => {
       mapId: MAP_ID,
       mapData: expect.objectContaining({ difficultTerrain: [{ x: 2, y: 3 }, { x: 9, y: 9 }] }),
     }));
+  });
+
+  it('saves future-map terrain without showing that map to players', async () => {
+    const campaign = { spiritLayerEnabled: false, currentMapId: 'current-map', combatState: null };
+    db.campaign.findUnique.mockResolvedValue(campaign);
+    const res = await request(app).put(`${BASE}/difficult-terrain`).send({ cells: [{ x: 2, y: 3 }] });
+    expect(res.status).toBe(200);
+    expect(stored.difficultTerrain).toEqual([{ x: 2, y: 3 }]);
+    for (const viewer of [dm, alice]) {
+      expect(viewer.emit.mock.calls.filter(([event]) => event === 'map.changed')).toEqual([]);
+    }
+    expect(db.campaign.update).not.toHaveBeenCalled();
+    expect(campaign.currentMapId).toBe('current-map');
   });
 
   it('requires DM and rejects invalid, out-of-map, or oversized cell lists', async () => {

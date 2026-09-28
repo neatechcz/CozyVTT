@@ -116,7 +116,7 @@ describe('seedSrdCreatures', () => {
     const { prisma, rows } = fakePrisma([]);
     const result = await seedSrdCreatures(prisma, async () => [GOBLIN, ORC]);
 
-    expect(result).toEqual({ fetched: 2, created: 2, skipped: 0, alreadyExisted: 0, updatedHp: 0 });
+    expect(result).toEqual({ fetched: 2, created: 2, skipped: 0, alreadyExisted: 0, updated: 0, updatedHp: 0 });
     expect(rows.map((r) => (r.statBlock as { hp: unknown }).hp)).toEqual([
       { average: 7, formula: '2d6' },
       { average: 15, formula: '2d8+6' },
@@ -127,7 +127,7 @@ describe('seedSrdCreatures', () => {
     const { prisma, rows, creatureTemplate } = fakePrisma([existingSrd('g1', GOBLIN), existingSrd('o1', ORC)]);
     const result = await seedSrdCreatures(prisma, async () => [GOBLIN, ORC]);
 
-    expect(result).toEqual({ fetched: 2, created: 0, skipped: 2, alreadyExisted: 2, updatedHp: 2 });
+    expect(result).toEqual({ fetched: 2, created: 0, skipped: 2, alreadyExisted: 2, updated: 2, updatedHp: 2 });
     expect(creatureTemplate.create).not.toHaveBeenCalled();
     expect(rows).toHaveLength(2);
     const goblin = rows.find((r) => r.id === 'g1')!.statBlock as Record<string, unknown>;
@@ -170,7 +170,7 @@ describe('seedSrdCreatures', () => {
     const { prisma, rows } = fakePrisma([existingSrd('g1', GOBLIN)]);
     const result = await seedSrdCreatures(prisma, async () => [GOBLIN, ORC]);
 
-    expect(result).toEqual({ fetched: 2, created: 1, skipped: 1, alreadyExisted: 1, updatedHp: 1 });
+    expect(result).toEqual({ fetched: 2, created: 1, skipped: 1, alreadyExisted: 1, updated: 1, updatedHp: 1 });
     expect(rows.filter((r) => r.name === 'Goblin')).toHaveLength(1);
     expect(rows.filter((r) => r.name === 'Orc')).toHaveLength(1);
   });
@@ -181,7 +181,7 @@ describe('seedSrdCreatures', () => {
     creatureTemplate.update.mockClear();
     const second = await seedSrdCreatures(prisma, async () => [GOBLIN]);
 
-    expect(second).toEqual({ fetched: 1, created: 0, skipped: 1, alreadyExisted: 1, updatedHp: 0 });
+    expect(second).toEqual({ fetched: 1, created: 0, skipped: 1, alreadyExisted: 1, updated: 0, updatedHp: 0 });
     expect(creatureTemplate.update).not.toHaveBeenCalled();
   });
 

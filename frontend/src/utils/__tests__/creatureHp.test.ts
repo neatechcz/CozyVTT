@@ -13,6 +13,10 @@ describe('tokenHpForCreature', () => {
     expect(tokenHpForCreature({ ...base, hp: { average: 7, formula: '2d6' } })).toEqual({ current: 7, max: 7, temp: 0 });
   });
 
+  it('uses upstream hpMax when the nested MCP hp field is absent', () => {
+    expect(tokenHpForCreature({ ...base, hpMax: 15, hitDice: '2d8+6' })).toEqual({ current: 15, max: 15, temp: 0 });
+  });
+
   it('falls back to the default when the creature has no hp', () => {
     expect(DEFAULT_CREATURE_HP).toBe(10);
     expect(tokenHpForCreature(base)).toEqual({ current: 10, max: 10, temp: 0 });

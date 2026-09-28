@@ -10,6 +10,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { isValidEmail } from '@/utils/validation';
 import authService from '@/services/auth.service';
 import Button from '@/components/ui/Button';
+import { apiErrorMessage } from '@/utils/errors';
 
 const RESET_UNAVAILABLE_MESSAGE = 'Password reset is not available. Contact your administrator.';
 
@@ -52,10 +53,10 @@ export default function ForgotPasswordPage() {
         setServerMessage(response.message);
       }
       setSubmitted(true);
-    } catch (err: any) {
+    } catch (err) {
       // The backend always returns 200 for this endpoint to prevent
       // email enumeration — but surface any unexpected errors.
-      const msg = err.response?.data?.message;
+      const msg = apiErrorMessage(err);
       if (msg) {
         setServerMessage(msg);
       }
@@ -71,27 +72,23 @@ export default function ForgotPasswordPage() {
       <main id="main-content" className="glass-panel max-w-md w-full p-8 space-y-6">
 
         {submitted ? (
-          /* Result state */
+          /* Success state */
           <div className="text-center space-y-4">
-            {resetUnavailable ? (
-              <AlertCircle className="w-14 h-14 text-warm-amber mx-auto" aria-hidden="true" />
-            ) : (
-              <CheckCircle className="w-14 h-14 text-moss-green mx-auto" aria-hidden="true" />
-            )}
-            <h1 className="text-2xl font-bold text-moss-green font-heading">
+            {resetUnavailable
+              ? <AlertCircle className="w-14 h-14 text-warning-ink mx-auto" aria-hidden="true" />
+              : <CheckCircle className="w-14 h-14 text-success-ink mx-auto" aria-hidden="true" />}
+            <h1 className="text-2xl font-bold text-brand-ink font-heading">
               {resetUnavailable ? 'Password reset unavailable' : 'Check your inbox'}
             </h1>
             <p className="text-sm text-warm-gray leading-relaxed">
               {serverMessage || 'If an account with that email address exists, we\'ve sent a password reset link. The link expires in 1 hour.'}
             </p>
-            {!resetUnavailable && (
-              <p className="text-xs text-stone-gray/70">
-                Didn't receive it? Check your spam folder, or contact your administrator.
-              </p>
-            )}
+            {!resetUnavailable && <p className="text-xs text-stone-gray/70">
+              Didn't receive it? Check your spam folder, or contact your administrator.
+            </p>}
             <Link
               to="/auth/login"
-              className="inline-flex items-center gap-2 text-sm text-moss-green hover:text-moss-green/80 font-medium transition-colors"
+              className="inline-flex items-center gap-2 text-sm text-brand-ink hover:text-brand-ink/80 font-medium transition-colors"
             >
               <ArrowLeft className="w-4 h-4" aria-hidden="true" />
               Back to Sign In
@@ -102,9 +99,9 @@ export default function ForgotPasswordPage() {
           <>
             <div className="text-center">
               <div className="flex justify-center mb-3">
-                <Mail className="w-10 h-10 text-moss-green/70" aria-hidden="true" />
+                <Mail className="w-10 h-10 text-brand-ink/70" aria-hidden="true" />
               </div>
-              <h1 className="text-2xl font-bold text-moss-green font-heading">Forgot your password?</h1>
+              <h1 className="text-2xl font-bold text-brand-ink font-heading">Forgot your password?</h1>
               <p className="mt-2 text-sm text-warm-gray">
                 Enter your email address and we'll send you a link to reset your password.
               </p>
@@ -112,7 +109,7 @@ export default function ForgotPasswordPage() {
 
             <form onSubmit={handleSubmit} className="space-y-4" noValidate>
               <div>
-                <label htmlFor="email" className="block text-sm font-medium text-moss-green mb-1">
+                <label htmlFor="email" className="block text-sm font-medium text-brand-ink mb-1">
                   Email address
                 </label>
                 <input
@@ -125,7 +122,7 @@ export default function ForgotPasswordPage() {
                     setEmail(e.target.value);
                     setEmailError('');
                   }}
-                  className={`input-cozy w-full ${emailError ? 'border-red-400 focus:ring-red-400' : ''}`}
+                  className={`input-cozy w-full ${emailError ? 'border-danger/60 focus:ring-danger' : ''}`}
                   placeholder="your@email.com"
                   disabled={loading}
                   aria-required="true"
@@ -133,7 +130,7 @@ export default function ForgotPasswordPage() {
                   aria-describedby={emailError ? 'email-error' : undefined}
                 />
                 {emailError && (
-                  <p id="email-error" role="alert" className="mt-1 text-xs text-red-600">{emailError}</p>
+                  <p id="email-error" role="alert" className="mt-1 text-xs text-danger-ink">{emailError}</p>
                 )}
               </div>
 
@@ -159,7 +156,7 @@ export default function ForgotPasswordPage() {
             <div className="text-center">
               <Link
                 to="/auth/login"
-                className="inline-flex items-center gap-1.5 text-sm text-moss-green hover:text-moss-green/80 transition-colors"
+                className="inline-flex items-center gap-1.5 text-sm text-brand-ink hover:text-brand-ink/80 transition-colors"
               >
                 <ArrowLeft className="w-4 h-4" aria-hidden="true" />
                 Back to Sign In
