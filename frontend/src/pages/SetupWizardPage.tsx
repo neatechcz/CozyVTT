@@ -611,6 +611,7 @@ function Step3SystemConfig({ data, setData, fieldErrors }: Step3Props) {
     'Europe/London',
     'Europe/Paris',
     'Europe/Berlin',
+    'Europe/Prague',
     'Asia/Tokyo',
     'Asia/Shanghai',
     'Australia/Sydney',
